@@ -258,6 +258,26 @@ export default function useChatFunctions({
     [],
   );
 
+  /**
+   * Atomically read + reset the one-shot Anthropic 1h prompt-cache TTL arm for
+   * this conversation. Mirrors `drainPendingManualSkills`: the 1h window is
+   * armed per-message via the cache-TTL overlay and must apply to exactly one
+   * submission, so we consume it here and reset the atom.
+   */
+  const drainArmedCacheTTL = useRecoilCallback(
+    ({ snapshot, reset }) =>
+      (convoId: string): '1h' | undefined => {
+        const loadable = snapshot.getLoadable(store.armedCacheTTLByConvoId(convoId));
+        const armed = loadable.state === 'hasValue' ? loadable.contents : null;
+        if (armed === '1h') {
+          reset(store.armedCacheTTLByConvoId(convoId));
+          return '1h';
+        }
+        return undefined;
+      },
+    [],
+  );
+
   const ask: TAskFunction = (
     {
       text,
@@ -355,6 +375,15 @@ export default function useChatFunctions({
         quotes = drainPendingQuotes(conversationId ?? Constants.NEW_CONVO);
       }
     }
+    /**
+     * One-shot 1h prompt-cache TTL: only drained on a fresh compose (never on
+     * regenerate/continue/edit, which replay a prior turn). Rides the payload
+     * top-level like `manualSkills`.
+     */
+    const cacheTTL =
+      isRegenerate || isContinued || isEdited
+        ? undefined
+        : drainArmedCacheTTL(conversationId ?? Constants.NEW_CONVO);
     const isEditOrContinue = isEdited || isContinued;
 
     let currentMessages: TMessage[] = overrideMessages ?? getMessages() ?? [];
@@ -620,6 +649,7 @@ export default function useChatFunctions({
       editedContent,
       addedConvo,
       manualSkills: manualSkills.length > 0 ? manualSkills : undefined,
+      cacheTTL,
     };
 
     if (isRegenerate) {

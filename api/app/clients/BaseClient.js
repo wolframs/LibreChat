@@ -821,6 +821,21 @@ class BaseClient {
       responseMessage.contextMeta = this.contextMeta;
     }
 
+    /**
+     * Record the Anthropic prompt-cache TTL this turn was actually sent to the
+     * API with, so the client's cache-TTL countdown reflects reality on reload/
+     * history. The one-shot 1h arm rides `req.body.cacheTTL` (like `manualSkills`);
+     * `getLLMConfig` only upgrades to 1h when the model supports prompt caching.
+     * Default is Anthropic's 5m ephemeral window.
+     */
+    if (
+      this.options.agent?.provider === EModelEndpoint.anthropic &&
+      this.options.agent?.model_parameters?.promptCache === true
+    ) {
+      responseMessage.cacheTTL =
+        this.options.req?.body?.cacheTTL === '1h' ? '1h' : '5m';
+    }
+
     responseMessage.databasePromise = this.saveMessageToDatabase(
       responseMessage,
       saveOptions,

@@ -131,6 +131,12 @@ export type TPayload = Partial<TMessage> &
     manualSkills?: string[];
     /** Browser IANA timezone (e.g. `America/New_York`) used to resolve local-time prompt variables server-side. */
     timezone?: string;
+    /**
+     * One-shot Anthropic prompt-cache TTL armed for this message from the
+     * cache-TTL overlay ('1h' overrides the conversation's `promptCacheTtl` for one turn).
+     * Read server-side off the request body; not a persisted conversation setting.
+     */
+    cacheTTL?: '5m' | '1h';
   };
 
 export type TEditedContent =
@@ -164,6 +170,8 @@ export type TSubmission = {
   addedConvo?: TConversation;
   /** Skills the user invoked via the `$` popover for this submission. */
   manualSkills?: string[];
+  /** One-shot Anthropic prompt-cache TTL armed for this submission ('1h'). */
+  cacheTTL?: '5m' | '1h';
 };
 
 export type EventSubmission = Omit<TSubmission, 'initialResponse'> & { initialResponse: TMessage };

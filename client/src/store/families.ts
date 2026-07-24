@@ -300,6 +300,18 @@ const pendingQuotesByConvoId = atomFamily<string[], string>({
   default: [],
 });
 
+/**
+ * Per-conversation one-shot arm for the Anthropic 1-hour prompt-cache TTL.
+ * When `'1h'`, the next submission for this conversation is sent with a 1h
+ * cache window (2× cache-write cost); the submit pipeline drains it back to
+ * `null` after one message. The cache-TTL overlay pill reads + toggles this
+ * atom so the armed state is visible and dismissable before sending.
+ */
+const armedCacheTTLByConvoId = atomFamily<'1h' | null, string>({
+  key: 'armedCacheTTLByConvoId',
+  default: null,
+});
+
 const globalAudioURLFamily = atomFamily<string | null, string | number | null>({
   key: 'globalAudioURLByIndex',
   default: null,
@@ -466,5 +478,6 @@ export default {
   showSkillsPopoverFamily,
   pendingManualSkillsByConvoId,
   pendingQuotesByConvoId,
+  armedCacheTTLByConvoId,
   updateConversationSelector,
 };

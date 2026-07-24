@@ -276,6 +276,16 @@ function getLLMConfig(
     }
   }
 
+  /**
+   * One-shot per-message prompt-cache TTL (from `req.body.cacheTTL`, armed via
+   * the cache-TTL overlay pill): overrides the conversation-level
+   * `promptCacheTtl` parameter for this request only, riding the agents SDK's
+   * native `promptCacheTtl` option. Only honored when caching is active.
+   */
+  if (supportsCacheControl && options.cacheTTL != null) {
+    (requestOptions as Record<string, unknown>).promptCacheTtl = options.cacheTTL;
+  }
+
   const headers = getClaudeHeaders(requestOptions.model ?? '', supportsCacheControl);
   if (headers && requestOptions.clientOptions) {
     requestOptions.clientOptions.defaultHeaders = headers;

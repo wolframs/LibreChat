@@ -820,6 +820,14 @@ export const tMessageSchema = z.object({
    */
   manualSkills: z.array(z.string()).optional(),
   /**
+   * Anthropic prompt-cache TTL this assistant turn was actually sent to the
+   * API with. Persisted on the response message and echoed back so the
+   * cache-TTL countdown overlay reflects the real window used for the last
+   * prompt (default '5m'; '1h' when the turn was armed). Absent for
+   * non-Anthropic / non-cached turns.
+   */
+  cacheTTL: z.enum(['5m', '1h']).optional(),
+  /**
    * Skill names auto-primed on this turn because their `always-apply`
    * frontmatter flag is set. Persisted at turn time so the pinned-variant
    * pills on the user bubble survive reload and stay stable across later

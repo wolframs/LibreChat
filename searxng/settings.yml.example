@@ -1,0 +1,53 @@
+# Template for searxng/settings.yml — copy to settings.yml and fill in the
+# secrets. The real file is git-excluded: it holds a live Brave Search API
+# key and the SearXNG secret_key.
+#   cp searxng/settings.yml.example searxng/settings.yml
+# Then: docker compose restart searxng
+
+# SearXNG config for LibreChat web search.
+# Strategy: load defaults, but keep only the "brave" engine, then override it
+# to use Brave's HTTP API (engine: braveapi) instead of the HTML scraper.
+# Result: every query goes Mac -> this container -> Brave Search API.
+
+use_default_settings:
+  engines:
+    keep_only: []      # disable all default engines; we add our own below
+
+general:
+  instance_name: "LibreChat SearXNG"
+  privacypolicy_url: false
+  donation_url: false
+  contact_url: false
+
+server:
+  secret_key: "CHANGEME"
+  limiter: false           # internal docker-only, no public exposure
+  image_proxy: false
+  http_protocol_version: "1.1"
+  bind_address: "0.0.0.0"
+  port: 8080
+
+search:
+  safe_search: 0
+  autocomplete: ""
+  default_lang: "auto"
+  formats:
+    - html
+    - json                 # required by LibreChat
+
+ui:
+  static_use_hash: true
+  default_locale: "en"
+
+engines:
+  # We expose Brave under the name "google" because LibreChat's @librechat/agents
+  # SearXNG client hardcodes `engines=google,bing,duckduckgo` in every request.
+  # Aliasing means LibreChat's requests resolve to Brave's API while only
+  # touching a single, privacy-respecting backend.
+  - name: google
+    engine: braveapi
+    api_key: "CHANGEME"
+    inactive: false
+    shortcut: brv
+    categories: [general, news, web]
+    results_per_page: 20

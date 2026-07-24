@@ -45,6 +45,12 @@ export interface IMessage extends Document {
     encoding?: string;
   };
   attachments?: unknown[];
+  /**
+   * Anthropic prompt-cache TTL this assistant turn was actually sent with
+   * ('5m' | '1h'). Drives the client's live cache-TTL countdown. Absent for
+   * non-Anthropic / non-cached turns.
+   */
+  cacheTTL?: string;
   /** Skills the user invoked manually via the `$` popover on this turn. UI-only metadata for `SkillPills`. */
   manualSkills?: string[];
   /**

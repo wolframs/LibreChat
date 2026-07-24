@@ -23,6 +23,16 @@ export async function initializeAnthropic({
   const { ANTHROPIC_API_KEY, ANTHROPIC_REVERSE_PROXY, PROXY } = process.env;
   const { key: expiresAt } = req.body;
 
+  /**
+   * One-shot per-message prompt-cache TTL armed from the client. Rides the
+   * request body (like other per-turn fields), NOT the persisted conversation
+   * `model_parameters`, so it applies to exactly one message. Validated to the
+   * two values Anthropic supports; anything else falls back to the 5m default.
+   */
+  const rawCacheTTL = (req.body as { cacheTTL?: unknown }).cacheTTL;
+  const cacheTTL: '5m' | '1h' | undefined =
+    rawCacheTTL === '1h' ? '1h' : rawCacheTTL === '5m' ? '5m' : undefined;
+
   let credentials: Record<string, unknown> = {};
   let vertexOptions: { region?: string; projectId?: string } | undefined;
 
@@ -77,6 +87,7 @@ export async function initializeAnthropic({
       user: req.user?.id,
     },
     ...(headers && { headers }),
+    ...(cacheTTL && { cacheTTL }),
     // Pass Vertex AI options if configured
     ...(vertexOptions && { vertexOptions }),
     // Pass full Vertex AI config including model mappings

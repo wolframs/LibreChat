@@ -133,6 +133,14 @@ const messageSchema: Schema<IMessage> = new Schema(
      * shows in history. Runtime skill resolution lives separately on the
      * request body, not on the message itself.
      */
+    /**
+     * Anthropic prompt-cache TTL this assistant turn was actually sent to the
+     * API with ('5m' default or '1h' when armed for the turn). Persisted on the
+     * response message so the client cache-TTL countdown reflects the real
+     * window used for the last prompt, surviving reload/history. Absent for
+     * non-Anthropic or non-cached turns (treated as '5m' by the UI).
+     */
+    cacheTTL: { type: String, default: undefined },
     manualSkills: { type: [String], default: undefined },
     /**
      * Skill names auto-primed on this turn because their frontmatter declares

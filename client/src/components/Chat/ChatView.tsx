@@ -18,6 +18,7 @@ import ConversationStarters from './Input/ConversationStarters';
 import { useGetMessagesByConvoId } from '~/data-provider';
 import ProjectLandingChip from './ProjectLandingChip';
 import MessagesView from './Messages/MessagesView';
+import CacheTTLPill from './CacheTTLPill';
 import Presentation from './Presentation';
 import ChatForm from './Input/ChatForm';
 import Landing from './Landing';
@@ -99,6 +100,7 @@ function ChatView({ index = 0, project }: { index?: number; project?: TChatProje
     <ChatFormProvider {...methods}>
       <ChatContext.Provider value={chatHelpers}>
         <AddedChatContext.Provider value={addedChatHelpers}>
+          <CacheTTLPill />
           <Presentation>
             <div className="relative flex h-full w-full flex-col">
               <Header />

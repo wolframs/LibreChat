@@ -33,6 +33,7 @@ export default function useClearStates() {
           reset(store.showSkillsPopoverFamily(key));
           reset(store.pendingManualSkillsByConvoId(key.toString()));
           reset(store.pendingQuotesByConvoId(key.toString()));
+          reset(store.armedCacheTTLByConvoId(key.toString()));
           /**
            * Pending skill/quote queues are keyed by the conversation id the
            * composer wrote under, not this UI index — also clear by the resolved
@@ -43,6 +44,7 @@ export default function useClearStates() {
           if (convoId != null) {
             reset(store.pendingManualSkillsByConvoId(convoId));
             reset(store.pendingQuotesByConvoId(convoId));
+            reset(store.armedCacheTTLByConvoId(convoId));
           }
           reset(store.activePromptByIndex(key));
           reset(store.globalAudioURLFamily(key));
