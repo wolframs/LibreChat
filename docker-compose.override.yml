@@ -1,0 +1,81 @@
+# Local-only overrides — never modify docker-compose.yml directly.
+# - Remap host port 13080 -> container 3080 (Tailscale clients hit :13080).
+# - Mount our librechat.yaml for the Ollama custom endpoint.
+# - Restart everything unless explicitly stopped, so the stack survives reboots.
+
+services:
+  # Nginx fronts the api container, listens externally on 13080,
+  # injects the Aleo font (self-hosted) into every HTML response,
+  # and rewrites Inter → Aleo in bundled CSS.
+  nginx:
+    image: nginx:alpine
+    container_name: librechat-nginx
+    ports:
+      - "13080:80"
+    volumes:
+      - ./nginx/default.conf:/etc/nginx/conf.d/default.conf:ro
+      - ./nginx/fonts:/etc/nginx/fonts:ro
+    depends_on:
+      - api
+    restart: unless-stopped
+
+  api:
+    # Build from this repo's source (upstream main + local feature edits) instead of
+    # pulling the prebuilt registry image. Tagged separately so the registry tag
+    # stays untouched for easy rollback.
+    image: librechat-fork:local
+    build:
+      context: .
+      dockerfile: Dockerfile
+    ports: !reset []
+    volumes:
+      - type: bind
+        source: ./librechat.yaml
+        target: /app/librechat.yaml
+      # NOTE (2026-07-07, upstream sync to ~v0.8.6): the former patch bind-mounts were
+      # removed as obsolete now that the image is built from this repo's source:
+      # - patches/tx.cjs / tx.es.js — upstream packages/data-schemas/src/methods/tx.ts
+      #   now prices claude-opus-4-8 / claude-fable-5 / claude-sonnet-5 natively
+      #   (identical values), so the rate-table override is no longer needed.
+      # - patches/agents/* (cache-TTL threading) — @librechat/agents >= 3.2.57 supports
+      #   `promptCacheTtl` natively; the per-message cache-TTL feature now rides that
+      #   option from packages/api source instead of patched node_modules files.
+    restart: unless-stopped
+
+  # Not part of this deployment. Without a profile, a bare `docker compose up -d` tries to
+  # start it, and it fails the whole command by binding host :3000 (already taken here).
+  # Opt in explicitly if ever needed: docker compose --profile admin up -d admin-panel
+  admin-panel:
+    profiles: ["admin"]
+
+  mongodb:
+    restart: unless-stopped
+
+  meilisearch:
+    restart: unless-stopped
+
+  rag_api:
+    restart: unless-stopped
+
+  vectordb:
+    restart: unless-stopped
+
+  # Tiny Flask dashboard that reads MongoDB `transactions` and renders a cost page.
+  # Internal-only; served at /cost via nginx.
+  cost-dashboard:
+    build: ./cost-dashboard
+    container_name: cost-dashboard
+    environment:
+      - MONGO_URI=mongodb://mongodb:27017/LibreChat
+    depends_on:
+      - mongodb
+    restart: unless-stopped
+
+  # Self-hosted SearXNG metasearch, configured to use only the Brave Search API.
+  # Internal-only: no host port. The api container reaches it via http://searxng:8080
+  searxng:
+    image: searxng/searxng:latest
+    container_name: searxng
+    volumes:
+      - ./searxng/settings.yml:/etc/searxng/settings.yml:ro
+    restart: unless-stopped
