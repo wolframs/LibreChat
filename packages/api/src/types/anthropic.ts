@@ -103,7 +103,8 @@ export interface AnthropicConfigOptions {
    * One-shot Anthropic prompt-cache TTL for this request, armed per-message from
    * the client ('1h' extends the ephemeral cache window from the 5m default to
    * 1h at 2× cache-write cost). Only honored when the model supports prompt
-   * caching; threaded into the agents-layer `cache_control` injection.
+   * caching; overrides the conversation-level `promptCacheTtl` model parameter
+   * for this request via the agents SDK's native `promptCacheTtl` option.
    */
   cacheTTL?: '5m' | '1h';
 }

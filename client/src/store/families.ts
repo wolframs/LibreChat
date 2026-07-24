@@ -307,7 +307,7 @@ const pendingQuotesByConvoId = atomFamily<string[], string>({
  * `null` after one message. The cache-TTL overlay pill reads + toggles this
  * atom so the armed state is visible and dismissable before sending.
  */
-const armedCacheTTLByConvoId = atomFamily<'1h' | null, string>({
+const armedCacheTTLByConvoId = atomFamily<'5m' | '1h' | null, string>({
   key: 'armedCacheTTLByConvoId',
   default: null,
 });

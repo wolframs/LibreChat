@@ -266,12 +266,12 @@ export default function useChatFunctions({
    */
   const drainArmedCacheTTL = useRecoilCallback(
     ({ snapshot, reset }) =>
-      (convoId: string): '1h' | undefined => {
+      (convoId: string): '5m' | '1h' | undefined => {
         const loadable = snapshot.getLoadable(store.armedCacheTTLByConvoId(convoId));
         const armed = loadable.state === 'hasValue' ? loadable.contents : null;
-        if (armed === '1h') {
+        if (armed === '1h' || armed === '5m') {
           reset(store.armedCacheTTLByConvoId(convoId));
-          return '1h';
+          return armed;
         }
         return undefined;
       },

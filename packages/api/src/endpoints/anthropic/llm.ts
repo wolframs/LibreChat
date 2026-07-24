@@ -270,10 +270,14 @@ function getLLMConfig(
   /** Pass promptCache boolean for downstream cache_control application */
   if (supportsCacheControl) {
     (requestOptions as Record<string, unknown>).promptCache = true;
-    /** Pass an explicit TTL when configured; otherwise the agents SDK defaults to 1h */
-    if (systemOptions.promptCacheTtl != null) {
-      (requestOptions as Record<string, unknown>).promptCacheTtl = systemOptions.promptCacheTtl;
-    }
+    /**
+     * Always pass an explicit TTL: when unset, default to '5m' (Anthropic's
+     * standard TTL, 1.25x cache-write cost) instead of letting the agents SDK
+     * fall back to '1h' (2x cache-write cost). 1h is opt-in via the
+     * conversation `promptCacheTtl` parameter or the one-shot pill arm below.
+     */
+    (requestOptions as Record<string, unknown>).promptCacheTtl =
+      systemOptions.promptCacheTtl ?? '5m';
   }
 
   /**

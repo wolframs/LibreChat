@@ -824,16 +824,25 @@ class BaseClient {
     /**
      * Record the Anthropic prompt-cache TTL this turn was actually sent to the
      * API with, so the client's cache-TTL countdown reflects reality on reload/
-     * history. The one-shot 1h arm rides `req.body.cacheTTL` (like `manualSkills`);
-     * `getLLMConfig` only upgrades to 1h when the model supports prompt caching.
-     * Default is Anthropic's 5m ephemeral window.
+     * history. Effective TTL precedence mirrors the request path: the one-shot
+     * arm on `req.body.cacheTTL` (like `manualSkills`) → the conversation's
+     * `promptCacheTtl` model parameter → '5m' (the fork's explicit default in
+     * getLLMConfig, matching Anthropic's standard TTL; overrides the agents
+     * SDK's 1h fallback). `promptCache` defaults to true when unset
+     * (`anthropicSettings.promptCache.default`), hence the `!== false` gate.
      */
     if (
       this.options.agent?.provider === EModelEndpoint.anthropic &&
-      this.options.agent?.model_parameters?.promptCache === true
+      this.options.agent?.model_parameters?.promptCache !== false
     ) {
+      const oneShotTTL = this.options.req?.body?.cacheTTL;
+      const convoTTL = this.options.agent?.model_parameters?.promptCacheTtl;
       responseMessage.cacheTTL =
-        this.options.req?.body?.cacheTTL === '1h' ? '1h' : '5m';
+        oneShotTTL === '1h' || oneShotTTL === '5m'
+          ? oneShotTTL
+          : convoTTL === '1h' || convoTTL === '5m'
+            ? convoTTL
+            : '5m';
     }
 
     responseMessage.databasePromise = this.saveMessageToDatabase(
