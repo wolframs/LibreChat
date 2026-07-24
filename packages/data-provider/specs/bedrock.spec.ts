@@ -393,15 +393,18 @@ describe('omitsSamplingParameters', () => {
 });
 
 describe('requiresExplicitThinkingDisabled', () => {
-  test('returns true for Sonnet 5+ (omitted thinking runs adaptive by default)', () => {
+  test('returns true for Sonnet 5+ and Opus 5+ (omitted thinking runs adaptive by default)', () => {
     expect(requiresExplicitThinkingDisabled('claude-sonnet-5')).toBe(true);
     expect(requiresExplicitThinkingDisabled('claude-sonnet-5-20260101')).toBe(true);
     expect(requiresExplicitThinkingDisabled('anthropic.claude-sonnet-5')).toBe(true);
     expect(requiresExplicitThinkingDisabled('claude-sonnet-9')).toBe(true);
+    expect(requiresExplicitThinkingDisabled('claude-opus-5')).toBe(true);
+    expect(requiresExplicitThinkingDisabled('anthropic.claude-opus-5')).toBe(true);
+    expect(requiresExplicitThinkingDisabled('claude-opus-9')).toBe(true);
   });
 
-  test('returns false for pre-5 Sonnet, Opus, and Mythos-class models', () => {
-    // Opus 4.7+ omit -> off; Fable/Mythos reject an explicit disabled config (400)
+  test('returns false for pre-5 Sonnet, pre-5 Opus, and Mythos-class models', () => {
+    // Opus 4.7/4.8 omit -> off; Fable/Mythos reject an explicit disabled config (400)
     expect(requiresExplicitThinkingDisabled('claude-sonnet-4-6')).toBe(false);
     expect(requiresExplicitThinkingDisabled('claude-opus-4-8')).toBe(false);
     expect(requiresExplicitThinkingDisabled('claude-fable-5')).toBe(false);

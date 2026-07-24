@@ -179,17 +179,25 @@ export function omitsSamplingParameters(model: string): boolean {
  * Whether disabling thinking requires sending an explicit `{ type: 'disabled' }`
  * config rather than simply omitting the `thinking` field.
  *
- * Sonnet 5 treats an omitted `thinking` field as adaptive thinking ON by
- * default, so honoring a user who turns thinking off means sending the disabled
- * config explicitly. Opus 4.7+ run without thinking when the field is omitted,
- * and Fable/Mythos reject an explicit disabled config (400, thinking always
- * on), so both are excluded.
+ * Sonnet 5 and Opus 5 treat an omitted `thinking` field as adaptive thinking ON
+ * by default, so honoring a user who turns thinking off means sending the
+ * disabled config explicitly. Opus 4.7/4.8 run without thinking when the field
+ * is omitted, and Fable/Mythos reject an explicit disabled config (400,
+ * thinking always on), so both are excluded.
+ *
+ * Note: on Opus 5 a disabled config is only accepted at effort `high` or below
+ * (400 at `xhigh`/`max`). The caller returns early on this branch without
+ * attaching `output_config.effort`, so the two never ship together.
  *
  * See https://platform.claude.com/docs/en/about-claude/models/migration-guide#migrating-to-claude-sonnet-5
  */
 export function requiresExplicitThinkingDisabled(model: string): boolean {
   const sonnet = parseSonnetVersion(model);
-  return sonnet != null && sonnet.major >= 5;
+  if (sonnet != null && sonnet.major >= 5) {
+    return true;
+  }
+  const opus = parseOpusVersion(model);
+  return opus != null && opus.major >= 5;
 }
 
 /** Checks if a model has a 1M context window (Sonnet 4.6+, Opus 4.6+, Opus 5+, Fable/Mythos) */
