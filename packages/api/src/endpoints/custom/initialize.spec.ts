@@ -66,6 +66,11 @@ function createParams(overrides: {
       apiKey: overrides.userApiKey ?? 'sk-user-key',
       baseURL: overrides.userBaseURL ?? 'https://user-api.example.com/v1',
     }),
+    /** Endpoint-profile lookup. Rejects the way the real method does when the
+     *  user has no stored key, which is the default for these cases. */
+    getUserKey: jest
+      .fn()
+      .mockRejectedValue(new Error(JSON.stringify({ type: ErrorTypes.NO_USER_KEY }))),
   } as unknown as BaseInitializeParams['db'];
 
   return {

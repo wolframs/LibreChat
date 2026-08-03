@@ -2,10 +2,16 @@ import { useMemo } from 'react';
 import { VisuallyHidden } from '@ariakit/react';
 import { Spinner, TooltipAnchor } from '@librechat/client';
 import { CheckCircle2, MousePointerClick, SettingsIcon } from 'lucide-react';
-import { EModelEndpoint, isAgentsEndpoint, isAssistantsEndpoint } from 'librechat-data-provider';
+import {
+  EModelEndpoint,
+  getEndpointField,
+  isAgentsEndpoint,
+  isAssistantsEndpoint,
+} from 'librechat-data-provider';
 import type { TModelSpec } from 'librechat-data-provider';
 import type { Endpoint } from '~/common';
 import { CustomMenu as Menu, CustomMenuItem as MenuItem, CustomMenuSeparator } from '../CustomMenu';
+import EndpointProfileItems, { EndpointProfileBadge } from './EndpointProfileItems';
 import MarketplaceItem, { marketplaceSearchMatches } from './Marketplace';
 import { filterModels, shouldRenderEndpointOption } from '../utils';
 import { useModelSelectorContext } from '../ModelSelectorContext';
@@ -90,9 +96,11 @@ const SettingsButton = ({
 function EndpointMenuContent({
   endpoint,
   endpointIndex,
+  supportsCustomBaseURL,
 }: {
   endpoint: Endpoint;
   endpointIndex: number;
+  supportsCustomBaseURL: boolean;
 }) {
   const localize = useLocalize();
   const { agentsMap, assistantsMap, modelSpecs, selectedValues, endpointSearchValues } =
@@ -135,6 +143,9 @@ function EndpointMenuContent({
 
   return (
     <>
+      {/* Ahead of the model list, and only when the user searched for nothing —
+          a search is about finding a model, not switching endpoints. */}
+      {supportsCustomBaseURL && !searchValue && <EndpointProfileItems endpoint={endpoint.value} />}
       {showMarketplace && <MarketplaceItem label={localize('com_agents_marketplace')} />}
       {showMarketplace && hasSelectableRows && <CustomMenuSeparator />}
       {endpointSpecs.map((spec: TModelSpec) => (
@@ -152,6 +163,7 @@ export function EndpointItem({ endpoint, endpointIndex }: EndpointItemProps) {
   const localize = useLocalize();
   const {
     selectedValues,
+    endpointsConfig,
     handleOpenKeyDialog,
     handleSelectEndpoint,
     endpointSearchValues,
@@ -166,6 +178,19 @@ export function EndpointItem({ endpoint, endpointIndex }: EndpointItemProps) {
     [endpointRequiresUserKey, endpoint.value],
   );
 
+  const supportsCustomBaseURL =
+    getEndpointField(endpointsConfig, endpoint.value, 'supportsCustomBaseURL') === true;
+
+  const isEndpointSelected = !selectedSpec && selectedEndpoint === endpoint.value;
+
+  /** Only the provider in use gets a badge: it answers "where is this chat
+   *  actually going?", which is meaningless for rows you aren't using. */
+  const showProfileBadge = supportsCustomBaseURL && isEndpointSelected;
+
+  /** The gear is the only way to reach endpoint settings, so it must appear for
+   *  providers that support custom base URLs even when the key is admin-set. */
+  const showSettings = isUserProvided || supportsCustomBaseURL;
+
   const isAssistantsNotLoaded =
     isAssistantsEndpoint(endpoint.value) && endpoint.models === undefined;
 
@@ -177,10 +202,9 @@ export function EndpointItem({ endpoint, endpointIndex }: EndpointItemProps) {
         </div>
       )}
       <span className="truncate text-left">{endpoint.label}</span>
+      {showProfileBadge && <EndpointProfileBadge endpoint={endpoint.value} />}
     </div>
   );
-
-  const isEndpointSelected = !selectedSpec && selectedEndpoint === endpoint.value;
 
   if (!shouldRenderEndpointOption(endpoint)) {
     return null;
@@ -204,7 +228,7 @@ export function EndpointItem({ endpoint, endpointIndex }: EndpointItemProps) {
           <div className="group flex w-full min-w-0 items-center justify-between gap-1.5 py-1 text-sm">
             {renderIconLabel()}
             <div className="flex shrink-0 items-center gap-1">
-              {isUserProvided && (
+              {showSettings && (
                 <SettingsButton endpoint={endpoint} handleOpenKeyDialog={handleOpenKeyDialog} />
               )}
               {isEndpointSelected && (
@@ -217,7 +241,11 @@ export function EndpointItem({ endpoint, endpointIndex }: EndpointItemProps) {
           </div>
         }
       >
-        <EndpointMenuContent endpoint={endpoint} endpointIndex={endpointIndex} />
+        <EndpointMenuContent
+          endpoint={endpoint}
+          endpointIndex={endpointIndex}
+          supportsCustomBaseURL={supportsCustomBaseURL}
+        />
       </Menu>
     );
   } else {
@@ -231,7 +259,7 @@ export function EndpointItem({ endpoint, endpointIndex }: EndpointItemProps) {
       >
         {renderIconLabel()}
         <div className="flex shrink-0 items-center gap-2">
-          {endpointRequiresUserKey(endpoint.value) && (
+          {showSettings && (
             <SettingsButton endpoint={endpoint} handleOpenKeyDialog={handleOpenKeyDialog} />
           )}
           {isAssistantsNotLoaded && (

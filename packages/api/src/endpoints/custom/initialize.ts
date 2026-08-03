@@ -15,6 +15,7 @@ import type {
   AnthropicModelOptions,
 } from '~/types';
 import { getLLMConfig as getAnthropicLLMConfig } from '~/endpoints/anthropic/llm';
+import { getUserKeyValuesSafe, resolveUserEndpoint } from '~/endpoints/profiles';
 import { extractDefaultParams } from '~/endpoints/openai/llm';
 import { isUserProvided, checkUserKeyExpiry } from '~/utils';
 import { getOpenAIConfig } from '~/endpoints/openai/config';
@@ -44,6 +45,13 @@ export function getTokenConfigKey(
   endpoint: string,
   userId: string,
   tenantId?: string | null,
+  /**
+   * Forces user scoping regardless of admin config. Set when an endpoint
+   * profile supplied the base URL: the model fetch then resolves per user even
+   * though the yaml declares a fixed URL, so a shared cache key would leak one
+   * user's token config to everyone else on the endpoint.
+   */
+  forceUserScope = false,
 ): string {
   const hasTokenConfig = endpointConfig.tokenConfig != null;
   if (hasTokenConfig) {
@@ -55,7 +63,7 @@ export function getTokenConfigKey(
   const willForwardUserScopedHeaders = !!endpointConfig?.headers && !userProvidesURL;
   const tenantScope = getTenantTokenScope(tenantId);
 
-  if (userProvidesKey || userProvidesURL || willForwardUserScopedHeaders) {
+  if (forceUserScope || userProvidesKey || userProvidesURL || willForwardUserScopedHeaders) {
     return tenantScope
       ? getScopedTokenConfigKey('tenant-user', [tenantScope, endpoint, userId])
       : `${endpoint}:${userId}`;
@@ -217,8 +225,27 @@ export async function initializeCustom({
     userValues = await db.getUserKeyValues({ userId: req.user?.id ?? '', name: endpoint });
   }
 
-  const apiKey = userProvidesKey || userProvidesURL ? userValues?.apiKey : CUSTOM_API_KEY;
-  const baseURL = userProvidesURL ? userValues?.baseURL : CUSTOM_BASE_URL;
+  /**
+   * Endpoint profiles apply even to endpoints whose yaml pins both key and URL,
+   * so read the blob when the credential path above didn't already.
+   */
+  const profileValues =
+    userValues ??
+    (await getUserKeyValuesSafe({ db, userId: req.user?.id ?? '', name: endpoint }));
+
+  const resolved = await resolveUserEndpoint({
+    userValues: profileValues,
+    fallbackApiKey: userProvidesKey || userProvidesURL ? userValues?.apiKey : CUSTOM_API_KEY,
+    fallbackBaseURL: userProvidesURL ? userValues?.baseURL : CUSTOM_BASE_URL,
+    fallbackURLIsUserProvided: userProvidesURL,
+    endpoint,
+    allowedAddresses: appConfig?.endpoints?.allowedAddresses,
+  });
+
+  const apiKey = resolved.apiKey;
+  const baseURL = resolved.baseURL;
+  /** True for a `user_provided` yaml URL *or* an active profile URL. */
+  const urlIsUserProvided = resolved.baseURLIsUserProvided;
 
   if ((userProvidesKey || userProvidesURL) && !apiKey) {
     throw new Error(
@@ -244,7 +271,9 @@ export async function initializeCustom({
     throw new Error(`${endpoint} Base URL not provided.`);
   }
 
-  if (userProvidesURL) {
+  /** Profile URLs are already validated by `resolveUserEndpoint`; this covers
+   *  the `user_provided` yaml path. */
+  if (userProvidesURL && !resolved.activeProfile) {
     await validateEndpointURL(baseURL, endpoint, appConfig?.endpoints?.allowedAddresses);
   }
 
@@ -255,7 +284,13 @@ export async function initializeCustom({
 
   const cache = tokenConfigCache();
   const hasTokenConfig = endpointConfig.tokenConfig != null;
-  const tokenKey = getTokenConfigKey(endpointConfig, endpoint, userId, tenantId);
+  const tokenKey = getTokenConfigKey(
+    endpointConfig,
+    endpoint,
+    userId,
+    tenantId,
+    !!resolved.activeProfile,
+  );
 
   if (hasTokenConfig) {
     /** A static override is authoritative — use it for the agent's billing
@@ -281,7 +316,7 @@ export async function initializeCustom({
     await fetchModels({
       apiKey,
       baseURL,
-      baseURLIsUserProvided: userProvidesURL,
+      baseURLIsUserProvided: urlIsUserProvided,
       allowedAddresses: appConfig?.endpoints?.allowedAddresses,
       name: endpoint,
       user: userId,
@@ -291,7 +326,7 @@ export async function initializeCustom({
       // header overrides when the base URL is user-supplied — configured
       // templates like {{LIBRECHAT_OPENID_ID_TOKEN}} would otherwise resolve
       // and leak the user's identity token to a destination the user controls.
-      headers: userProvidesURL ? undefined : endpointConfig.headers,
+      headers: urlIsUserProvided ? undefined : endpointConfig.headers,
       // Note: when both `headers` and `userObject` are supplied below, the
       // MODEL_QUERIES cache inside `fetchModels` is automatically skipped,
       // which prevents a per-user filtered model list from leaking across
@@ -305,12 +340,12 @@ export async function initializeCustom({
     endpointConfig,
     appConfig,
     endpointTokenConfig,
-    !userProvidesURL,
+    !urlIsUserProvided,
   );
 
   const clientOptions: Record<string, unknown> = {
     reverseProxyUrl: baseURL ?? null,
-    baseURLIsUserProvided: userProvidesURL,
+    baseURLIsUserProvided: urlIsUserProvided,
     allowedAddresses: appConfig?.endpoints?.allowedAddresses,
     proxy: PROXY ?? null,
     ...customOptions,
@@ -328,7 +363,7 @@ export async function initializeCustom({
       baseURL,
       modelOptions: modelOptions as AnthropicModelOptions,
       endpointConfig,
-      userProvidesURL,
+      userProvidesURL: urlIsUserProvided,
       allowedAddresses: appConfig?.endpoints?.allowedAddresses,
     });
     options.endpointTokenConfig = endpointTokenConfig;

@@ -13,6 +13,7 @@ export enum QueryKeys {
   models = 'models',
   balance = 'balance',
   endpoints = 'endpoints',
+  endpointProfiles = 'endpointProfiles',
   tokenConfig = 'tokenConfig',
   presets = 'presets',
   searchResults = 'searchResults',

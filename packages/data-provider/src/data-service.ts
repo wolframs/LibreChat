@@ -172,6 +172,20 @@ export const register = (payload: t.TRegisterUser) => {
 export const userKeyQuery = (name: string): Promise<t.TCheckUserKeyResponse> =>
   request.get(endpoints.userKeyQuery(name));
 
+/** Endpoint profiles for one provider. API keys come back masked. */
+export const endpointProfilesQuery = (name: string): Promise<t.TEndpointProfilesResponse> =>
+  request.get(endpoints.endpointProfiles(name));
+
+/**
+ * Replaces the profile set for one provider. Omitting a profile's `apiKey`
+ * keeps the key already stored for that id, so a base URL can be edited without
+ * the browser ever holding the key.
+ */
+export const updateEndpointProfiles = (
+  payload: t.TUpdateEndpointProfilesRequest,
+): Promise<t.TUpdateEndpointProfilesResponse> =>
+  request.put(endpoints.updateEndpointProfiles(), payload);
+
 export const getLoginGoogle = () => {
   return request.get(endpoints.loginGoogle());
 };

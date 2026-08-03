@@ -31,9 +31,24 @@ module.exports = {
     openAIApiKey,
     azureOpenAIApiKey,
     userProvidedOpenAI,
-    [EModelEndpoint.anthropic]: generateConfig(anthropicUsesVertex ? 'true' : anthropicApiKey),
-    [EModelEndpoint.openAI]: generateConfig(openAIApiKey, OPENAI_REVERSE_PROXY),
-    [EModelEndpoint.azureOpenAI]: generateConfig(azureOpenAIApiKey, AZURE_OPENAI_BASEURL),
+    /** Endpoint is passed so these advertise `supportsCustomBaseURL` to the UI.
+     *  Withheld on the Vertex path, which carries its own endpoint and auth and
+     *  so cannot be redirected by a user endpoint profile. */
+    [EModelEndpoint.anthropic]: generateConfig(
+      anthropicUsesVertex ? 'true' : anthropicApiKey,
+      undefined,
+      anthropicUsesVertex ? undefined : EModelEndpoint.anthropic,
+    ),
+    [EModelEndpoint.openAI]: generateConfig(
+      openAIApiKey,
+      OPENAI_REVERSE_PROXY,
+      EModelEndpoint.openAI,
+    ),
+    [EModelEndpoint.azureOpenAI]: generateConfig(
+      azureOpenAIApiKey,
+      AZURE_OPENAI_BASEURL,
+      EModelEndpoint.azureOpenAI,
+    ),
     [EModelEndpoint.assistants]: generateConfig(
       assistantsApiKey,
       ASSISTANTS_BASE_URL,

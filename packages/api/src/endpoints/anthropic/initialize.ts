@@ -1,6 +1,7 @@
 import { EModelEndpoint, AuthKeys } from 'librechat-data-provider';
 import type { BaseInitializeParams, InitializeResultBase, AnthropicConfigOptions } from '~/types';
 import { loadAnthropicVertexCredentials, getVertexCredentialOptions } from './vertex';
+import { getUserKeyValuesSafe, resolveUserEndpoint } from '~/endpoints/profiles';
 import { checkUserKeyExpiry, isEnabled, mergeHeaders } from '~/utils';
 import { getLLMConfig } from './llm';
 
@@ -35,6 +36,11 @@ export async function initializeAnthropic({
 
   let credentials: Record<string, unknown> = {};
   let vertexOptions: { region?: string; projectId?: string } | undefined;
+  /** Resolved base URL for this request; the env reverse proxy unless a user
+   *  endpoint profile overrides it. Stays undefined on the Vertex path, which
+   *  carries its own endpoint and auth. */
+  let resolvedBaseURL: string | undefined = ANTHROPIC_REVERSE_PROXY ?? undefined;
+  let baseURLIsUserProvided = false;
 
   /** @type {undefined | import('librechat-data-provider').TVertexAIConfig} */
   const vertexConfig = appConfig?.endpoints?.[EModelEndpoint.anthropic]?.vertexConfig;
@@ -59,11 +65,27 @@ export async function initializeAnthropic({
   } else {
     const isUserProvided = ANTHROPIC_API_KEY === 'user_provided';
 
-    const anthropicApiKey = isUserProvided
-      ? await db.getUserKey({ userId: req.user?.id ?? '', name: EModelEndpoint.anthropic })
-      : ANTHROPIC_API_KEY;
+    /**
+     * Read unconditionally rather than only when the key is user-provided: an
+     * endpoint profile may point at a gateway even on a deployment where the
+     * admin supplies `ANTHROPIC_API_KEY`. Returns null when no key is stored,
+     * and tolerates the bare-string blobs this endpoint historically wrote.
+     */
+    const userValues = await getUserKeyValuesSafe({
+      db,
+      userId: req.user?.id ?? '',
+      name: EModelEndpoint.anthropic,
+    });
 
-    if (!anthropicApiKey) {
+    const resolved = await resolveUserEndpoint({
+      userValues,
+      fallbackApiKey: isUserProvided ? userValues?.apiKey : ANTHROPIC_API_KEY,
+      fallbackBaseURL: ANTHROPIC_REVERSE_PROXY,
+      endpoint: EModelEndpoint.anthropic,
+      allowedAddresses: appConfig?.endpoints?.allowedAddresses,
+    });
+
+    if (!resolved.apiKey) {
       throw new Error('Anthropic API key not provided. Please provide it again.');
     }
 
@@ -71,17 +93,29 @@ export async function initializeAnthropic({
       checkUserKeyExpiry(expiresAt, EModelEndpoint.anthropic);
     }
 
-    credentials[AuthKeys.ANTHROPIC_API_KEY] = anthropicApiKey;
+    credentials[AuthKeys.ANTHROPIC_API_KEY] = resolved.apiKey;
+    resolvedBaseURL = resolved.baseURL;
+    baseURLIsUserProvided = resolved.baseURLIsUserProvided;
   }
 
   const anthropicConfig = appConfig?.endpoints?.[EModelEndpoint.anthropic];
   const allConfig = appConfig?.endpoints?.all;
 
-  const headers = mergeHeaders(allConfig?.headers, anthropicConfig?.headers);
+  /**
+   * Withhold configured headers when the destination is user-chosen — they may
+   * carry `${SECRET}` gateway values or user/OpenID token placeholders resolved
+   * later by `resolveConfigHeaders`, which must not reach a user-controlled
+   * endpoint. Mirrors the same guard in `initializeOpenAI`.
+   */
+  const headers = baseURLIsUserProvided
+    ? undefined
+    : mergeHeaders(allConfig?.headers, anthropicConfig?.headers);
 
   const clientOptions: AnthropicConfigOptions = {
     proxy: PROXY ?? undefined,
-    reverseProxyUrl: ANTHROPIC_REVERSE_PROXY ?? undefined,
+    reverseProxyUrl: resolvedBaseURL,
+    baseURLIsUserProvided,
+    allowedAddresses: appConfig?.endpoints?.allowedAddresses,
     modelOptions: {
       ...(model_parameters ?? {}),
       user: req.user?.id,

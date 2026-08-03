@@ -44,6 +44,11 @@ const DialogManager = ({
             keyDialogEndpoint,
             'userProvideBearerToken',
           )}
+          supportsCustomBaseURL={getEndpointField(
+            endpointsConfig,
+            keyDialogEndpoint,
+            'supportsCustomBaseURL',
+          )}
         />
       )}
     </>

@@ -448,6 +448,65 @@ export type TSearchResults = {
   filter: object;
 };
 
+/**
+ * One user-defined alternate inference endpoint ("OpenAI-compatible" base URL)
+ * for a provider, stored inside that provider's encrypted user-key blob.
+ * `apiKey` is only ever present server-side — the read-back route masks it.
+ */
+export type TEndpointProfile = {
+  id: string;
+  name: string;
+  baseURL: string;
+  apiKey?: string;
+};
+
+/** The `default` profile is the admin/env-configured base URL, not a stored row. */
+export const DEFAULT_ENDPOINT_PROFILE_ID = 'default';
+
+/**
+ * Profile set for a single provider. Lives under `endpointProfiles` in the
+ * user-key blob; a blob without this field behaves exactly as before, which is
+ * what keeps existing stored keys working.
+ */
+export type TUserEndpointProfiles = {
+  /** `'default'` (or absent) means "use the admin/env base URL". */
+  active?: string;
+  profiles?: TEndpointProfile[];
+};
+
+/** Profile as returned to the browser: never carries the key itself. */
+export type TMaskedEndpointProfile = Omit<TEndpointProfile, 'apiKey'> & {
+  hasApiKey: boolean;
+  /** Last few characters of the stored key, for recognition only. */
+  apiKeyHint?: string;
+};
+
+export type TEndpointProfilesResponse = {
+  active: string;
+  profiles: TMaskedEndpointProfile[];
+  /** The admin/env base URL the `default` entry resolves to, when known. */
+  defaultBaseURL?: string;
+  /** Whether a key is stored for the default entry. */
+  defaultHasApiKey: boolean;
+};
+
+export type TUpdateEndpointProfilesRequest = {
+  /** Provider/endpoint name the profiles belong to. */
+  name: string;
+  /** Which entry to make active; omit to leave the current selection alone. */
+  active?: string;
+  /**
+   * The full desired profile list. Omit to change only `active`. A profile with
+   * no `apiKey` keeps whatever key is already stored for its id.
+   */
+  profiles?: TEndpointProfile[];
+};
+
+export type TUpdateEndpointProfilesResponse = {
+  active: string;
+  profiles: TMaskedEndpointProfile[];
+};
+
 export type TConfig = {
   order: number;
   type?: EModelEndpoint;
@@ -462,6 +521,12 @@ export type TConfig = {
   modelDisplayLabel?: string;
   userProvide?: boolean | null;
   userProvideURL?: boolean | null;
+  /**
+   * Whether the user may point this provider at their own base URL via endpoint
+   * profiles. Distinct from `userProvideURL`, which means the admin config made
+   * a user-supplied URL *mandatory* (no default to fall back to).
+   */
+  supportsCustomBaseURL?: boolean;
   userProvideAccessKeyId?: boolean;
   userProvideSecretAccessKey?: boolean;
   userProvideSessionToken?: boolean;

@@ -12,6 +12,7 @@ import {
   checkUserKeyExpiry,
   getAzureCredentials,
 } from '~/utils';
+import { getUserKeyValuesSafe, resolveUserEndpoint } from '~/endpoints/profiles';
 import { validateEndpointURL } from '~/auth';
 import { getOpenAIConfig } from './config';
 
@@ -57,17 +58,35 @@ export async function initializeOpenAI({
     userValues = await db.getUserKeyValues({ userId: req.user?.id ?? '', name: endpoint });
   }
 
-  let apiKey = userProvidesKey
-    ? userValues?.apiKey
-    : credentials[endpoint as keyof typeof credentials];
-  const baseURL = userProvidesURL
-    ? userValues?.baseURL
-    : baseURLOptions[endpoint as keyof typeof baseURLOptions];
+  /**
+   * Endpoint profiles apply even when the admin supplies both key and URL, so
+   * read the blob when the credential path above didn't already. Safe-read:
+   * having no stored key is normal here, not an error.
+   */
+  const profileValues =
+    userValues ??
+    (await getUserKeyValuesSafe({ db, userId: req.user?.id ?? '', name: endpoint }));
+
+  const resolved = await resolveUserEndpoint({
+    userValues: profileValues,
+    fallbackApiKey: userProvidesKey
+      ? userValues?.apiKey
+      : credentials[endpoint as keyof typeof credentials],
+    fallbackBaseURL: userProvidesURL
+      ? userValues?.baseURL
+      : baseURLOptions[endpoint as keyof typeof baseURLOptions],
+    fallbackURLIsUserProvided: userProvidesURL,
+    endpoint,
+    allowedAddresses: appConfig?.endpoints?.allowedAddresses,
+  });
+
+  let apiKey = resolved.apiKey;
+  const baseURL = resolved.baseURL;
 
   const clientOptions: OpenAIConfigOptions = {
     proxy: PROXY ?? undefined,
     reverseProxyUrl: baseURL || undefined,
-    baseURLIsUserProvided: userProvidesURL,
+    baseURLIsUserProvided: resolved.baseURLIsUserProvided,
     allowedAddresses: appConfig?.endpoints?.allowedAddresses,
     streaming: true,
   };
@@ -78,7 +97,7 @@ export async function initializeOpenAI({
    * `${SECRET}` gateway values or user/OpenID token placeholders resolved later
    * by `resolveConfigHeaders`, which must not reach a user-controlled endpoint.
    */
-  const trustedURL = !userProvidesURL;
+  const trustedURL = !resolved.baseURLIsUserProvided;
   const globalHeaders = trustedURL ? allConfig?.headers : undefined;
   const openAIHeaders = trustedURL
     ? mergeHeaders(allConfig?.headers, openAIConfig?.headers)

@@ -21,6 +21,8 @@ import {
 import type { TDialogProps } from '~/common';
 import { useUserKey, useLocalize } from '~/hooks';
 import { NotificationSeverity } from '~/common';
+import useEndpointProfiles from './useEndpointProfiles';
+import EndpointProfiles from './EndpointProfiles';
 import CustomConfig from './CustomEndpoint';
 import GoogleConfig from './GoogleConfig';
 import OpenAIConfig from './OpenAIConfig';
@@ -157,6 +159,7 @@ const SetKeyDialog = ({
   userProvideSecretAccessKey,
   userProvideSessionToken,
   userProvideBearerToken,
+  supportsCustomBaseURL,
 }: Pick<TDialogProps, 'open' | 'onOpenChange'> & {
   endpoint: EModelEndpoint | string;
   endpointType?: EModelEndpoint;
@@ -165,6 +168,7 @@ const SetKeyDialog = ({
   userProvideSecretAccessKey?: boolean;
   userProvideSessionToken?: boolean;
   userProvideBearerToken?: boolean;
+  supportsCustomBaseURL?: boolean;
 }) => {
   const methods = useForm({
     defaultValues: {
@@ -190,6 +194,11 @@ const SetKeyDialog = ({
   const { getExpiry, saveUserKey } = useUserKey(endpoint);
   const { showToast } = useToastContext();
   const localize = useLocalize();
+  const profilesState = useEndpointProfiles(supportsCustomBaseURL === true ? endpoint : '');
+  const showProfiles = supportsCustomBaseURL === true;
+  /** A custom endpoint carries its own URL and key, so the provider-specific
+   *  credential form only applies to the `Default` entry. */
+  const editingProfile = showProfiles && !profilesState.isDefaultSelected;
 
   const expirationOptions = Object.values(EXPIRY);
   const configuredEndpoint = endpointType ?? endpoint;
@@ -198,7 +207,50 @@ const SetKeyDialog = ({
     setExpiresAtLabel(label);
   };
 
+  /**
+   * Saving a custom endpoint is a profile write, not a credential write — it
+   * goes through the profiles route so the key can be merged server-side and
+   * the stored expiry left alone.
+   */
+  const submitProfile = async () => {
+    try {
+      await profilesState.save();
+      showToast({
+        message: localize('com_ui_save_key_success'),
+        status: NotificationSeverity.SUCCESS,
+      });
+      onOpenChange(false);
+    } catch (error) {
+      logger.error('Error saving endpoint profile:', error);
+      const message =
+        (error as { response?: { data?: { error?: string } } })?.response?.data?.error ??
+        localize('com_ui_save_key_error');
+      showToast({ message, status: NotificationSeverity.ERROR });
+    }
+  };
+
   const submit = () => {
+    if (editingProfile) {
+      void submitProfile();
+      return;
+    }
+
+    /**
+     * Switching back to `Default` is a change in its own right. With no
+     * credential typed, persist just the switch rather than demanding a key the
+     * user may not need to retype — or may not own at all, when the admin
+     * supplies it. With a credential typed, do both.
+     */
+    const switchingToDefault = showProfiles && profilesState.selectedId !== profilesState.activeId;
+    if (switchingToDefault) {
+      const usesForm = formSet.has(endpoint) || formSet.has(endpointType ?? '');
+      if (!usesForm && !userKey.trim()) {
+        void submitProfile();
+        return;
+      }
+      void profilesState.save();
+    }
+
     const selectedOption = expirationOptions.find((option) => option.label === expiresAtLabel);
     let expiresAt: number | null;
 
@@ -373,44 +425,54 @@ const SetKeyDialog = ({
           </OGDialogTitle>
         </OGDialogHeader>
         <div className="grid w-full items-center gap-2 py-4">
-          <small className="text-red-600">
-            {expiryTime === 'never'
-              ? localize('com_endpoint_config_key_never_expires')
-              : `${localize('com_endpoint_config_key_encryption')} ${new Date(
-                  expiryTime ?? 0,
-                ).toLocaleString()}`}
-          </small>
-          <Dropdown
-            label="Expires "
-            value={expiresAtLabel}
-            onChange={handleExpirationChange}
-            options={expirationOptions.map((option) => option.label)}
-            sizeClasses="w-[185px]"
-            portal={false}
-          />
-          <div className="mt-2" />
-          <FormProvider {...methods}>
-            <EndpointComponent
-              userKey={userKey}
-              endpoint={endpoint}
-              setUserKey={setUserKey}
-              userProvideURL={userProvideURL}
-              userProvideAccessKeyId={userProvideAccessKeyId}
-              userProvideSecretAccessKey={userProvideSecretAccessKey}
-              userProvideSessionToken={userProvideSessionToken}
-              userProvideBearerToken={userProvideBearerToken}
-            />
-          </FormProvider>
-          <HelpText endpoint={endpoint} />
+          {showProfiles && <EndpointProfiles endpoint={endpoint} state={profilesState} />}
+          {!editingProfile && (
+            <>
+              <small className="text-red-600">
+                {expiryTime === 'never'
+                  ? localize('com_endpoint_config_key_never_expires')
+                  : `${localize('com_endpoint_config_key_encryption')} ${new Date(
+                      expiryTime ?? 0,
+                    ).toLocaleString()}`}
+              </small>
+              <Dropdown
+                label="Expires "
+                value={expiresAtLabel}
+                onChange={handleExpirationChange}
+                options={expirationOptions.map((option) => option.label)}
+                sizeClasses="w-[185px]"
+                portal={false}
+              />
+              <div className="mt-2" />
+              <FormProvider {...methods}>
+                <EndpointComponent
+                  userKey={userKey}
+                  endpoint={endpoint}
+                  setUserKey={setUserKey}
+                  userProvideURL={userProvideURL}
+                  userProvideAccessKeyId={userProvideAccessKeyId}
+                  userProvideSecretAccessKey={userProvideSecretAccessKey}
+                  userProvideSessionToken={userProvideSessionToken}
+                  userProvideBearerToken={userProvideBearerToken}
+                />
+              </FormProvider>
+              <HelpText endpoint={endpoint} />
+            </>
+          )}
         </div>
         <OGDialogFooter>
-          <RevokeKeysButton
-            endpoint={endpoint}
-            disabled={!(expiryTime ?? '')}
-            setDialogOpen={onOpenChange}
-          />
-          <Button variant="submit" onClick={submit}>
-            {localize('com_ui_submit')}
+          {/* Revoking deletes the whole stored key for this provider, profiles
+              included — so it belongs to the Default entry, not to editing one
+              custom endpoint (which has its own Delete). */}
+          {!editingProfile && (
+            <RevokeKeysButton
+              endpoint={endpoint}
+              disabled={!(expiryTime ?? '')}
+              setDialogOpen={onOpenChange}
+            />
+          )}
+          <Button variant="submit" onClick={submit} disabled={profilesState.isSaving}>
+            {profilesState.isSaving ? <Spinner /> : localize('com_ui_submit')}
           </Button>
         </OGDialogFooter>
       </OGDialogContent>

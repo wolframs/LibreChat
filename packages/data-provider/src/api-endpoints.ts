@@ -100,6 +100,11 @@ export const keys = () => keysEndpoint;
 
 export const userKeyQuery = (name: string) => `${keysEndpoint}?name=${name}`;
 
+export const endpointProfiles = (name: string) =>
+  `${keysEndpoint}/profiles?name=${encodeURIComponent(name)}`;
+
+export const updateEndpointProfiles = () => `${keysEndpoint}/profiles`;
+
 export const revokeUserKey = (name: string) => `${keysEndpoint}/${name}`;
 
 export const revokeAllUserKeys = () => `${keysEndpoint}?all=true`;
