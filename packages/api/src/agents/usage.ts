@@ -497,7 +497,7 @@ export interface RecordUsageParams {
    */
   resolveEndpointTokenConfig?: (usage: UsageMetadata) => EndpointTokenConfig | undefined;
   /**
-   * Endpoint profile that served the request, from `req.endpointProfile`.
+   * Destination that served the request, from `req.routedVia`.
    * Applies to every usage item in the batch: they all went to the same base
    * URL, since routing is resolved once per request at initialization.
    */

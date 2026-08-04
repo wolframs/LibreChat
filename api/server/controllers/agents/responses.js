@@ -833,8 +833,8 @@ const createResponse = async (req, res) => {
           balance: balanceConfig,
           transactions: transactionsConfig,
           model: primaryConfig.model || agent.model_parameters?.model,
-          /** Present only when a user endpoint profile served the request. */
-          routedVia: req.endpointProfile,
+          /** Present only when the request went somewhere other than the provider. */
+          routedVia: req.routedVia,
         },
       ).catch((err) => {
         logger.error('[Responses API] Error recording usage:', err);
@@ -1012,8 +1012,8 @@ const createResponse = async (req, res) => {
           balance: balanceConfig,
           transactions: transactionsConfig,
           model: primaryConfig.model || agent.model_parameters?.model,
-          /** Present only when a user endpoint profile served the request. */
-          routedVia: req.endpointProfile,
+          /** Present only when the request went somewhere other than the provider. */
+          routedVia: req.routedVia,
         },
       ).catch((err) => {
         logger.error('[Responses API] Error recording usage:', err);

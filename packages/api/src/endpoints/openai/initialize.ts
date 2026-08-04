@@ -12,6 +12,7 @@ import {
   checkUserKeyExpiry,
   getAzureCredentials,
 } from '~/utils';
+import { markRequestRouting } from '~/endpoints/routing';
 import { validateEndpointURL } from '~/auth';
 import { getOpenAIConfig } from './config';
 
@@ -63,6 +64,9 @@ export async function initializeOpenAI({
   const baseURL = userProvidesURL
     ? userValues?.baseURL
     : baseURLOptions[endpoint as keyof typeof baseURLOptions];
+
+  /** Only when redirected: an unstamped transaction means the provider's own API. */
+  markRequestRouting(req, { endpoint, baseURL });
 
   const clientOptions: OpenAIConfigOptions = {
     proxy: PROXY ?? undefined,

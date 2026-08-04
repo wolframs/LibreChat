@@ -30,17 +30,16 @@ export type ServerRequest = Request<unknown, unknown, RequestBody> & {
   /** Passport strategy that populated req.user for this request. */
   authStrategy?: string;
   /**
-   * Endpoint profile that served this request, set by the endpoint initializer
-   * when a user-defined base URL won over the admin/env default.
+   * Where this request was actually sent, set by the endpoint initializer once
+   * the base URL is resolved. Absent when the provider's own default was used.
    *
    * Request-scoped rather than threaded through the client options because the
    * spend path is far downstream of initialization and already carries `req`.
-   * Its presence tells the billing code that the rate it computes from the model
-   * name is nominal — see `ITransaction.routedVia`.
+   * Recorded onto every resulting transaction as `routedVia` — see
+   * `ITransaction.routedVia`.
    */
-  endpointProfile?: {
-    profileId?: string;
-    profileName?: string;
+  routedVia?: {
+    endpoint?: string;
     baseURL?: string;
   };
 };

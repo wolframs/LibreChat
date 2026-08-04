@@ -19,19 +19,19 @@ export interface ITransaction extends Document {
   updatedAt?: Date;
   tenantId?: string;
   /**
-   * Set when the request was served through a user endpoint profile rather than
-   * the provider's own API.
+   * Where this request actually went: the endpoint that served it and the base
+   * URL it was sent to. Recorded whenever the destination is not the provider's
+   * own default — a yaml `endpoints.custom` row, or an env reverse proxy.
    *
-   * Its presence means **`rate` and `tokenValue` on this document are nominal**:
-   * they come from the model-name rate table, which describes what the provider
-   * would have charged, not what the gateway at `baseURL` actually did. A
-   * gateway that re-routes to a cheaper or pricier upstream is invisible to that
-   * table. Recorded so the real cost can be reconciled later, and so nominal
-   * spend can be told apart from verified spend in the meantime.
+   * This is provenance, not a verdict. Whether `rate` and `tokenValue` can be
+   * trusted depends on the *host*: some destinations (OpenRouter) report exact
+   * per-request pricing, while a marketplace gateway re-routes to whichever
+   * seller is cheapest and is invisible to the model-name rate table. The
+   * dashboard decides which is which from `baseURL`, so adding a gateway does
+   * not mean changing this schema.
    */
   routedVia?: {
-    profileId?: string;
-    profileName?: string;
+    endpoint?: string;
     baseURL?: string;
   };
 }
@@ -78,8 +78,7 @@ const transactionSchema: Schema<ITransaction> = new Schema(
     /** Absent on direct-to-provider calls; see ITransaction.routedVia. */
     routedVia: {
       type: {
-        profileId: { type: String },
-        profileName: { type: String },
+        endpoint: { type: String },
         baseURL: { type: String },
       },
       required: false,

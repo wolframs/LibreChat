@@ -29,17 +29,18 @@ import os
 import threading
 import time
 from datetime import datetime, timedelta, timezone
-from urllib.parse import urlsplit
-
 import requests
+
+from routing import RECONCILABLE_HOSTS, host_of
 
 SURPLUS_API_BASE = os.environ.get(
     "SURPLUS_API_BASE", "https://api.surplusintelligence.ai"
 ).rstrip("/")
 SURPLUS_API_KEY = os.environ.get("SURPLUS_API_KEY", "").strip()
 
-#: Hosts whose spend this reconciler is able to settle.
-SURPLUS_HOSTS = {"api.surplusintelligence.ai"}
+#: Hosts whose spend this reconciler is able to settle. Shared with the
+#: dashboard, which uses the same list to decide what is awaiting settlement.
+SURPLUS_HOSTS = RECONCILABLE_HOSTS
 
 #: How long after a request LibreChat may write its transaction. A transaction is
 #: stamped when the stream finishes, the export row when the request arrived, so
@@ -55,12 +56,7 @@ MICRO_PER_USD = 1_000_000
 
 def is_surplus_url(url):
     """Whether a `routedVia.baseURL` points at a gateway this module can settle."""
-    if not url:
-        return False
-    try:
-        return urlsplit(url).hostname.lower() in SURPLUS_HOSTS
-    except (AttributeError, ValueError):
-        return False
+    return host_of(url) in SURPLUS_HOSTS
 
 
 def fetch_usage_rows(session=None):

@@ -1,6 +1,7 @@
 import { EModelEndpoint, AuthKeys } from 'librechat-data-provider';
 import type { BaseInitializeParams, InitializeResultBase, AnthropicConfigOptions } from '~/types';
 import { loadAnthropicVertexCredentials, getVertexCredentialOptions } from './vertex';
+import { markRequestRouting } from '~/endpoints/routing';
 import { checkUserKeyExpiry, isEnabled, mergeHeaders } from '~/utils';
 import { getLLMConfig } from './llm';
 
@@ -78,6 +79,15 @@ export async function initializeAnthropic({
   const allConfig = appConfig?.endpoints?.all;
 
   const headers = mergeHeaders(allConfig?.headers, anthropicConfig?.headers);
+
+  /** Only when redirected: an unstamped transaction means api.anthropic.com.
+   *  The Vertex path carries its own endpoint and auth and is not a base URL. */
+  if (!useVertexAI) {
+    markRequestRouting(req, {
+      endpoint: EModelEndpoint.anthropic,
+      baseURL: ANTHROPIC_REVERSE_PROXY,
+    });
+  }
 
   const clientOptions: AnthropicConfigOptions = {
     proxy: PROXY ?? undefined,

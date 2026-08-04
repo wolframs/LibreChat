@@ -12,8 +12,8 @@ export interface SpendTxData {
   transactions?: { enabled?: boolean };
   valueKey?: string;
   /**
-   * Endpoint profile that served the request. Spread into both transactions, so
-   * the resulting `rate` can be recognised as nominal rather than billed.
+   * Destination that served the request. Spread into both transactions, so the
+   * resulting `rate` can be judged against where the spend actually went.
    */
   routedVia?: RoutedVia;
 }

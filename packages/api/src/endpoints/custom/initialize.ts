@@ -21,6 +21,7 @@ import { getOpenAIConfig } from '~/endpoints/openai/config';
 import { getScopedTokenConfigKey } from '~/endpoints/keys';
 import { getCustomEndpointConfig } from '~/app/config';
 import { fetchModels } from '~/endpoints/models';
+import { markRequestRouting } from '~/endpoints/routing';
 import { validateEndpointURL } from '~/auth';
 import { tokenConfigCache } from '~/cache';
 
@@ -247,6 +248,10 @@ export async function initializeCustom({
   if (userProvidesURL) {
     await validateEndpointURL(baseURL, endpoint, appConfig?.endpoints?.allowedAddresses);
   }
+
+  /** Every custom endpoint is by definition a non-provider destination, so this
+   *  is unconditional rather than gated on who supplied the URL. */
+  markRequestRouting(req, { endpoint, baseURL });
 
   let endpointTokenConfig: EndpointTokenConfig | undefined;
 

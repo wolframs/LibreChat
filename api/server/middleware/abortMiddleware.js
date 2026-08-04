@@ -59,7 +59,7 @@ const isAbortError = (error) => {
  * @param {Array<Object>} params.collectedUsage - Usage metadata from all models
  * @param {string} [params.fallbackModel] - Fallback model name if not in usage
  * @param {string} [params.messageId] - The response message ID for transaction correlation
- * @param {object} [params.routedVia] - Endpoint profile that served the aborted generation
+ * @param {object} [params.routedVia] - Destination that served the aborted generation
  */
 async function spendCollectedUsage({
   userId,

@@ -14,11 +14,9 @@ export interface TransactionData {
   messageId?: string;
   inputTokenCount?: number;
   rateDetail?: Record<string, number>;
-  /** Endpoint profile that served the request; marks `rate` as nominal.
-   *  See `ITransaction.routedVia`. */
+  /** Where the request was actually sent. See `ITransaction.routedVia`. */
   routedVia?: {
-    profileId?: string;
-    profileName?: string;
+    endpoint?: string;
     baseURL?: string;
   };
 }

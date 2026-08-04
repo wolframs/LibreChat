@@ -19,6 +19,7 @@ from flask import Flask, Response, abort, render_template_string, request
 from pymongo import MongoClient
 
 import reconcile
+from routing import IS_ESTIMATED
 
 MICRO_PER_USD = 1_000_000
 ROOT_PARENT = "00000000-0000-0000-0000-000000000000"
@@ -31,18 +32,18 @@ messages_col = db["messages"]
 conversations_col = db["conversations"]
 
 
-# A transaction carrying `routedVia` was served by a user endpoint profile — some
-# other base URL than the provider's own API. Its `rate` still comes from the
-# model-name rate table, so the cost shown for it is what the provider *would*
-# have charged, not what the gateway did.
+# A transaction carrying `routedVia` went somewhere other than the provider's own
+# API. That alone does not make its price an estimate: OpenRouter reports exact
+# per-request costs, which LibreChat fetches and bills from. `routing.py` decides
+# from the destination host, so this file never has to know which is which.
 #
-# `reconcile.py` later settles those against the gateway's own billing records
-# and writes `reconciled.costUSD`. Three states therefore exist, and the tables
-# below keep them apart so nominal spend is never presented as verified:
+# `reconcile.py` later settles the estimated ones against the gateway's own
+# billing records and writes `reconciled.costUSD`. Three states therefore exist,
+# and the tables below keep them apart so an estimate is never shown as verified:
 #
-#   direct      no routedVia            — billed at the provider's real rate
-#   nominal     routedVia, unreconciled — an estimate from the rate table
-#   reconciled  routedVia + reconciled  — the gateway's actual charge
+#   exact       not estimated            — billed at a rate the destination reported
+#   nominal     estimated, unreconciled  — from the model-name rate table
+#   reconciled  estimated + reconciled   — the gateway's actual charge
 #
 # Tested against "missing" rather than truthiness because a settled cost of
 # exactly 0 is legitimate: sub-micro-dollar requests round to nothing.
@@ -60,7 +61,7 @@ EFFECTIVE_MICRO = {
 NOMINAL_COST = {
     "$sum": {
         "$cond": [
-            {"$and": [{"$ifNull": ["$routedVia", False]}, {"$not": HAS_RECONCILED}]},
+            {"$and": [IS_ESTIMATED, {"$not": HAS_RECONCILED}]},
             {"$abs": "$tokenValue"},
             0,
         ]
@@ -95,7 +96,8 @@ def _cost_since(since):
 def _nominal_since(since):
     match = {"createdAt": {"$gte": since}} if since else {}
     pipeline = [
-        {"$match": {**match, "routedVia": {"$exists": True}}},
+        {"$match": {**match, "routedVia.baseURL": {"$exists": True}}},
+        {"$match": {"$expr": IS_ESTIMATED}},
         {"$group": {"_id": None, "micro": NOMINAL_COST}},
     ]
     result = list(transactions.aggregate(pipeline))
@@ -186,7 +188,7 @@ def _by_routing():
                 {
                     "$group": {
                         "_id": {
-                            "name": "$routedVia.profileName",
+                            "name": "$routedVia.endpoint",
                             "url": "$routedVia.baseURL",
                             "type": "$tokenType",
                         },
@@ -364,8 +366,8 @@ a:hover { text-decoration: underline; }
 {% if totals.nominal > 0 %}
 <div class="warn">
   <div class="warn-title">${{ "%.4f"|format(totals.nominal) }} of the all-time total is nominal, not billed</div>
-  <p>That spend was served through a custom base URL (an endpoint profile), but priced from the
-  model-name rate table &mdash; i.e. <em>what the provider would have charged</em>, not what the
+  <p>That spend went through a gateway that does not report its own prices, so it was priced from
+  the model-name rate table &mdash; i.e. <em>what the provider would have charged</em>, not what the
   gateway actually did. A gateway that re-routes to a different upstream, or prices differently,
   is invisible to that table.</p>
   <p>Treat these figures as a lower-confidence estimate. The destination is recorded on each

@@ -52,17 +52,19 @@ export interface TxData {
   readTokens?: number;
   balance?: { enabled?: boolean };
   transactions?: { enabled?: boolean };
-  /** Endpoint profile that served this request; marks `rate` as nominal. */
+  /** Where this request was actually sent. */
   routedVia?: RoutedVia;
 }
 
 /**
- * Identity of a user endpoint profile that served a request, carried from the
- * endpoint initializer through to the transaction record.
+ * Destination a request was actually sent to, carried from the endpoint
+ * initializer through to the transaction record.
  */
 export interface RoutedVia {
-  profileId?: string;
-  profileName?: string;
+  /** Endpoint name that served the request — a yaml `endpoints.custom` row, or
+   *  a built-in provider reached through an env reverse proxy. */
+  endpoint?: string;
+  /** Base URL the request was sent to. */
   baseURL?: string;
 }
 
