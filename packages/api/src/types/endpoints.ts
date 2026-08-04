@@ -1,5 +1,5 @@
 import type { ClientOptions, OpenAIClientOptions } from '@librechat/agents';
-import type { TConfig, TUserEndpointProfiles } from 'librechat-data-provider';
+import type { TConfig } from 'librechat-data-provider';
 import type { EndpointTokenConfig, ServerRequest } from '~/types';
 
 export type TCustomEndpointsConfig = Partial<{ [key: string]: Omit<TConfig, 'order'> }>;
@@ -10,8 +10,6 @@ export type TCustomEndpointsConfig = Partial<{ [key: string]: Omit<TConfig, 'ord
 export interface UserKeyValues {
   apiKey?: string;
   baseURL?: string;
-  /** User-defined alternate base URLs for this provider. See `~/endpoints/profiles`. */
-  endpointProfiles?: TUserEndpointProfiles;
 }
 
 /**

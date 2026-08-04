@@ -162,10 +162,8 @@ check_marker "claude-opus-5 pricing"  "claude-opus-5" "/app/packages/data-schema
 check_marker "claude-opus-5 tokens"   "claude-opus-5" "/app/packages/api/dist/index.cjs"
 check_marker "prompt-cache TTL wiring" "promptCacheTtl" "/app/packages/api/dist/index.cjs"
 check_marker "cache-TTL pill (client)" "cacheTTL" "/app/client/dist/assets/*.js"
-check_marker "endpoint profiles (server)" "endpointProfiles" "/app/packages/api/dist/index.cjs"
-check_marker "endpoint profiles (client)" "com_endpoint_profile_label" "/app/client/dist/assets/*.js"
 check_marker "nominal-cost routing"       "routedVia" "/app/packages/api/dist/index.cjs"
-check_marker "profile-scoped model fetch" "forceUserScope" "/app/packages/api/dist/index.cjs"
+check_marker "dotted gateway pricing"     "claude-opus-4.8" "/app/packages/data-schemas/dist/index.cjs"
 check_marker "cache-TTL gating (client)"  "com_endpoint_prompt_cache_unsupported" "/app/client/dist/assets/*.js"
 
 echo

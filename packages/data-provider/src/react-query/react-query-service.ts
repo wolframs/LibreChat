@@ -280,49 +280,6 @@ export const useUserKeyQuery = (
   );
 };
 
-/** Masked endpoint profiles for one provider. */
-export const useEndpointProfilesQuery = (
-  name: string,
-  config?: UseQueryOptions<t.TEndpointProfilesResponse>,
-): QueryObserverResult<t.TEndpointProfilesResponse> => {
-  return useQuery<t.TEndpointProfilesResponse>(
-    [QueryKeys.endpointProfiles, name],
-    () => {
-      if (!name) {
-        return Promise.resolve({ active: 'default', profiles: [], defaultHasApiKey: false });
-      }
-      return dataService.endpointProfilesQuery(name);
-    },
-    {
-      refetchOnWindowFocus: false,
-      refetchOnReconnect: false,
-      retry: false,
-      ...config,
-    },
-  );
-};
-
-export const useUpdateEndpointProfilesMutation = (): UseMutationResult<
-  t.TUpdateEndpointProfilesResponse,
-  unknown,
-  t.TUpdateEndpointProfilesRequest,
-  unknown
-> => {
-  const queryClient = useQueryClient();
-  return useMutation(
-    (payload: t.TUpdateEndpointProfilesRequest) => dataService.updateEndpointProfiles(payload),
-    {
-      onSuccess: (_data, variables) => {
-        queryClient.invalidateQueries([QueryKeys.endpointProfiles, variables.name]);
-        /** The active base URL changes which models the provider reports, and
-         *  the token config derived from that same fetch. */
-        queryClient.invalidateQueries([QueryKeys.models]);
-        queryClient.invalidateQueries([QueryKeys.tokenConfig]);
-      },
-    },
-  );
-};
-
 export const useRequestPasswordResetMutation = (): UseMutationResult<
   t.TRequestPasswordResetResponse,
   unknown,

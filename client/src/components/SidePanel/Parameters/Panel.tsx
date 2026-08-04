@@ -13,14 +13,10 @@ import {
 import type { TPreset } from 'librechat-data-provider';
 import { SaveAsPresetDialog } from '~/components/Endpoints';
 import { useSetIndexOptions, useLocalize } from '~/hooks';
-import { useAnthropicNativeRouting } from '~/hooks/Endpoint';
 import { useGetEndpointsQuery } from '~/data-provider';
 import { componentMapping } from './components';
 import { useChatContext } from '~/Providers';
 import { logger } from '~/utils';
-
-/** Prompt caching is an Anthropic-API feature; a gateway drops it silently. */
-const anthropicCacheKeys = new Set(['promptCache', 'promptCacheTtl']);
 
 export default function Parameters() {
   const localize = useLocalize();
@@ -43,8 +39,6 @@ export default function Parameters() {
     [conversation?.endpoint, endpointsConfig],
   );
 
-  const isAnthropicNative = useAnthropicNativeRouting(conversation?.endpoint);
-
   const parameters = useMemo((): SettingDefinition[] => {
     const customParams = endpointsConfig[provider]?.customParams ?? {};
     const [combinedKey, endpointKey] = getSettingsKeys(endpointType ?? provider, model);
@@ -57,20 +51,10 @@ export default function Parameters() {
       overriddenEndpointKey,
       model,
     );
-    return modelAwareParams.map((param) => {
-      const resolved = (overriddenParamsMap[param.key] as SettingDefinition) ?? param;
-      /** Left visible but inert, so the reason is discoverable on hover. */
-      if (!isAnthropicNative && anthropicCacheKeys.has(resolved.key)) {
-        return {
-          ...resolved,
-          readonly: true,
-          description: 'com_endpoint_prompt_cache_unsupported',
-          descriptionCode: true,
-        };
-      }
-      return resolved;
-    });
-  }, [endpointType, endpointsConfig, isAnthropicNative, model, provider]);
+    return modelAwareParams.map(
+      (param) => (overriddenParamsMap[param.key] as SettingDefinition) ?? param,
+    );
+  }, [endpointType, endpointsConfig, model, provider]);
 
   useEffect(() => {
     if (!parameters) {

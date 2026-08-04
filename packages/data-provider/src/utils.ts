@@ -84,29 +84,3 @@ export function normalizeEndpointName(name = ''): string {
   return name.toLowerCase() === 'ollama' ? 'ollama' : name;
 }
 
-/** Hosts that serve Anthropic's own Messages API, verbatim. */
-const anthropicNativeHosts = new Set(['api.anthropic.com']);
-
-/**
- * Whether a base URL speaks Anthropic's Messages API natively, and so honours
- * `cache_control` and its `ttl` field.
- *
- * Gateways that merely accept Anthropic-shaped requests do not qualify: they
- * normalize the payload for whichever seller they route to, so a prompt-cache
- * TTL sent to one is silently dropped rather than rejected. Features that only
- * work on the real API are gated on this.
- *
- * An absent URL means the endpoint's own default, which is Anthropic — callers
- * pass a URL only once the user has actively pointed the endpoint elsewhere.
- */
-export function isAnthropicNativeURL(baseURL?: string | null): boolean {
-  if (baseURL == null || baseURL.trim() === '') {
-    return true;
-  }
-  try {
-    return anthropicNativeHosts.has(new URL(baseURL.trim()).hostname.toLowerCase());
-  } catch {
-    /** An unparseable URL is not demonstrably Anthropic. */
-    return false;
-  }
-}

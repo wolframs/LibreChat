@@ -118,44 +118,22 @@ function formatAction(action) {
 }
 
 /**
- * Endpoints whose initializer resolves an endpoint profile, letting a user point
- * the provider at their own OpenAI-compatible base URL while keeping the
- * admin/env URL as the `default` entry. Custom endpoints advertise this
- * separately in `packages/api/src/endpoints/custom/config.ts`.
- *
- * Google and Bedrock are absent deliberately: neither initializer reads a
- * user-supplied base URL, and Bedrock is region/SigV4-shaped rather than a
- * plain base URL.
- */
-const customBaseURLEndpoints = new Set([
-  EModelEndpoint.anthropic,
-  EModelEndpoint.openAI,
-  EModelEndpoint.azureOpenAI,
-  EModelEndpoint.assistants,
-  EModelEndpoint.azureAssistants,
-]);
-
-/**
  * Generate the configuration for a given key and base URL.
  * @param {string} key
  * @param {string} [baseURL]
  * @param {string} [endpoint]
- * @returns {boolean | { userProvide: boolean, userProvideURL?: boolean, supportsCustomBaseURL?: boolean }}
+ * @returns {boolean | { userProvide: boolean, userProvideURL?: boolean }}
  */
 function generateConfig(key, baseURL, endpoint) {
   if (!key) {
     return false;
   }
 
-  /** @type {{ userProvide: boolean, userProvideURL?: boolean, supportsCustomBaseURL?: boolean }} */
+  /** @type {{ userProvide: boolean, userProvideURL?: boolean }} */
   const config = { userProvide: isUserProvided(key) };
 
   if (baseURL) {
     config.userProvideURL = isUserProvided(baseURL);
-  }
-
-  if (endpoint && customBaseURLEndpoints.has(endpoint)) {
-    config.supportsCustomBaseURL = true;
   }
 
   const assistants = isAssistantsEndpoint(endpoint);

@@ -3,7 +3,6 @@ import { useRecoilState } from 'recoil';
 import { EModelEndpoint, Constants } from 'librechat-data-provider';
 import type { TMessage } from 'librechat-data-provider';
 import { useGetMessagesByConvoId } from '~/data-provider';
-import { useAnthropicNativeRouting } from '~/hooks/Endpoint';
 import { useChatContext } from '~/Providers';
 import { useLocalize } from '~/hooks';
 import { cn } from '~/utils';
@@ -72,9 +71,7 @@ function CacheTTLPill() {
   const isAnthropic = conversation?.endpoint === EModelEndpoint.anthropic;
   /** `promptCache` defaults to true when unset (anthropicSettings). */
   const cacheEnabled = conversation?.promptCache !== false;
-  /** A gateway accepts `cache_control` and drops it — a countdown there would lie. */
-  const isNativeRouting = useAnthropicNativeRouting(conversation?.endpoint);
-  const visible = isAnthropic && cacheEnabled && isNativeRouting;
+  const visible = isAnthropic && cacheEnabled;
 
   const { data: messages } = useGetMessagesByConvoId(conversationId, {
     enabled: visible && !!conversationId,

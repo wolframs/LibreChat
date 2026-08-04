@@ -6,5 +6,4 @@ export * from './google';
 export * from './models';
 export * from './openai';
 export * from './pricing';
-export * from './profiles';
 export * from './tokenConfig';

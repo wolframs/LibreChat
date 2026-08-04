@@ -85,11 +85,6 @@ export default function ProviderKeyRow({ endpoint, endpointsConfig }: ProviderKe
             endpoint,
             'userProvideBearerToken',
           )}
-          supportsCustomBaseURL={getEndpointField(
-            endpointsConfig,
-            endpoint,
-            'supportsCustomBaseURL',
-          )}
         />
       )}
     </>

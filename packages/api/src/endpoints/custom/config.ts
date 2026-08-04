@@ -60,10 +60,6 @@ export function loadCustomEndpointsConfig(
         type: EModelEndpoint.custom,
         userProvide: isUserProvided(resolvedApiKey) || userProvideURL,
         userProvideURL,
-        /** `initializeCustom` resolves endpoint profiles for every custom
-         *  endpoint, so a user can override even a yaml-pinned baseURL without
-         *  losing it as the `default` entry. */
-        supportsCustomBaseURL: true,
         customParams: resolvedCustomParams,
         modelDisplayLabel,
         iconURL,
