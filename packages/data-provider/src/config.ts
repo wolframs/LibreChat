@@ -980,6 +980,17 @@ export const endpointSchema = baseEndpointSchema.merge(
        * Validated here rather than at match time so a bad pattern fails the
        * config load loudly, instead of silently filtering every model away.
        */
+      /**
+       * Drop fetched models that cannot hold a text conversation — no text
+       * input (transcription) or no text output (image, video, music, speech,
+       * embedding). Decided from the catalogue's own `architecture` block, so
+       * it is a no-op against a catalogue that does not publish one.
+       *
+       * These are not just picker noise: they speak a different API shape
+       * (async job submission, per-job pricing) and are rejected by the
+       * provider when sent a chat completion.
+       */
+      chatOnly: z.boolean().optional(),
       filter: z
         .string()
         .refine(

@@ -167,6 +167,7 @@ check_marker "dotted gateway pricing"     "claude-opus-4.8" "/app/packages/data-
 check_marker "readonly param defs (client)" "com_endpoint_prompt_cache_unsupported" "/app/client/dist/assets/*.js"
 check_marker "anthropic model-fetch path"  "isAnthropicProvider" "/app/packages/api/dist/index.cjs"
 check_marker "models.filter"               "applyModelFilter" "/app/packages/api/dist/index.cjs"
+check_marker "models.chatOnly"             "applyChatOnlyFilter" "/app/packages/api/dist/index.cjs"
 
 echo
 if [[ $MISSING -eq 1 ]]; then

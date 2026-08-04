@@ -33,6 +33,86 @@ function headersFingerprint(headers: Record<string, string> | undefined): string
   return crypto.createHash('sha256').update(JSON.stringify(ordered)).digest('hex').slice(0, 16);
 }
 
+/** What a catalogue says a model consumes and produces. OpenRouter-shaped
+ *  responses carry this under `architecture`; catalogues that don't are simply
+ *  absent from the map, and every filter below treats absence as "keep". */
+type ModelModalities = { input: string[]; output: string[] };
+
+/**
+ * Indexes a raw catalogue response by model id, keeping only the modality
+ * fields. Entries without an `architecture` block are skipped rather than
+ * recorded as empty, so a catalogue that omits it cannot be mistaken for one
+ * declaring a model can do nothing.
+ */
+export function buildModalityMap(
+  data: Array<Record<string, unknown>>,
+): Map<string, ModelModalities> {
+  const map = new Map<string, ModelModalities>();
+  for (const entry of data) {
+    const id = entry?.id;
+    const architecture = entry?.architecture as Record<string, unknown> | undefined;
+    if (typeof id !== 'string' || architecture == null) {
+      continue;
+    }
+    const input = architecture.input_modalities;
+    const output = architecture.output_modalities;
+    if (!Array.isArray(input) || !Array.isArray(output)) {
+      continue;
+    }
+    map.set(id, {
+      input: input.filter((m): m is string => typeof m === 'string'),
+      output: output.filter((m): m is string => typeof m === 'string'),
+    });
+  }
+  return map;
+}
+
+/**
+ * Drops models that cannot participate in a text conversation — either they
+ * do not accept text in (transcription models) or do not produce text out
+ * (image, video, music, speech, embedding models).
+ *
+ * A marketplace may serve hundreds of such models over the same endpoint as
+ * its chat models. They are not merely noise in the picker: they speak a
+ * different API shape (async job submission, per-job pricing) and fail at the
+ * seller when sent a chat completion.
+ *
+ * Fails open. A model the catalogue said nothing about is kept, because the
+ * alternative — silently emptying the picker for every gateway that does not
+ * publish modality metadata — is far worse than showing a model too many.
+ */
+export function applyChatOnlyFilter(
+  models: string[] | undefined,
+  modalities: Map<string, ModelModalities> | undefined,
+  endpointName: string,
+): string[] | undefined {
+  if (!models?.length) {
+    return models;
+  }
+  if (modalities == null || modalities.size === 0) {
+    logger.debug(
+      `[loadConfigModels] models.chatOnly set for "${endpointName}" but the catalogue published no modality metadata; keeping all ${models.length} models`,
+    );
+    return models;
+  }
+
+  const kept = models.filter((model) => {
+    const entry = modalities.get(model);
+    if (entry == null) {
+      return true;
+    }
+    return entry.input.includes('text') && entry.output.includes('text');
+  });
+
+  const dropped = models.length - kept.length;
+  if (dropped > 0) {
+    logger.info(
+      `[loadConfigModels] models.chatOnly dropped ${dropped} non-conversational model(s) from "${endpointName}", keeping ${kept.length}`,
+    );
+  }
+  return kept;
+}
+
 /**
  * Narrows a fetched model list to the ids matching an endpoint's
  * `models.filter` regex. The pattern is validated at config load, so an
@@ -138,6 +218,10 @@ export function createLoadConfigModels(deps: LoadConfigModelsDeps) {
 
     const fetchPromisesMap: Record<string, Promise<string[]>> = {};
     const uniqueKeyToEndpointsMap: Record<string, string[]> = {};
+    /** Capability metadata from each fetch, kept per fetch rather than per
+     *  endpoint because sibling rows sharing a base URL share the response —
+     *  but each applies its own filters to it. */
+    const modalitiesByKey: Record<string, Map<string, ModelModalities>> = {};
     /** tokenKey the deduped fetch cached its token config under, so siblings
      *  sharing the fetch can be backfilled with the same config afterward */
     const uniqueKeyToTokenKey: Record<string, string> = {};
@@ -238,6 +322,9 @@ export function createLoadConfigModels(deps: LoadConfigModelsDeps) {
             direct: endpoint.directEndpoint,
             userIdQuery: models.userIdQuery,
             tokenKey,
+            onModelData: (data) => {
+              modalitiesByKey[uniqueKey] = buildModalityMap(data);
+            },
           });
         }
         uniqueKeyToEndpointsMap[uniqueKey] = uniqueKeyToEndpointsMap[uniqueKey] || [];
@@ -284,6 +371,9 @@ export function createLoadConfigModels(deps: LoadConfigModelsDeps) {
                 skipCache: true,
                 /** Fetched with the user's key/URL — always user-scoped */
                 tokenKey: getTokenConfigKey(endpoint, name, req.user?.id ?? '', tenantId),
+                onModelData: (data) => {
+                  modalitiesByKey[userFetchKey] = buildModalityMap(data);
+                },
               });
             })();
           uniqueKeyToEndpointsMap[userFetchKey] = uniqueKeyToEndpointsMap[userFetchKey] || [];
@@ -319,7 +409,10 @@ export function createLoadConfigModels(deps: LoadConfigModelsDeps) {
         /** Applied per endpoint, not per fetch: sibling rows can share one
          *  base URL (and therefore one deduped fetch) while each exposes a
          *  different slice of what that gateway serves. */
-        const filtered = applyModelFilter(modelData, endpoint.models?.filter, name);
+        const usable = endpoint.models?.chatOnly
+          ? applyChatOnlyFilter(modelData, modalitiesByKey[currentKey], name)
+          : modelData;
+        const filtered = applyModelFilter(usable, endpoint.models?.filter, name);
         modelsConfig[name] = !filtered?.length ? defaults : filtered;
       }
 

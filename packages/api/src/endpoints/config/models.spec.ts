@@ -372,3 +372,87 @@ describe('createLoadConfigModels – models.filter', () => {
     );
   });
 });
+
+describe('createLoadConfigModels – models.chatOnly', () => {
+  const fetchModels = jest.fn();
+
+  /** Mirrors the shape a marketplace catalogue returns: an `architecture`
+   *  block per entry describing what the model consumes and produces. */
+  const catalogue = [
+    { id: 'claude-opus-4.8', architecture: { input_modalities: ['text'], output_modalities: ['text'] } },
+    { id: 'gpt-5-vision', architecture: { input_modalities: ['text', 'image'], output_modalities: ['text'] } },
+    { id: 'kling-text-to-video', architecture: { input_modalities: ['text'], output_modalities: ['video'] } },
+    { id: 'wan-2.7', architecture: { input_modalities: ['text'], output_modalities: ['image'] } },
+    { id: 'whisper-large', architecture: { input_modalities: ['audio'], output_modalities: ['text'] } },
+    { id: 'text-embedding-3', architecture: { input_modalities: ['text'], output_modalities: ['embedding'] } },
+    { id: 'legacy-no-metadata' },
+  ];
+
+  const buildAppConfig = (modelsOverrides: Record<string, unknown>) => ({
+    endpoints: {
+      [EModelEndpoint.custom]: [
+        {
+          name: 'Marketplace',
+          baseURL: 'https://gateway.example.com/v1',
+          apiKey: 'gw-key',
+          models: { fetch: true, default: ['fallback-model'], ...modelsOverrides },
+        },
+      ],
+    },
+  });
+
+  const load = (modelsOverrides: Record<string, unknown>) =>
+    createLoadConfigModels({
+      getAppConfig: jest.fn().mockResolvedValue(buildAppConfig(modelsOverrides)),
+      getUserKeyValues: jest.fn().mockResolvedValue(null),
+      fetchModels,
+    })({ user: { id: 'user-1' }, config: undefined } as unknown as ServerRequest);
+
+  beforeEach(() => {
+    fetchModels.mockReset().mockImplementation(async (params) => {
+      params.onModelData?.(catalogue);
+      return catalogue.map((m) => m.id);
+    });
+  });
+
+  it('keeps only models that take text in and give text out', async () => {
+    const result = await load({ chatOnly: true });
+    expect(result['Marketplace']).toEqual([
+      'claude-opus-4.8',
+      'gpt-5-vision',
+      // no metadata → kept, see fail-open note
+      'legacy-no-metadata',
+    ]);
+  });
+
+  it('keeps everything when chatOnly is not set', async () => {
+    const result = await load({});
+    expect(result['Marketplace']).toHaveLength(catalogue.length);
+  });
+
+  it('composes with the regex filter', async () => {
+    const result = await load({ chatOnly: true, filter: '^claude-' });
+    expect(result['Marketplace']).toEqual(['claude-opus-4.8']);
+  });
+
+  /** A catalogue with no `architecture` anywhere must not empty the picker. */
+  it('keeps every model when the catalogue publishes no modality metadata', async () => {
+    fetchModels.mockImplementation(async (params) => {
+      const bare = [{ id: 'model-a' }, { id: 'model-b' }];
+      params.onModelData?.(bare);
+      return bare.map((m) => m.id);
+    });
+
+    const result = await load({ chatOnly: true });
+    expect(result['Marketplace']).toEqual(['model-a', 'model-b']);
+  });
+
+  /** The MODEL_QUERIES cache stores ids only, so a cache hit never invokes
+   *  onModelData — that must degrade to "no filtering", not "no models". */
+  it('keeps every model when the fetch was served from cache', async () => {
+    fetchModels.mockImplementation(async () => catalogue.map((m) => m.id));
+
+    const result = await load({ chatOnly: true });
+    expect(result['Marketplace']).toHaveLength(catalogue.length);
+  });
+});

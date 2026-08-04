@@ -59,6 +59,18 @@ export interface FetchModelsParams {
   userObject?: Partial<IUser>;
   /** Skip MODEL_QUERIES cache (e.g., for user-provided keys) */
   skipCache?: boolean;
+  /**
+   * Receives the raw catalogue entries alongside the id list. `fetchModels`
+   * reduces the response to ids, which is all most callers need — but a
+   * catalogue may also describe what each model can actually do, and that
+   * cannot be recovered from an id. Callers that filter on capability get the
+   * entries here rather than by re-fetching.
+   *
+   * Not invoked on a cache hit: the MODEL_QUERIES cache stores ids only, so a
+   * caller depending on this must treat "not called" as "no metadata" and
+   * fail open.
+   */
+  onModelData?: (data: Array<Record<string, unknown>>) => void;
 }
 
 function applyUserProvidedBaseURLProtection(
@@ -170,6 +182,7 @@ export async function fetchModels({
   headers,
   userObject,
   skipCache = false,
+  onModelData,
 }: FetchModelsParams): Promise<string[]> {
   let models: string[] = [];
   const baseURL = direct ? extractBaseURL(_baseURL ?? '') : _baseURL;
@@ -316,6 +329,9 @@ export async function fetchModels({
       if (modelsCache && cacheKey) {
         await cache.set(getModelCacheTokenConfigKey(cacheKey), endpointTokenConfig);
       }
+    }
+    if (onModelData && Array.isArray(input?.data)) {
+      onModelData(input.data as Array<Record<string, unknown>>);
     }
     models = input.data.map((item: { id: string }) => item.id);
   } catch (error) {
