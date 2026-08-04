@@ -39,6 +39,10 @@ export interface FetchModelsParams {
   allowedAddresses?: string[] | null;
   /** Endpoint name (defaults to 'openAI') */
   name?: string;
+  /** A custom endpoint's declared `provider`, when it names a native client
+   *  (currently only `anthropic`). Distinct from `name`, which for a custom
+   *  endpoint is the admin's display name and never matches an `EModelEndpoint`. */
+  provider?: string;
   /** Whether directEndpoint was configured */
   direct?: boolean;
   /** Whether to fetch from Azure */
@@ -157,6 +161,7 @@ export async function fetchModels({
   baseURLIsUserProvided = false,
   allowedAddresses,
   name = EModelEndpoint.openAI,
+  provider,
   direct = false,
   azure = false,
   userIdQuery = false,
@@ -252,7 +257,12 @@ export async function fetchModels({
       timeout: 5000,
     };
 
-    if (name === EModelEndpoint.anthropic) {
+    /** A custom endpoint declaring `provider: anthropic` talks the Messages API,
+     *  so it authenticates and paginates like Anthropic even though its `name`
+     *  is an arbitrary admin label. */
+    const isAnthropicProvider = provider === EModelEndpoint.anthropic;
+
+    if (name === EModelEndpoint.anthropic || isAnthropicProvider) {
       // Keep configured custom headers (e.g. gateway metadata) while the
       // provider-managed auth/version headers stay authoritative.
       options.headers = {
@@ -277,7 +287,18 @@ export async function fetchModels({
       options.headers['OpenAI-Organization'] = process.env.OPENAI_ORGANIZATION;
     }
 
-    const url = new URL(`${(baseURL ?? '').replace(/\/+$/, '')}${azure ? '' : '/models'}`);
+    /**
+     * OpenAI-compatible base URLs already carry the version segment
+     * (`…/v1`), so `/models` hangs directly off them — and the built-in
+     * Anthropic endpoint hard-codes `https://api.anthropic.com/v1` for the
+     * same reason. A `provider: anthropic` custom row is the exception: its
+     * base URL must omit `/v1` because the Anthropic SDK appends
+     * `/v1/messages` itself, so the version segment has to be put back here.
+     * Without this, the fetch 404s and the picker silently falls back to
+     * `models.default`.
+     */
+    const modelsPath = azure ? '' : isAnthropicProvider ? '/v1/models' : '/models';
+    const url = new URL(`${(baseURL ?? '').replace(/\/+$/, '')}${modelsPath}`);
     if (user && userIdQuery) {
       url.searchParams.append('user', user);
     }

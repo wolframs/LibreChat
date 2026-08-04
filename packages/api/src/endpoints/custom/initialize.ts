@@ -289,6 +289,7 @@ export async function initializeCustom({
       baseURLIsUserProvided: userProvidesURL,
       allowedAddresses: appConfig?.endpoints?.allowedAddresses,
       name: endpoint,
+      provider: endpointConfig.provider,
       user: userId,
       tokenKey,
       userObject: req.user,

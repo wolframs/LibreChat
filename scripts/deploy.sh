@@ -165,6 +165,8 @@ check_marker "cache-TTL pill (client)" "cacheTTL" "/app/client/dist/assets/*.js"
 check_marker "nominal-cost routing"       "routedVia" "/app/packages/api/dist/index.cjs"
 check_marker "dotted gateway pricing"     "claude-opus-4.8" "/app/packages/data-schemas/dist/index.cjs"
 check_marker "readonly param defs (client)" "com_endpoint_prompt_cache_unsupported" "/app/client/dist/assets/*.js"
+check_marker "anthropic model-fetch path"  "isAnthropicProvider" "/app/packages/api/dist/index.cjs"
+check_marker "models.filter"               "applyModelFilter" "/app/packages/api/dist/index.cjs"
 
 echo
 if [[ $MISSING -eq 1 ]]; then

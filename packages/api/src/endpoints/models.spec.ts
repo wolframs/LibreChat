@@ -1102,3 +1102,79 @@ describe('fetchModels caching behavior', () => {
     expect(mockCacheSet).toHaveBeenCalled();
   });
 });
+
+describe('fetchModels for a custom endpoint with provider: anthropic', () => {
+  beforeEach(() => {
+    mockCacheGet.mockResolvedValue(undefined);
+    mockedAxios.get.mockResolvedValue({
+      data: { data: [{ id: 'claude-opus-4.8' }, { id: 'gpt-5.4' }], has_more: false },
+    });
+  });
+
+  afterEach(() => {
+    jest.clearAllMocks();
+  });
+
+  /** The Anthropic SDK appends `/v1/messages` itself, so such a row's baseURL
+   *  deliberately omits `/v1` — the models path has to put it back or the
+   *  fetch 404s and the picker silently falls back to `models.default`. */
+  it('requests /v1/models relative to the versionless base URL', async () => {
+    await fetchModels({
+      apiKey: 'gw-key',
+      baseURL: 'https://gateway.example.com/anthropic',
+      name: 'Gateway (Claude)',
+      provider: EModelEndpoint.anthropic,
+    });
+
+    expect(mockedAxios.get).toHaveBeenCalledWith(
+      'https://gateway.example.com/anthropic/v1/models',
+      expect.any(Object),
+    );
+  });
+
+  it('authenticates with x-api-key rather than a bearer token', async () => {
+    await fetchModels({
+      apiKey: 'gw-key',
+      baseURL: 'https://gateway.example.com/anthropic',
+      name: 'Gateway (Claude)',
+      provider: EModelEndpoint.anthropic,
+    });
+
+    const headers = (mockedAxios.get.mock.calls[0][1] as { headers: Record<string, string> })
+      .headers;
+    expect(headers['x-api-key']).toBe('gw-key');
+    expect(headers['anthropic-version']).toBeDefined();
+    expect(headers.Authorization).toBeUndefined();
+  });
+
+  it('leaves an OpenAI-compatible row on /models with a bearer token', async () => {
+    await fetchModels({
+      apiKey: 'gw-key',
+      baseURL: 'https://gateway.example.com/v1',
+      name: 'Gateway',
+    });
+
+    expect(mockedAxios.get).toHaveBeenCalledWith(
+      'https://gateway.example.com/v1/models',
+      expect.any(Object),
+    );
+    const headers = (mockedAxios.get.mock.calls[0][1] as { headers: Record<string, string> })
+      .headers;
+    expect(headers.Authorization).toBe('Bearer gw-key');
+  });
+
+  /** The built-in Anthropic endpoint hard-codes a baseURL that already ends in
+   *  `/v1`, so it must keep using the bare `/models` suffix. */
+  it('does not double the version segment for the built-in anthropic endpoint', async () => {
+    await fetchModels({
+      apiKey: 'sk-ant',
+      baseURL: 'https://api.anthropic.com/v1',
+      name: EModelEndpoint.anthropic,
+    });
+
+    expect(mockedAxios.get).toHaveBeenCalledWith(
+      'https://api.anthropic.com/v1/models',
+      expect.any(Object),
+    );
+  });
+});

@@ -297,3 +297,78 @@ describe('createLoadConfigModels – in-request fetch coalescing', () => {
     expect(fetchModels).toHaveBeenCalledTimes(1);
   });
 });
+
+describe('createLoadConfigModels – models.filter', () => {
+  const fetchModels = jest.fn();
+
+  /** One gateway, two rows: an OpenAI-compatible catch-all and a native
+   *  Anthropic row that should expose only the Claude slice. */
+  const buildAppConfig = (modelsOverrides: Record<string, unknown>) => ({
+    endpoints: {
+      [EModelEndpoint.custom]: [
+        {
+          name: 'Gateway (Claude)',
+          baseURL: 'https://gateway.example.com/anthropic',
+          apiKey: 'gw-key',
+          provider: EModelEndpoint.anthropic,
+          models: { fetch: true, default: ['claude-opus-4.8'], ...modelsOverrides },
+        },
+      ],
+    },
+  });
+
+  const load = (modelsOverrides: Record<string, unknown>) =>
+    createLoadConfigModels({
+      getAppConfig: jest.fn().mockResolvedValue(buildAppConfig(modelsOverrides)),
+      getUserKeyValues: jest.fn().mockResolvedValue(null),
+      fetchModels,
+    })({ user: { id: 'user-1' }, config: undefined } as unknown as ServerRequest);
+
+  const catalogue = [
+    'claude-opus-4.8',
+    'claude-opus-5',
+    'claude-fable-5',
+    'deepseek-v4-flash',
+    'gpt-5.4',
+    'wan-2.5-image-to-video',
+  ];
+
+  beforeEach(() => {
+    fetchModels.mockReset().mockResolvedValue(catalogue);
+  });
+
+  it('keeps only the matching ids', async () => {
+    const result = await load({ filter: '^claude-' });
+    expect(result['Gateway (Claude)']).toEqual([
+      'claude-opus-4.8',
+      'claude-opus-5',
+      'claude-fable-5',
+    ]);
+  });
+
+  it('matches case-insensitively', async () => {
+    const result = await load({ filter: '^CLAUDE-' });
+    expect(result['Gateway (Claude)']).toHaveLength(3);
+  });
+
+  it('returns the full fetched list when no filter is set', async () => {
+    const result = await load({});
+    expect(result['Gateway (Claude)']).toEqual(catalogue);
+  });
+
+  it('falls back to models.default when the filter matches nothing', async () => {
+    // Better an admin-curated list than an endpoint with an empty picker.
+    const result = await load({ filter: '^nothing-matches-this-' });
+    expect(result['Gateway (Claude)']).toEqual(['claude-opus-4.8']);
+  });
+
+  it('forwards the endpoint provider so the Anthropic models path is used', async () => {
+    await load({ filter: '^claude-' });
+    expect(fetchModels).toHaveBeenCalledWith(
+      expect.objectContaining({
+        name: 'Gateway (Claude)',
+        provider: EModelEndpoint.anthropic,
+      }),
+    );
+  });
+});

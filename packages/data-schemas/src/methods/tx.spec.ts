@@ -2733,10 +2733,47 @@ describe('Dotted gateway model ids', () => {
     }
   });
 
-  it('resolves gateway -fast variants to their base model rate', () => {
-    // `claude-opus-4.6-fast` exists at Surplus; it must not match `claude-opus-4`.
-    expect(getMultiplier({ model: 'claude-opus-4.6-fast', tokenType: 'prompt' })).toBe(
-      tokenValues['claude-opus-4-6'].prompt,
+  /** The `-fast` suffix is a gateway routing tier, not an Anthropic SKU, so it
+   *  must resolve to the base model's rate — that is the nominal price the
+   *  cost dashboard reconciles against. */
+  const fastVariants = [
+    ['claude-opus-4.6-fast', 'claude-opus-4-6'],
+    ['claude-opus-4-7-fast', 'claude-opus-4-7'],
+    ['claude-opus-4-8-fast', 'claude-opus-4-8'],
+    ['claude-opus-5-fast', 'claude-opus-5'],
+  ] as const;
+
+  it.each(fastVariants)('resolves %s to the %s rate', (variant, base) => {
+    expect(getMultiplier({ model: variant, tokenType: 'prompt' })).toBe(tokenValues[base].prompt);
+    expect(getMultiplier({ model: variant, tokenType: 'completion' })).toBe(
+      tokenValues[base].completion,
+    );
+  });
+
+  /** Every Claude id the Surplus catalogue serves, as of 2026-08-04. Adding a
+   *  model to the gateway row without a rate entry does not fail loudly — it
+   *  silently bills at the generic `claude-` fallback — so pin the whole list. */
+  const gatewayClaudeIds = [
+    'claude-fable-5',
+    'claude-haiku-4.5',
+    'claude-opus-4-7-fast',
+    'claude-opus-4-8-fast',
+    'claude-opus-4.5',
+    'claude-opus-4.6',
+    'claude-opus-4.6-fast',
+    'claude-opus-4.7',
+    'claude-opus-4.8',
+    'claude-opus-5',
+    'claude-opus-5-fast',
+    'claude-sonnet-4.5',
+    'claude-sonnet-4.6',
+    'claude-sonnet-5',
+  ];
+
+  it.each(gatewayClaudeIds)('prices %s above the generic claude- fallback', (model) => {
+    expect(getMultiplier({ model, tokenType: 'prompt' })).not.toBe(tokenValues['claude-'].prompt);
+    expect(getMultiplier({ model, tokenType: 'completion' })).not.toBe(
+      tokenValues['claude-'].completion,
     );
   });
 });

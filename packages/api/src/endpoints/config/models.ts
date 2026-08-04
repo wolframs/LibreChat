@@ -33,6 +33,45 @@ function headersFingerprint(headers: Record<string, string> | undefined): string
   return crypto.createHash('sha256').update(JSON.stringify(ordered)).digest('hex').slice(0, 16);
 }
 
+/**
+ * Narrows a fetched model list to the ids matching an endpoint's
+ * `models.filter` regex. The pattern is validated at config load, so an
+ * invalid one cannot reach here; if it somehow does, the unfiltered list is
+ * returned rather than an empty picker.
+ *
+ * A pattern that matches nothing is logged and treated as "no models fetched",
+ * which lets the caller fall back to `models.default` instead of leaving the
+ * endpoint unusable.
+ */
+export function applyModelFilter(
+  models: string[] | undefined,
+  filter: string | undefined,
+  endpointName: string,
+): string[] | undefined {
+  if (!filter || !models?.length) {
+    return models;
+  }
+
+  let pattern: RegExp;
+  try {
+    pattern = new RegExp(filter, 'i');
+  } catch (error) {
+    logger.warn(
+      `[loadConfigModels] Invalid models.filter for "${endpointName}" (${filter}); ignoring it`,
+      error,
+    );
+    return models;
+  }
+
+  const matched = models.filter((model) => pattern.test(model));
+  if (matched.length === 0) {
+    logger.warn(
+      `[loadConfigModels] models.filter "${filter}" for "${endpointName}" matched none of the ${models.length} fetched models; falling back to models.default`,
+    );
+  }
+  return matched;
+}
+
 interface ResolvedEndpoint {
   name: string;
   endpoint: TEndpoint;
@@ -188,6 +227,7 @@ export function createLoadConfigModels(deps: LoadConfigModelsDeps) {
           uniqueKeyToTokenKey[uniqueKey] = tokenKey;
           fetchPromisesMap[uniqueKey] = fetchModels({
             name,
+            provider: endpoint.provider,
             apiKey: API_KEY,
             baseURL: BASE_URL,
             baseURLIsUserProvided: false,
@@ -225,6 +265,7 @@ export function createLoadConfigModels(deps: LoadConfigModelsDeps) {
               }
               return fetchModels({
                 name,
+                provider: endpoint.provider,
                 apiKey: resolvedApiKey,
                 baseURL: resolvedBaseURL,
                 baseURLIsUserProvided,
@@ -275,7 +316,11 @@ export function createLoadConfigModels(deps: LoadConfigModelsDeps) {
         const defaults = (endpoint.models?.default ?? []).map((m) =>
           typeof m === 'string' ? m : m.name,
         );
-        modelsConfig[name] = !modelData?.length ? defaults : modelData;
+        /** Applied per endpoint, not per fetch: sibling rows can share one
+         *  base URL (and therefore one deduped fetch) while each exposes a
+         *  different slice of what that gateway serves. */
+        const filtered = applyModelFilter(modelData, endpoint.models?.filter, name);
+        modelsConfig[name] = !filtered?.length ? defaults : filtered;
       }
 
       /** A shared fetch caches token config under one endpoint's tokenKey;

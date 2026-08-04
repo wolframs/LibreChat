@@ -967,6 +967,33 @@ export const endpointSchema = baseEndpointSchema.merge(
       default: z.array(modelItemSchema).min(1),
       fetch: z.boolean().optional(),
       userIdQuery: z.boolean().optional(),
+      /**
+       * Case-insensitive regex applied to each fetched model id, keeping only
+       * the matches. Only affects `fetch: true` results — `default` is the
+       * admin's own list and is never filtered.
+       *
+       * The use case is one gateway fronted by several endpoint rows: a
+       * marketplace may serve hundreds of ids over one base URL, and a row
+       * that exists to expose a single family (e.g. Claude via the native
+       * Anthropic client) should not also list every unrelated model.
+       *
+       * Validated here rather than at match time so a bad pattern fails the
+       * config load loudly, instead of silently filtering every model away.
+       */
+      filter: z
+        .string()
+        .refine(
+          (value) => {
+            try {
+              new RegExp(value);
+              return true;
+            } catch {
+              return false;
+            }
+          },
+          { message: 'models.filter must be a valid regular expression' },
+        )
+        .optional(),
     }),
     iconURL: z.string().optional(),
     modelDisplayLabel: z.string().optional(),
