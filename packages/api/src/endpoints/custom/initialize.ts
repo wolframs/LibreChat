@@ -15,7 +15,7 @@ import type {
   AnthropicModelOptions,
 } from '~/types';
 import { getLLMConfig as getAnthropicLLMConfig } from '~/endpoints/anthropic/llm';
-import { getUserKeyValuesSafe, resolveUserEndpoint } from '~/endpoints/profiles';
+import { getUserKeyValuesSafe, resolveUserEndpoint, markRequestRouting } from '~/endpoints/profiles';
 import { extractDefaultParams } from '~/endpoints/openai/llm';
 import { isUserProvided, checkUserKeyExpiry } from '~/utils';
 import { getOpenAIConfig } from '~/endpoints/openai/config';
@@ -241,6 +241,8 @@ export async function initializeCustom({
     endpoint,
     allowedAddresses: appConfig?.endpoints?.allowedAddresses,
   });
+
+  markRequestRouting(req, resolved);
 
   const apiKey = resolved.apiKey;
   const baseURL = resolved.baseURL;

@@ -52,6 +52,18 @@ export interface TxData {
   readTokens?: number;
   balance?: { enabled?: boolean };
   transactions?: { enabled?: boolean };
+  /** Endpoint profile that served this request; marks `rate` as nominal. */
+  routedVia?: RoutedVia;
+}
+
+/**
+ * Identity of a user endpoint profile that served a request, carried from the
+ * endpoint initializer through to the transaction record.
+ */
+export interface RoutedVia {
+  profileId?: string;
+  profileName?: string;
+  baseURL?: string;
 }
 
 /** Return value from a successful transaction that also updates the balance */

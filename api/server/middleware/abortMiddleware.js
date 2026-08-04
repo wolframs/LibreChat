@@ -59,6 +59,7 @@ const isAbortError = (error) => {
  * @param {Array<Object>} params.collectedUsage - Usage metadata from all models
  * @param {string} [params.fallbackModel] - Fallback model name if not in usage
  * @param {string} [params.messageId] - The response message ID for transaction correlation
+ * @param {object} [params.routedVia] - Endpoint profile that served the aborted generation
  */
 async function spendCollectedUsage({
   userId,
@@ -66,6 +67,7 @@ async function spendCollectedUsage({
   collectedUsage,
   fallbackModel,
   messageId,
+  routedVia,
 }) {
   if (!collectedUsage || collectedUsage.length === 0) {
     return;
@@ -85,6 +87,7 @@ async function spendCollectedUsage({
       context: 'abort',
       messageId,
       model: fallbackModel,
+      routedVia,
     },
   );
 
@@ -157,11 +160,18 @@ async function abortMessage(req, res) {
       collectedUsage,
       fallbackModel: jobData?.model,
       messageId: jobData?.responseMessageId,
+      /** Recorded on the job during initialization — this request never saw it. */
+      routedVia: jobData?.routedVia,
     });
   } else {
     // Fallback: no collected usage, use text-based token counting for primary model only
     await db.spendTokens(
-      { ...responseMessage, context: 'incomplete', user: userId },
+      {
+        ...responseMessage,
+        context: 'incomplete',
+        user: userId,
+        routedVia: jobData?.routedVia,
+      },
       { promptTokens, completionTokens },
     );
   }

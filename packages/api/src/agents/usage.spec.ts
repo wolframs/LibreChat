@@ -83,6 +83,43 @@ describe('recordCollectedUsage', () => {
       expect(result).toEqual({ input_tokens: 100, output_tokens: 50 });
     });
 
+    it('omits routedVia when the request went straight to the provider', async () => {
+      await recordCollectedUsage(deps, {
+        ...baseParams,
+        collectedUsage: [{ input_tokens: 100, output_tokens: 50, model: 'gpt-4' }],
+      });
+
+      expect(mockSpendTokens).toHaveBeenCalledWith(
+        expect.not.objectContaining({ routedVia: expect.anything() }),
+        expect.anything(),
+      );
+    });
+
+    it('stamps routedVia on every usage item when a profile served the request', async () => {
+      const routedVia = {
+        profileId: 'p1',
+        profileName: 'LiteLLM proxy',
+        baseURL: 'https://proxy.example.com/v1',
+      };
+
+      await recordCollectedUsage(deps, {
+        ...baseParams,
+        routedVia,
+        /** Routing resolves once per request, so a multi-call batch is all one
+         *  destination — every transaction must carry the marker, not just the
+         *  first, or a partial stamp would read as partially-verified spend. */
+        collectedUsage: [
+          { input_tokens: 100, output_tokens: 50, model: 'gpt-4' },
+          { input_tokens: 200, output_tokens: 60, model: 'gpt-4' },
+        ],
+      });
+
+      expect(mockSpendTokens).toHaveBeenCalledTimes(2);
+      for (const call of mockSpendTokens.mock.calls) {
+        expect(call[0]).toEqual(expect.objectContaining({ routedVia }));
+      }
+    });
+
     it('should skip null entries in collectedUsage', async () => {
       const collectedUsage = [
         { input_tokens: 100, output_tokens: 50, model: 'gpt-4' },

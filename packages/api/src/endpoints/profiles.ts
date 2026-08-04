@@ -1,6 +1,6 @@
 import { ErrorTypes, DEFAULT_ENDPOINT_PROFILE_ID } from 'librechat-data-provider';
 import type { TEndpointProfile, TUserEndpointProfiles } from 'librechat-data-provider';
-import type { UserKeyValues, EndpointDbMethods } from '~/types';
+import type { UserKeyValues, EndpointDbMethods, ServerRequest } from '~/types';
 import { validateEndpointURL } from '~/auth';
 
 /**
@@ -92,6 +92,29 @@ export function getActiveProfile(
     return undefined;
   }
   return profiles?.profiles?.find((profile) => profile.id === activeId);
+}
+
+/**
+ * Records on the request which endpoint profile served it, so the billing code
+ * downstream can mark the resulting transaction's rate as nominal.
+ *
+ * Called by every initializer that resolves profiles. A no-op when the default
+ * endpoint won, which leaves `req.endpointProfile` undefined and the transaction
+ * indistinguishable from any other direct-to-provider call — correctly, because
+ * that is what it is.
+ */
+export function markRequestRouting(
+  req: { endpointProfile?: ServerRequest['endpointProfile'] },
+  resolved: Pick<ResolvedUserEndpoint, 'activeProfile' | 'baseURL'>,
+): void {
+  if (!resolved.activeProfile) {
+    return;
+  }
+  req.endpointProfile = {
+    profileId: resolved.activeProfile.id,
+    profileName: resolved.activeProfile.name,
+    baseURL: resolved.baseURL,
+  };
 }
 
 export interface ResolveUserEndpointParams {

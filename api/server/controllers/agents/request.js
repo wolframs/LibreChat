@@ -364,6 +364,16 @@ const ResumableAgentController = async (req, res, next, initializeClient, addTit
     }
 
     client = result.client;
+    /** Endpoint routing is resolved during initialization, so the job metadata
+     *  can only learn it now. The abort path reads it from here: an abort
+     *  arrives on a *different* HTTP request, which never saw
+     *  `req.endpointProfile`, so without this its spend would be recorded as
+     *  though it went straight to the provider. */
+    if (req.endpointProfile) {
+      await GenerationJobManager.updateMetadata(streamId, {
+        routedVia: req.endpointProfile,
+      });
+    }
     // Tag the client with THIS generation's identity so HITL terminal side-effects
     // (pause CAS, checkpoint prune) can tell whether a newer request has since replaced
     // this job on the same conversationId before acting on it.

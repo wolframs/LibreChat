@@ -1,4 +1,5 @@
 import { ErrorTypes } from 'librechat-data-provider';
+import type { ServerRequest } from '~/types';
 
 const mockValidateEndpointURL = jest.fn();
 jest.mock('~/auth', () => ({
@@ -10,6 +11,7 @@ import {
   getActiveProfile,
   resolveUserEndpoint,
   getUserKeyValuesSafe,
+  markRequestRouting,
 } from './profiles';
 
 const PROFILE = {
@@ -150,6 +152,39 @@ describe('resolveUserEndpoint', () => {
 
     expect(result.baseURL).toBe('https://api.anthropic.com');
     expect(result.baseURLIsUserProvided).toBe(false);
+  });
+});
+
+describe('markRequestRouting', () => {
+  it('leaves the request untouched when the default endpoint won', () => {
+    const req: Pick<ServerRequest, 'endpointProfile'> = {};
+
+    markRequestRouting(req, { activeProfile: undefined, baseURL: 'https://api.anthropic.com' });
+
+    /** Absence is meaningful: it is what tells the billing code the recorded
+     *  rate is the real provider rate, not a nominal one. */
+    expect(req.endpointProfile).toBeUndefined();
+  });
+
+  it('records the profile identity when a custom endpoint served the request', () => {
+    const req: Pick<ServerRequest, 'endpointProfile'> = {};
+
+    markRequestRouting(req, { activeProfile: PROFILE, baseURL: PROFILE.baseURL });
+
+    expect(req.endpointProfile).toEqual({
+      profileId: 'p1',
+      profileName: 'LiteLLM proxy',
+      baseURL: 'https://proxy.example.com/v1',
+    });
+  });
+
+  it('never carries the profile API key onto the request', () => {
+    const req: Pick<ServerRequest, 'endpointProfile'> = {};
+
+    markRequestRouting(req, { activeProfile: PROFILE, baseURL: PROFILE.baseURL });
+
+    expect(req.endpointProfile).not.toHaveProperty('apiKey');
+    expect(JSON.stringify(req.endpointProfile)).not.toContain('sk-profile');
   });
 });
 

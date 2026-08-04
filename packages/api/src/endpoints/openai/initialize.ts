@@ -12,7 +12,7 @@ import {
   checkUserKeyExpiry,
   getAzureCredentials,
 } from '~/utils';
-import { getUserKeyValuesSafe, resolveUserEndpoint } from '~/endpoints/profiles';
+import { getUserKeyValuesSafe, resolveUserEndpoint, markRequestRouting } from '~/endpoints/profiles';
 import { validateEndpointURL } from '~/auth';
 import { getOpenAIConfig } from './config';
 
@@ -79,6 +79,8 @@ export async function initializeOpenAI({
     endpoint,
     allowedAddresses: appConfig?.endpoints?.allowedAddresses,
   });
+
+  markRequestRouting(req, resolved);
 
   let apiKey = resolved.apiKey;
   const baseURL = resolved.baseURL;

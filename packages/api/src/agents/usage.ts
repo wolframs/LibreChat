@@ -496,6 +496,12 @@ export interface RecordUsageParams {
    * callers (responses.js / openai.js) omit it and use `endpointTokenConfig`.
    */
   resolveEndpointTokenConfig?: (usage: UsageMetadata) => EndpointTokenConfig | undefined;
+  /**
+   * Endpoint profile that served the request, from `req.endpointProfile`.
+   * Applies to every usage item in the batch: they all went to the same base
+   * URL, since routing is resolved once per request at initialization.
+   */
+  routedVia?: TxMetadata['routedVia'];
 }
 
 export interface RecordUsageResult {
@@ -524,6 +530,7 @@ export async function recordCollectedUsage(
     collectedUsage,
     endpointTokenConfig,
     resolveEndpointTokenConfig,
+    routedVia,
     context = 'message',
   } = params;
 
@@ -591,6 +598,7 @@ export async function recordCollectedUsage(
           : endpointTokenConfig,
         context: usageContext,
         model: usage.model ?? model,
+        ...(routedVia && { routedVia }),
       };
 
       if (useBulk) {

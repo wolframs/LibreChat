@@ -1,4 +1,4 @@
-import type { TxData, TransactionResult } from './transaction';
+import type { TxData, TransactionResult, RoutedVia } from './transaction';
 import logger from '~/config/winston';
 
 /** Base transaction context passed by callers — does not include fields added internally */
@@ -11,6 +11,11 @@ export interface SpendTxData {
   balance?: { enabled?: boolean };
   transactions?: { enabled?: boolean };
   valueKey?: string;
+  /**
+   * Endpoint profile that served the request. Spread into both transactions, so
+   * the resulting `rate` can be recognised as nominal rather than billed.
+   */
+  routedVia?: RoutedVia;
 }
 
 export function createSpendTokensMethods(

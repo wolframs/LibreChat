@@ -39,6 +39,26 @@ def _cost_since(since):
     return (result[0]["micro"] / MICRO_PER_USD) if result else 0.0
 
 
+# A transaction carrying `routedVia` was served by a user endpoint profile — some
+# other base URL than the provider's own API. Its `rate` still comes from the
+# model-name rate table, so the cost shown for it is what the provider *would*
+# have charged, not what the gateway did. Everything below tracks that subset
+# separately so nominal spend is never presented as if it were verified.
+NOMINAL_COST = {
+    "$sum": {"$cond": [{"$ifNull": ["$routedVia", False]}, {"$abs": "$tokenValue"}, 0]}
+}
+
+
+def _nominal_since(since):
+    match = {"createdAt": {"$gte": since}} if since else {}
+    pipeline = [
+        {"$match": {**match, "routedVia": {"$exists": True}}},
+        {"$group": {"_id": None, "micro": {"$sum": {"$abs": "$tokenValue"}}}},
+    ]
+    result = list(transactions.aggregate(pipeline))
+    return (result[0]["micro"] / MICRO_PER_USD) if result else 0.0
+
+
 def _split_io(rows, key_fn, extras=None):
     """Collapse [(key, tokenType) -> tokens, cost] rows into per-key in/out totals."""
     out = {}
@@ -46,7 +66,14 @@ def _split_io(rows, key_fn, extras=None):
         key = key_fn(r["_id"])
         bucket = out.setdefault(
             key,
-            {"in_tokens": 0, "out_tokens": 0, "in_cost": 0.0, "out_cost": 0.0, "messages": 0},
+            {
+                "in_tokens": 0,
+                "out_tokens": 0,
+                "in_cost": 0.0,
+                "out_cost": 0.0,
+                "messages": 0,
+                "nominal_cost": 0.0,
+            },
         )
         if r["_id"]["type"] == "prompt":
             bucket["in_tokens"] = r["tokens"]
@@ -55,11 +82,48 @@ def _split_io(rows, key_fn, extras=None):
             bucket["out_tokens"] = r["tokens"]
             bucket["out_cost"] = r["cost"] / MICRO_PER_USD
         bucket["messages"] += r["messages"]
+        bucket["nominal_cost"] += r.get("nominal", 0) / MICRO_PER_USD
         if extras:
             bucket.update(extras(r))
     for bucket in out.values():
         bucket["total_cost"] = bucket["in_cost"] + bucket["out_cost"]
+        bucket["has_nominal"] = bucket["nominal_cost"] > 0
     return out
+
+
+def _by_routing():
+    """Spend split by where the request actually went."""
+    rows = list(
+        transactions.aggregate(
+            [
+                {
+                    "$group": {
+                        "_id": {
+                            "name": "$routedVia.profileName",
+                            "url": "$routedVia.baseURL",
+                            "type": "$tokenType",
+                        },
+                        "tokens": {"$sum": {"$abs": "$rawAmount"}},
+                        "cost": {"$sum": {"$abs": "$tokenValue"}},
+                        "messages": {"$sum": 1},
+                    }
+                }
+            ]
+        )
+    )
+
+    def extras(r):
+        url = r["_id"].get("url")
+        return {
+            "name": r["_id"].get("name") or ("Direct to provider" if not url else "(unnamed)"),
+            "url": url or "provider default",
+            "nominal": bool(url),
+        }
+
+    grouped = _split_io(
+        rows, key_fn=lambda k: (k.get("name"), k.get("url")), extras=extras
+    )
+    return sorted(grouped.values(), key=lambda r: r["total_cost"], reverse=True)
 
 
 def _by_model():
@@ -72,6 +136,7 @@ def _by_model():
                         "tokens": {"$sum": {"$abs": "$rawAmount"}},
                         "cost": {"$sum": {"$abs": "$tokenValue"}},
                         "messages": {"$sum": 1},
+                        "nominal": NOMINAL_COST,
                     }
                 }
             ]
@@ -93,6 +158,7 @@ def _by_conversation():
                         "tokens": {"$sum": {"$abs": "$rawAmount"}},
                         "cost": {"$sum": {"$abs": "$tokenValue"}},
                         "messages": {"$sum": 1},
+                        "nominal": NOMINAL_COST,
                     }
                 },
                 {
@@ -167,6 +233,15 @@ tr:hover td { background: var(--hover); }
 .muted { color: var(--muted); }
 .cost { color: var(--accent); font-weight: 500; }
 .title-cell { max-width: 460px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.warn { background: #2b2118; border: 1px solid #6b4f2a; border-left: 4px solid #d08a3e;
+        border-radius: 5px; padding: 0.9em 1.1em; margin: 1.5em 0; }
+.warn .warn-title { color: #e0a75f; font-weight: 600; margin-bottom: 0.35em; }
+.warn p { margin: 0.4em 0 0; color: var(--muted); font-size: 0.92em; }
+.tag { display: inline-block; font-size: 0.72em; padding: 0.1em 0.45em; border-radius: 3px;
+       border: 1px solid #6b4f2a; color: #e0a75f; margin-left: 0.4em; vertical-align: middle;
+       font-family: "JetBrains Mono", ui-monospace, monospace; }
+.tag.ok { border-color: #3a4a35; color: #8fae7d; }
+.nominal-cost { color: #e0a75f; font-weight: 500; }
 footer { color: var(--dim); font-size: 0.78em; text-align: right; margin: 3em 0 1em;
          font-family: "JetBrains Mono", ui-monospace, monospace; }
 a { color: var(--accent); text-decoration: none; }
@@ -176,7 +251,7 @@ a:hover { text-decoration: underline; }
 <body>
 
 <h1>LibreChat cost</h1>
-<div class="subhead">Live from MongoDB <span class="mono">transactions</span>. Costs are USD; numbers reflect what LibreChat itself charged against each conversation using <span class="mono">rate × tokens</span> at message time.</div>
+<div class="subhead">Live from MongoDB <span class="mono">transactions</span>. Costs are USD; numbers reflect what LibreChat itself charged against each conversation using <span class="mono">rate × tokens</span> at message time. Rates come from the model-name table, so anything routed through a custom base URL is an estimate &mdash; see <em>By routing</em>.</div>
 
 <div class="summary">
   <div class="card"><div class="label">Today</div><div class="value">${{ "%.4f"|format(totals.today) }}</div></div>
@@ -184,6 +259,47 @@ a:hover { text-decoration: underline; }
   <div class="card"><div class="label">Last 30 days</div><div class="value">${{ "%.4f"|format(totals.month) }}</div></div>
   <div class="card"><div class="label">All time</div><div class="value">${{ "%.4f"|format(totals.all) }}</div></div>
 </div>
+
+{% if totals.nominal > 0 %}
+<div class="warn">
+  <div class="warn-title">${{ "%.4f"|format(totals.nominal) }} of the all-time total is nominal, not billed</div>
+  <p>That spend was served through a custom base URL (an endpoint profile), but priced from the
+  model-name rate table &mdash; i.e. <em>what the provider would have charged</em>, not what the
+  gateway actually did. A gateway that re-routes to a different upstream, or prices differently,
+  is invisible to that table.</p>
+  <p>Treat these figures as a lower-confidence estimate. The destination is recorded on each
+  transaction (<span class="mono">routedVia</span>), so real rates can be reconciled later.</p>
+</div>
+{% endif %}
+
+<h2>By routing</h2>
+<div class="subhead">Where requests actually went. Only <span class="mono">Direct to provider</span> rows are priced against rates we control.</div>
+<table>
+<thead><tr>
+  <th class="left">Destination</th>
+  <th class="left">Base URL</th>
+  <th>Messages</th>
+  <th>Input tokens</th>
+  <th>Output tokens</th>
+  <th>Total $</th>
+  <th class="left">Confidence</th>
+</tr></thead>
+<tbody>
+{% for r in by_routing %}
+<tr>
+  <td class="left">{{ r.name }}</td>
+  <td class="left mono dim">{{ r.url }}</td>
+  <td class="num">{{ "{:,}".format(r.messages) }}</td>
+  <td class="num">{{ "{:,}".format(r.in_tokens) }}</td>
+  <td class="num">{{ "{:,}".format(r.out_tokens) }}</td>
+  <td class="num {% if r.nominal %}nominal-cost{% else %}cost{% endif %}">${{ "%.4f"|format(r.total_cost) }}</td>
+  <td class="left">
+    {% if r.nominal %}<span class="tag">nominal</span>{% else %}<span class="tag ok">billed rate</span>{% endif %}
+  </td>
+</tr>
+{% endfor %}
+</tbody>
+</table>
 
 <h2>By model</h2>
 <table>
@@ -199,7 +315,7 @@ a:hover { text-decoration: underline; }
 <tbody>
 {% for m in by_model %}
 <tr>
-  <td class="left mono">{{ m.model }}</td>
+  <td class="left mono">{{ m.model }}{% if m.has_nominal %}<span class="tag" title="${{ "%.4f"|format(m.nominal_cost) }} of this was routed through a custom base URL and is priced nominally">~${{ "%.4f"|format(m.nominal_cost) }} nominal</span>{% endif %}</td>
   <td class="num">{{ "{:,}".format(m.messages) }}</td>
   <td class="num">{{ "{:,}".format(m.in_tokens) }}</td>
   <td class="num">{{ "{:,}".format(m.out_tokens) }}</td>
@@ -228,7 +344,7 @@ a:hover { text-decoration: underline; }
 <tbody>
 {% for c in by_conv %}
 <tr>
-  <td class="left title-cell" title="{{ c.title }}">{{ c.title }}</td>
+  <td class="left title-cell" title="{{ c.title }}">{{ c.title }}{% if c.has_nominal %}<span class="tag" title="${{ "%.4f"|format(c.nominal_cost) }} routed through a custom base URL; priced nominally">nominal</span>{% endif %}</td>
   <td class="left muted">{{ c.endpoint }}</td>
   <td class="left mono">{{ c.model }}</td>
   <td class="num">{{ "{:,}".format(c.in_tokens) }}</td>
@@ -259,12 +375,14 @@ def index():
         "week": _cost_since(now - timedelta(days=7)),
         "month": _cost_since(now - timedelta(days=30)),
         "all": _cost_since(None),
+        "nominal": _nominal_since(None),
     }
     return render_template_string(
         TEMPLATE,
         totals=totals,
         by_model=_by_model(),
         by_conv=_by_conversation(),
+        by_routing=_by_routing(),
         now=now.strftime("%Y-%m-%d %H:%M:%S UTC"),
         tx_count=transactions.estimated_document_count(),
     )

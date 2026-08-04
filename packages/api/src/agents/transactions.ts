@@ -82,6 +82,9 @@ export interface TxMetadata {
   balance?: Partial<TCustomConfig['balance']> | null;
   transactions?: Partial<TTransactionsConfig>;
   endpointTokenConfig?: EndpointTokenConfig;
+  /** Endpoint profile that served the request. Spread verbatim into every
+   *  prepared doc, so bulk and non-bulk paths record it identically. */
+  routedVia?: TransactionData['routedVia'];
 }
 
 export interface BulkWriteDeps {

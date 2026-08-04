@@ -1066,6 +1066,9 @@ class AgentClient extends BaseClient {
         transactions,
         endpointTokenConfig: this.options.endpointTokenConfig,
         resolveEndpointTokenConfig: (usage) => this.resolveAgentEndpointTokenConfig(usage),
+        /** Set only when a user endpoint profile served this request; makes the
+         *  recorded rate identifiable as nominal rather than billed. */
+        routedVia: this.options.req?.endpointProfile,
       },
     );
 
@@ -2306,6 +2309,7 @@ class AgentClient extends BaseClient {
           conversationId: this.conversationId,
           user: this.user ?? this.options.req.user?.id,
           endpointTokenConfig: this.options.endpointTokenConfig,
+          routedVia: this.options.req?.endpointProfile,
         },
         { promptTokens, completionTokens },
       );
@@ -2325,6 +2329,7 @@ class AgentClient extends BaseClient {
             conversationId: this.conversationId,
             user: this.user ?? this.options.req.user?.id,
             endpointTokenConfig: this.options.endpointTokenConfig,
+            routedVia: this.options.req?.endpointProfile,
           },
           { completionTokens: usage.reasoning_tokens },
         );

@@ -1,7 +1,7 @@
 import { EModelEndpoint, AuthKeys } from 'librechat-data-provider';
 import type { BaseInitializeParams, InitializeResultBase, AnthropicConfigOptions } from '~/types';
 import { loadAnthropicVertexCredentials, getVertexCredentialOptions } from './vertex';
-import { getUserKeyValuesSafe, resolveUserEndpoint } from '~/endpoints/profiles';
+import { getUserKeyValuesSafe, resolveUserEndpoint, markRequestRouting } from '~/endpoints/profiles';
 import { checkUserKeyExpiry, isEnabled, mergeHeaders } from '~/utils';
 import { getLLMConfig } from './llm';
 
@@ -96,6 +96,7 @@ export async function initializeAnthropic({
     credentials[AuthKeys.ANTHROPIC_API_KEY] = resolved.apiKey;
     resolvedBaseURL = resolved.baseURL;
     baseURLIsUserProvided = resolved.baseURLIsUserProvided;
+    markRequestRouting(req, resolved);
   }
 
   const anthropicConfig = appConfig?.endpoints?.[EModelEndpoint.anthropic];

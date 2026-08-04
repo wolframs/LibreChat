@@ -164,6 +164,7 @@ check_marker "prompt-cache TTL wiring" "promptCacheTtl" "/app/packages/api/dist/
 check_marker "cache-TTL pill (client)" "cacheTTL" "/app/client/dist/assets/*.js"
 check_marker "endpoint profiles (server)" "endpointProfiles" "/app/packages/api/dist/index.cjs"
 check_marker "endpoint profiles (client)" "com_endpoint_profile_label" "/app/client/dist/assets/*.js"
+check_marker "nominal-cost routing"       "routedVia" "/app/packages/api/dist/index.cjs"
 
 echo
 if [[ $MISSING -eq 1 ]]; then
