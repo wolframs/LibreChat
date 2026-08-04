@@ -2690,3 +2690,53 @@ describe('Premium Token Pricing', () => {
 
 // Cross-package sync validation tests (tokens.ts ↔ tx.ts) moved to
 // packages/api tests since they require maxTokensMap from @librechat/api.
+
+describe('Dotted gateway model ids', () => {
+  /** Inference gateways serve `claude-opus-4.8`; Anthropic serves `claude-opus-4-8`.
+   * Because pattern matching is a substring match, a dotted id with no entry of its
+   * own falls through to a shorter legacy key rather than failing loudly. */
+  const dottedPairs = [
+    ['claude-haiku-4.5', 'claude-haiku-4-5'],
+    ['claude-sonnet-4.5', 'claude-sonnet-4-5'],
+    ['claude-sonnet-4.6', 'claude-sonnet-4-6'],
+    ['claude-opus-4.5', 'claude-opus-4-5'],
+    ['claude-opus-4.6', 'claude-opus-4-6'],
+    ['claude-opus-4.7', 'claude-opus-4-7'],
+    ['claude-opus-4.8', 'claude-opus-4-8'],
+  ] as const;
+
+  it.each(dottedPairs)('prices %s the same as %s', (dotted, hyphenated) => {
+    expect(tokenValues[dotted]).toBeDefined();
+    expect(getMultiplier({ model: dotted, tokenType: 'prompt' })).toBe(
+      getMultiplier({ model: hyphenated, tokenType: 'prompt' }),
+    );
+    expect(getMultiplier({ model: dotted, tokenType: 'completion' })).toBe(
+      getMultiplier({ model: hyphenated, tokenType: 'completion' }),
+    );
+  });
+
+  it.each(dottedPairs)('applies %s cache rates matching %s', (dotted, hyphenated) => {
+    expect(cacheTokenValues[dotted]).toBeDefined();
+    expect(getCacheMultiplier({ model: dotted, cacheType: 'write' })).toBe(
+      getCacheMultiplier({ model: hyphenated, cacheType: 'write' }),
+    );
+    expect(getCacheMultiplier({ model: dotted, cacheType: 'read' })).toBe(
+      getCacheMultiplier({ model: hyphenated, cacheType: 'read' }),
+    );
+  });
+
+  it('does not let a dotted id fall through to the generic claude- rate', () => {
+    for (const [dotted] of dottedPairs) {
+      expect(getMultiplier({ model: dotted, tokenType: 'prompt' })).not.toBe(
+        tokenValues['claude-'].prompt,
+      );
+    }
+  });
+
+  it('resolves gateway -fast variants to their base model rate', () => {
+    // `claude-opus-4.6-fast` exists at Surplus; it must not match `claude-opus-4`.
+    expect(getMultiplier({ model: 'claude-opus-4.6-fast', tokenType: 'prompt' })).toBe(
+      tokenValues['claude-opus-4-6'].prompt,
+    );
+  });
+});
