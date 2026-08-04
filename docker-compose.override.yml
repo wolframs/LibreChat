@@ -67,6 +67,12 @@ services:
     container_name: cost-dashboard
     environment:
       - MONGO_URI=mongodb://mongodb:27017/LibreChat
+      # Optional. With a Surplus Intelligence buyer key the dashboard settles
+      # gateway-routed spend against that gateway's own billing records instead
+      # of leaving it priced from the model-name rate table. Unset: everything
+      # routed through a profile simply stays flagged nominal.
+      - SURPLUS_API_KEY=${SURPLUS_API_KEY:-}
+      - SURPLUS_RECONCILE_INTERVAL=${SURPLUS_RECONCILE_INTERVAL:-3600}
     depends_on:
       - mongodb
     restart: unless-stopped

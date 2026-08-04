@@ -12,6 +12,7 @@ import type { ServerRequest, GetUserKeyValuesFunction, UserKeyValues } from '~/t
 import type { FetchModelsParams } from '~/endpoints/models';
 import { fetchModels as defaultFetchModels } from '~/endpoints/models';
 import { getTokenConfigKey } from '~/endpoints/custom/initialize';
+import { getActiveProfile } from '~/endpoints/profiles';
 import { validateEndpointURL } from '~/auth';
 import { tokenConfigCache } from '~/cache';
 import { isUserProvided } from '~/utils';
@@ -127,11 +128,11 @@ export function createLoadConfigModels(deps: LoadConfigModelsDeps) {
       };
       resolved.push(entry);
 
-      if (
-        endpoint.models?.fetch &&
-        (entry.apiKeyIsUserProvided || entry.baseURLIsUserProvided) &&
-        req.user?.id
-      ) {
+      /** Every fetch-enabled endpoint is looked up, not just the user-provided
+       *  ones: an endpoint profile can redirect a fully admin-configured
+       *  endpoint, and the model list has to come from wherever the requests
+       *  will actually go. */
+      if (endpoint.models?.fetch && req.user?.id) {
         userKeyEndpoints.push(entry);
       }
     }
@@ -180,7 +181,11 @@ export function createLoadConfigModels(deps: LoadConfigModelsDeps) {
       // fetched model list within the same request.
       const uniqueKey = `${BASE_URL}__${API_KEY}__${headersFingerprint(endpointHeaders)}`;
 
-      if (models?.fetch && !apiKeyIsUserProvided && !baseURLIsUserProvided) {
+      /** A selected profile redirects this endpoint, so its model list has to be
+       *  fetched per user from that destination rather than shared. */
+      const activeProfile = getActiveProfile(userKeyMap.get(name)?.endpointProfiles);
+
+      if (models?.fetch && !activeProfile && !apiKeyIsUserProvided && !baseURLIsUserProvided) {
         if (!fetchPromisesMap[uniqueKey]) {
           /** User-scoped when configured headers resolve per user — the
            *  derived token config must not be cached under the shared name */
@@ -207,16 +212,26 @@ export function createLoadConfigModels(deps: LoadConfigModelsDeps) {
 
       if (models?.fetch && userKeyMap.has(name)) {
         const userKeyValues = userKeyMap.get(name);
-        const resolvedApiKey =
-          apiKeyIsUserProvided || baseURLIsUserProvided ? userKeyValues?.apiKey : API_KEY;
-        const resolvedBaseURL = baseURLIsUserProvided ? userKeyValues?.baseURL : BASE_URL;
+        const profileBaseURL = activeProfile?.baseURL;
+        /** A profile without its own key still authenticates with whatever key
+         *  the endpoint would otherwise have used. */
+        const resolvedApiKey = profileBaseURL
+          ? activeProfile?.apiKey || (apiKeyIsUserProvided ? userKeyValues?.apiKey : API_KEY)
+          : apiKeyIsUserProvided || baseURLIsUserProvided
+            ? userKeyValues?.apiKey
+            : API_KEY;
+        const resolvedBaseURL =
+          profileBaseURL ?? (baseURLIsUserProvided ? userKeyValues?.baseURL : BASE_URL);
+        /** Either way the destination came from the user, so it gets the SSRF
+         *  guard and forfeits any admin-configured headers. */
+        const urlIsUserProvided = baseURLIsUserProvided || !!profileBaseURL;
 
         if (resolvedApiKey && resolvedBaseURL) {
           const userFetchKey = `user:${req.user?.id}:${name}`;
           fetchPromisesMap[userFetchKey] =
             fetchPromisesMap[userFetchKey] ||
             (async () => {
-              if (baseURLIsUserProvided) {
+              if (urlIsUserProvided) {
                 await validateEndpointURL(
                   resolvedBaseURL,
                   name,
@@ -227,7 +242,7 @@ export function createLoadConfigModels(deps: LoadConfigModelsDeps) {
                 name,
                 apiKey: resolvedApiKey,
                 baseURL: resolvedBaseURL,
-                baseURLIsUserProvided,
+                baseURLIsUserProvided: urlIsUserProvided,
                 allowedAddresses: appConfig.endpoints?.allowedAddresses,
                 user: req.user?.id,
                 userObject: req.user,
@@ -237,12 +252,21 @@ export function createLoadConfigModels(deps: LoadConfigModelsDeps) {
                 // sent to a destination the user controls, leaking the user's
                 // identity token. Header overrides are only safe for endpoints
                 // whose base URL is admin-trusted.
-                headers: baseURLIsUserProvided ? undefined : endpointHeaders,
+                headers: urlIsUserProvided ? undefined : endpointHeaders,
                 direct: endpoint.directEndpoint,
                 userIdQuery: models.userIdQuery,
                 skipCache: true,
-                /** Fetched with the user's key/URL — always user-scoped */
-                tokenKey: getTokenConfigKey(endpoint, name, req.user?.id ?? '', tenantId),
+                /** Fetched with the user's key/URL — always user-scoped. A
+                 *  profile forces that scoping even where the yaml declares a
+                 *  fixed URL, or this user's pricing would be cached under the
+                 *  shared endpoint name and billed to everyone. */
+                tokenKey: getTokenConfigKey(
+                  endpoint,
+                  name,
+                  req.user?.id ?? '',
+                  tenantId,
+                  !!activeProfile,
+                ),
               });
             })();
           uniqueKeyToEndpointsMap[userFetchKey] = uniqueKeyToEndpointsMap[userFetchKey] || [];

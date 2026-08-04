@@ -18,6 +18,8 @@ from datetime import datetime, timedelta, timezone
 from flask import Flask, Response, abort, render_template_string, request
 from pymongo import MongoClient
 
+import reconcile
+
 MICRO_PER_USD = 1_000_000
 ROOT_PARENT = "00000000-0000-0000-0000-000000000000"
 
@@ -29,34 +31,113 @@ messages_col = db["messages"]
 conversations_col = db["conversations"]
 
 
+# A transaction carrying `routedVia` was served by a user endpoint profile — some
+# other base URL than the provider's own API. Its `rate` still comes from the
+# model-name rate table, so the cost shown for it is what the provider *would*
+# have charged, not what the gateway did.
+#
+# `reconcile.py` later settles those against the gateway's own billing records
+# and writes `reconciled.costUSD`. Three states therefore exist, and the tables
+# below keep them apart so nominal spend is never presented as verified:
+#
+#   direct      no routedVia            — billed at the provider's real rate
+#   nominal     routedVia, unreconciled — an estimate from the rate table
+#   reconciled  routedVia + reconciled  — the gateway's actual charge
+#
+# Tested against "missing" rather than truthiness because a settled cost of
+# exactly 0 is legitimate: sub-micro-dollar requests round to nothing.
+HAS_RECONCILED = {"$ne": [{"$type": "$reconciled.costUSD"}, "missing"]}
+
+#: Best available cost per transaction, in micro-USD, preferring the settled figure.
+EFFECTIVE_MICRO = {
+    "$cond": [
+        HAS_RECONCILED,
+        {"$multiply": ["$reconciled.costUSD", MICRO_PER_USD]},
+        {"$abs": "$tokenValue"},
+    ]
+}
+
+NOMINAL_COST = {
+    "$sum": {
+        "$cond": [
+            {"$and": [{"$ifNull": ["$routedVia", False]}, {"$not": HAS_RECONCILED}]},
+            {"$abs": "$tokenValue"},
+            0,
+        ]
+    }
+}
+
+#: What the gateway actually charged, for rows that have been settled.
+RECONCILED_COST = {"$sum": {"$cond": [HAS_RECONCILED, EFFECTIVE_MICRO, 0]}}
+
+#: Provider list price for those same rows — the baseline the saving is measured against.
+DIRECT_COST = {
+    "$sum": {
+        "$cond": [
+            HAS_RECONCILED,
+            {"$multiply": [{"$ifNull": ["$reconciled.directUSD", 0]}, MICRO_PER_USD]},
+            0,
+        ]
+    }
+}
+
+
 def _cost_since(since):
     match = {"createdAt": {"$gte": since}} if since else {}
     pipeline = [
         {"$match": match},
-        {"$group": {"_id": None, "micro": {"$sum": {"$abs": "$tokenValue"}}}},
+        {"$group": {"_id": None, "micro": {"$sum": EFFECTIVE_MICRO}}},
     ]
     result = list(transactions.aggregate(pipeline))
     return (result[0]["micro"] / MICRO_PER_USD) if result else 0.0
-
-
-# A transaction carrying `routedVia` was served by a user endpoint profile — some
-# other base URL than the provider's own API. Its `rate` still comes from the
-# model-name rate table, so the cost shown for it is what the provider *would*
-# have charged, not what the gateway did. Everything below tracks that subset
-# separately so nominal spend is never presented as if it were verified.
-NOMINAL_COST = {
-    "$sum": {"$cond": [{"$ifNull": ["$routedVia", False]}, {"$abs": "$tokenValue"}, 0]}
-}
 
 
 def _nominal_since(since):
     match = {"createdAt": {"$gte": since}} if since else {}
     pipeline = [
         {"$match": {**match, "routedVia": {"$exists": True}}},
-        {"$group": {"_id": None, "micro": {"$sum": {"$abs": "$tokenValue"}}}},
+        {"$group": {"_id": None, "micro": NOMINAL_COST}},
     ]
     result = list(transactions.aggregate(pipeline))
     return (result[0]["micro"] / MICRO_PER_USD) if result else 0.0
+
+
+def _savings():
+    """Settled gateway spend against what the same traffic would have cost direct.
+
+    This is the number that answers "is the marketplace actually saving me
+    money" — and unlike the catalog discount it is measured on requests that
+    really happened, at the prices really paid.
+    """
+    pipeline = [
+        {"$match": {"reconciled.costUSD": {"$exists": True}}},
+        {
+            "$group": {
+                "_id": None,
+                "actual": RECONCILED_COST,
+                "direct": DIRECT_COST,
+                "requests": {"$sum": 1},
+                "ambiguous": {
+                    "$sum": {"$cond": [{"$eq": ["$reconciled.ambiguous", True]}, 1, 0]}
+                },
+            }
+        },
+    ]
+    result = list(transactions.aggregate(pipeline))
+    if not result:
+        return {"actual": 0.0, "direct": 0.0, "saved": 0.0, "pct": 0.0,
+                "requests": 0, "ambiguous": 0}
+    row = result[0]
+    actual = row["actual"] / MICRO_PER_USD
+    direct = row["direct"] / MICRO_PER_USD
+    return {
+        "actual": actual,
+        "direct": direct,
+        "saved": direct - actual,
+        "pct": ((direct - actual) / direct * 100) if direct > 0 else 0.0,
+        "requests": row["requests"],
+        "ambiguous": row["ambiguous"],
+    }
 
 
 def _split_io(rows, key_fn, extras=None):
@@ -73,6 +154,8 @@ def _split_io(rows, key_fn, extras=None):
                 "out_cost": 0.0,
                 "messages": 0,
                 "nominal_cost": 0.0,
+                "settled_cost": 0.0,
+                "direct_cost": 0.0,
             },
         )
         if r["_id"]["type"] == "prompt":
@@ -83,11 +166,15 @@ def _split_io(rows, key_fn, extras=None):
             bucket["out_cost"] = r["cost"] / MICRO_PER_USD
         bucket["messages"] += r["messages"]
         bucket["nominal_cost"] += r.get("nominal", 0) / MICRO_PER_USD
+        bucket["settled_cost"] += r.get("settled", 0) / MICRO_PER_USD
+        bucket["direct_cost"] += r.get("direct", 0) / MICRO_PER_USD
         if extras:
             bucket.update(extras(r))
     for bucket in out.values():
         bucket["total_cost"] = bucket["in_cost"] + bucket["out_cost"]
         bucket["has_nominal"] = bucket["nominal_cost"] > 0
+        bucket["has_settled"] = bucket["settled_cost"] > 0
+        bucket["saved"] = bucket["direct_cost"] - bucket["settled_cost"]
     return out
 
 
@@ -104,8 +191,11 @@ def _by_routing():
                             "type": "$tokenType",
                         },
                         "tokens": {"$sum": {"$abs": "$rawAmount"}},
-                        "cost": {"$sum": {"$abs": "$tokenValue"}},
+                        "cost": {"$sum": EFFECTIVE_MICRO},
                         "messages": {"$sum": 1},
+                        "nominal": NOMINAL_COST,
+                        "settled": RECONCILED_COST,
+                        "direct": DIRECT_COST,
                     }
                 }
             ]
@@ -117,7 +207,7 @@ def _by_routing():
         return {
             "name": r["_id"].get("name") or ("Direct to provider" if not url else "(unnamed)"),
             "url": url or "provider default",
-            "nominal": bool(url),
+            "routed": bool(url),
         }
 
     grouped = _split_io(
@@ -134,9 +224,11 @@ def _by_model():
                     "$group": {
                         "_id": {"model": "$model", "type": "$tokenType"},
                         "tokens": {"$sum": {"$abs": "$rawAmount"}},
-                        "cost": {"$sum": {"$abs": "$tokenValue"}},
+                        "cost": {"$sum": EFFECTIVE_MICRO},
                         "messages": {"$sum": 1},
                         "nominal": NOMINAL_COST,
+                        "settled": RECONCILED_COST,
+                        "direct": DIRECT_COST,
                     }
                 }
             ]
@@ -156,9 +248,11 @@ def _by_conversation():
                     "$group": {
                         "_id": {"cid": "$conversationId", "type": "$tokenType"},
                         "tokens": {"$sum": {"$abs": "$rawAmount"}},
-                        "cost": {"$sum": {"$abs": "$tokenValue"}},
+                        "cost": {"$sum": EFFECTIVE_MICRO},
                         "messages": {"$sum": 1},
                         "nominal": NOMINAL_COST,
+                        "settled": RECONCILED_COST,
+                        "direct": DIRECT_COST,
                     }
                 },
                 {
@@ -241,7 +335,14 @@ tr:hover td { background: var(--hover); }
        border: 1px solid #6b4f2a; color: #e0a75f; margin-left: 0.4em; vertical-align: middle;
        font-family: "JetBrains Mono", ui-monospace, monospace; }
 .tag.ok { border-color: #3a4a35; color: #8fae7d; }
+.tag.settled { border-color: #2f4a5a; color: #7fb2cc; }
 .nominal-cost { color: #e0a75f; font-weight: 500; }
+.settled-cost { color: #7fb2cc; font-weight: 500; }
+.note { background: #16211f; border: 1px solid #2c4a44; border-left: 4px solid #3e9d8a;
+        border-radius: 5px; padding: 0.9em 1.1em; margin: 1.5em 0; }
+.note .note-title { color: #6fc7b1; font-weight: 600; margin-bottom: 0.35em; }
+.note p { margin: 0.4em 0 0; color: var(--muted); font-size: 0.92em; }
+.saved { color: #6fc7b1; font-weight: 500; }
 footer { color: var(--dim); font-size: 0.78em; text-align: right; margin: 3em 0 1em;
          font-family: "JetBrains Mono", ui-monospace, monospace; }
 a { color: var(--accent); text-decoration: none; }
@@ -251,7 +352,7 @@ a:hover { text-decoration: underline; }
 <body>
 
 <h1>LibreChat cost</h1>
-<div class="subhead">Live from MongoDB <span class="mono">transactions</span>. Costs are USD; numbers reflect what LibreChat itself charged against each conversation using <span class="mono">rate × tokens</span> at message time. Rates come from the model-name table, so anything routed through a custom base URL is an estimate &mdash; see <em>By routing</em>.</div>
+<div class="subhead">Live from MongoDB <span class="mono">transactions</span>. Costs are USD; numbers reflect what LibreChat itself charged against each conversation using <span class="mono">rate × tokens</span> at message time. Rates come from the model-name table, except where a gateway's own billing records have since replaced them &mdash; see <em>By routing</em>.</div>
 
 <div class="summary">
   <div class="card"><div class="label">Today</div><div class="value">${{ "%.4f"|format(totals.today) }}</div></div>
@@ -268,12 +369,30 @@ a:hover { text-decoration: underline; }
   gateway actually did. A gateway that re-routes to a different upstream, or prices differently,
   is invisible to that table.</p>
   <p>Treat these figures as a lower-confidence estimate. The destination is recorded on each
-  transaction (<span class="mono">routedVia</span>), so real rates can be reconciled later.</p>
+  transaction (<span class="mono">routedVia</span>), so real rates are reconciled once the
+  gateway settles them.</p>
+</div>
+{% endif %}
+
+{% if savings.requests > 0 %}
+<div class="note">
+  {# Six decimals: the whole point of this panel is the gap between two numbers
+     that four decimals would round to the same thing. #}
+  <div class="note-title">${{ "%.6f"|format(savings.actual) }} settled against ${{ "%.6f"|format(savings.direct) }} at provider list &mdash; ${{ "%.6f"|format(savings.saved) }} saved ({{ "%.1f"|format(savings.pct) }}%)</div>
+  <p>Measured on {{ "{:,}".format(savings.requests) }} reconciled transactions, using the gateway's
+  own billing records rather than any rate table. This is the number to judge the marketplace on:
+  the catalog discount describes the cheapest listed offer, this describes what was really paid.</p>
+  {% if savings.ambiguous > 0 %}
+  <p>{{ "{:,}".format(savings.ambiguous) }} of them matched more than one billing record within the
+  time window and were settled against the nearest &mdash; identical requests, so the figures differ
+  only by whatever seller prices moved in between.</p>
+  {% endif %}
+  <p class="dim">Last reconciliation: {{ reconcile_status }}</p>
 </div>
 {% endif %}
 
 <h2>By routing</h2>
-<div class="subhead">Where requests actually went. Only <span class="mono">Direct to provider</span> rows are priced against rates we control.</div>
+<div class="subhead">Where requests actually went. <span class="mono">Direct to provider</span> rows are priced against rates we control; gateway rows are either settled from the gateway's billing records or still nominal.</div>
 <table>
 <thead><tr>
   <th class="left">Destination</th>
@@ -282,6 +401,7 @@ a:hover { text-decoration: underline; }
   <th>Input tokens</th>
   <th>Output tokens</th>
   <th>Total $</th>
+  <th>Saved vs direct</th>
   <th class="left">Confidence</th>
 </tr></thead>
 <tbody>
@@ -292,9 +412,12 @@ a:hover { text-decoration: underline; }
   <td class="num">{{ "{:,}".format(r.messages) }}</td>
   <td class="num">{{ "{:,}".format(r.in_tokens) }}</td>
   <td class="num">{{ "{:,}".format(r.out_tokens) }}</td>
-  <td class="num {% if r.nominal %}nominal-cost{% else %}cost{% endif %}">${{ "%.4f"|format(r.total_cost) }}</td>
+  <td class="num {% if r.has_nominal %}nominal-cost{% elif r.has_settled %}settled-cost{% else %}cost{% endif %}">${{ "%.4f"|format(r.total_cost) }}</td>
+  <td class="num {% if r.has_settled %}saved{% else %}dim{% endif %}">{% if r.has_settled %}${{ "%.6f"|format(r.saved) }}{% else %}&mdash;{% endif %}</td>
   <td class="left">
-    {% if r.nominal %}<span class="tag">nominal</span>{% else %}<span class="tag ok">billed rate</span>{% endif %}
+    {% if not r.routed %}<span class="tag ok">billed rate</span>{% endif %}
+    {% if r.has_settled %}<span class="tag settled">settled</span>{% endif %}
+    {% if r.has_nominal %}<span class="tag">nominal</span>{% endif %}
   </td>
 </tr>
 {% endfor %}
@@ -380,12 +503,34 @@ def index():
     return render_template_string(
         TEMPLATE,
         totals=totals,
+        savings=_savings(),
+        reconcile_status=_reconcile_status(),
         by_model=_by_model(),
         by_conv=_by_conversation(),
         by_routing=_by_routing(),
         now=now.strftime("%Y-%m-%d %H:%M:%S UTC"),
         tx_count=transactions.estimated_document_count(),
     )
+
+
+def _reconcile_status():
+    """One-line summary of the background reconciler, for the savings panel."""
+    state = reconcile.last_run()
+    when = state.get("at")
+    stamp = when.strftime("%Y-%m-%d %H:%M UTC") if hasattr(when, "strftime") else "never"
+    if state.get("ok"):
+        return (
+            f"{stamp} — matched {state.get('matched', 0)} of "
+            f"{state.get('pending_groups', 0)} pending against "
+            f"{state.get('export_rows', 0)} billing records"
+        )
+    return f"{stamp} — {state.get('error') or state.get('note') or 'not run yet'}"
+
+
+@app.route("/cost/reconcile", methods=["POST"])
+def reconcile_now():
+    """Manual trigger, so a settle can be forced without waiting for the timer."""
+    return reconcile.run_once(transactions)
 
 
 @app.route("/cost/healthz")
@@ -740,4 +885,5 @@ def export_healthz():
 
 
 if __name__ == "__main__":
+    reconcile.start_scheduler(transactions)
     app.run(host="0.0.0.0", port=5000)

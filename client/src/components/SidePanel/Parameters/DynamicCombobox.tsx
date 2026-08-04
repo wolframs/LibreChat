@@ -27,6 +27,7 @@ function DynamicCombobox({
   SelectIcon = null,
   selectPlaceholder = '',
   searchPlaceholder = '',
+  readonly = false,
 }: DynamicSettingProps & { isCollapsed?: boolean; SelectIcon?: React.ReactNode }) {
   const localize = useLocalize();
   const { preset } = useChatContext();
@@ -111,6 +112,7 @@ function DynamicCombobox({
             setValue={handleChange}
             items={items}
             SelectIcon={SelectIcon}
+            disabled={readonly}
           />
         </HoverCardTrigger>
         {description && (
