@@ -916,6 +916,10 @@ export type TAgentsEndpoint = z.infer<typeof agentsEndpointSchema>;
 export const paramDefinitionSchema = z.object({
   key: z.string(),
   description: z.string().optional(),
+  /** Present on `SettingDefinition` and honoured by every dynamic component, but
+   *  it was missing here — so zod stripped it from yaml and an admin could not
+   *  actually turn a parameter off for one endpoint. */
+  readonly: z.boolean().optional(),
   type: z.nativeEnum(SettingTypes).optional(),
   default: z.union([z.number(), z.boolean(), z.string(), z.array(z.string())]).optional(),
   showLabel: z.boolean().optional(),

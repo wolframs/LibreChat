@@ -52,6 +52,10 @@ export enum OptionTypes {
 export interface SettingDefinition {
   key: string;
   description?: string;
+  /** Renders the control disabled but still visible, so the reason stays
+   *  discoverable on hover. Settable from a yaml `customParams.paramDefinitions`
+   *  entry — see `paramDefinitionSchema`. */
+  readonly?: boolean;
   type: 'number' | 'boolean' | 'string' | 'enum' | 'array';
   default?: number | boolean | string | string[];
   showLabel?: boolean;

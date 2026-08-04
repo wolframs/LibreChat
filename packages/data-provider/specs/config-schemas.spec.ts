@@ -44,6 +44,24 @@ describe('paramDefinitionSchema', () => {
     expect(result.success).toBe(true);
   });
 
+  it('preserves readonly rather than stripping it', () => {
+    /** zod strips unknown keys silently, so a missing field here made
+     *  `readonly: true` in yaml a no-op with no error anywhere. */
+    const result = paramDefinitionSchema.safeParse({
+      key: 'promptCache',
+      readonly: true,
+      description: 'com_endpoint_prompt_cache_unsupported',
+      descriptionCode: true,
+    });
+    expect(result.success).toBe(true);
+    expect(result.success && result.data.readonly).toBe(true);
+  });
+
+  it('rejects a non-boolean readonly', () => {
+    const result = paramDefinitionSchema.safeParse({ key: 'promptCache', readonly: 'yes' });
+    expect(result.success).toBe(false);
+  });
+
   it('rejects columns > 4', () => {
     const result = paramDefinitionSchema.safeParse({
       key: 'test',
