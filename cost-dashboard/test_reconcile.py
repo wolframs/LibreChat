@@ -1,7 +1,7 @@
 """Tests for the Surplus reconciliation matcher.
 
 Run inside the sidecar image:
-    docker compose run --rm --entrypoint python cost-dashboard -m pytest -q test_reconcile.py
+    ./cost-dashboard/test.sh test_reconcile.py
 """
 
 from datetime import datetime, timedelta, timezone

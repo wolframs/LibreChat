@@ -73,6 +73,14 @@ services:
       # routed through a profile simply stays flagged nominal.
       - SURPLUS_API_KEY=${SURPLUS_API_KEY:-}
       - SURPLUS_RECONCILE_INTERVAL=${SURPLUS_RECONCILE_INTERVAL:-3600}
+    volumes:
+      # Read so /cost/markets/endpoints can name the yaml rows that point at a
+      # marketplace — the client's market-price button renders only on those.
+      - ./librechat.yaml:/app/librechat.yaml:ro
+      # The rate table the api bills from, so the market popup measures its
+      # discount against the provider's list rather than the marketplace's own
+      # (marked-up) reference. See cost-dashboard/listprices.py.
+      - ./packages/data-schemas/src/methods/tx.ts:/app/tx.ts:ro
     depends_on:
       - mongodb
     restart: unless-stopped

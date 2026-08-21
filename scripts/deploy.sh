@@ -139,10 +139,25 @@ for i in $(seq 1 60); do
   fi
 done
 
+SIDECAR_BAD=0
 for path in /cost/healthz /export/healthz; do
   body="$(curl -fsS "$BASE_URL$path" 2>/dev/null)" || { warn "$path unreachable"; continue; }
   ok "$path $body"
+  # The market popup measures its discount against the provider's list price,
+  # which the sidecar reads from a bind-mounted tx.ts. Drop the mount and it
+  # falls back to the marketplace's own reference — a reseller's marked-up
+  # catalogue — so the popup overstates the discount, with nothing to show for
+  # it but a plausible wrong number.
+  if [[ "$path" == "/cost/healthz" && "$body" == *'"rates":0'* ]]; then
+    warn "cost-dashboard read no provider list prices — tx.ts is not mounted"
+    SIDECAR_BAD=1
+  fi
 done
+if [[ $SIDECAR_BAD -eq 1 ]]; then
+  die "The market-price popup would show a discount measured against the marketplace's
+    own reference instead of the provider's list. Fix the tx.ts mount in
+    docker-compose.override.yml, then:  docker compose up -d --build cost-dashboard"
+fi
 
 # Local features must be present in the DEPLOYED image, not just on disk. Each marker
 # corresponds to one local commit; a missing marker means the image predates it or was
@@ -164,10 +179,14 @@ check_marker "prompt-cache TTL wiring" "promptCacheTtl" "/app/packages/api/dist/
 check_marker "cache-TTL pill (client)" "cacheTTL" "/app/client/dist/assets/*.js"
 check_marker "nominal-cost routing"       "routedVia" "/app/packages/api/dist/index.cjs"
 check_marker "dotted gateway pricing"     "claude-opus-4.8" "/app/packages/data-schemas/dist/index.cjs"
-check_marker "readonly param defs (client)" "com_endpoint_prompt_cache_unsupported" "/app/client/dist/assets/*.js"
+check_marker "yaml param defs (client)"    "com_endpoint_prompt_cache_marketplace" "/app/client/dist/assets/*.js"
 check_marker "anthropic model-fetch path"  "isAnthropicProvider" "/app/packages/api/dist/index.cjs"
 check_marker "models.filter"               "applyModelFilter" "/app/packages/api/dist/index.cjs"
 check_marker "models.chatOnly"             "applyChatOnlyFilter" "/app/packages/api/dist/index.cjs"
+check_marker "market-prices popover (client)" "com_ui_market_prices" "/app/client/dist/assets/*.js"
+# Without this, every gateway request bills as zero input tokens — silently, with
+# a correct reply and no error anywhere. See fork-customizations.md §10.
+check_marker "gateway usage recovery"       "observeAnthropicStreamUsage" "/app/packages/api/dist/index.cjs"
 
 echo
 if [[ $MISSING -eq 1 ]]; then
