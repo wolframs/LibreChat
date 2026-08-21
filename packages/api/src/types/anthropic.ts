@@ -5,6 +5,7 @@ import type { ThinkingDisplayWireValue } from 'librechat-data-provider';
 import type { AnthropicClientOptions } from '@librechat/agents';
 import type { GoogleServiceKey } from '../utils/key';
 import type { LLMConfigResult } from './openai';
+import type { StreamUsageSink } from '../endpoints/anthropic/streamUsage';
 
 export type AnthropicParameters = z.infer<typeof anthropicSchema>;
 
@@ -107,6 +108,15 @@ export interface AnthropicConfigOptions {
    * for this request via the agents SDK's native `promptCacheTtl` option.
    */
   cacheTTL?: '5m' | '1h';
+  /**
+   * Receives token usage read straight off the streamed response body, for
+   * gateways that report input and cache counts on `message_delta` rather than
+   * `message_start`. The stream parser only looks at `message_start` for those,
+   * so without this they are lost before billing sees them — see
+   * `~/endpoints/anthropic/streamUsage`. Absent for the common case; supplying
+   * it costs one `ReadableStream.tee()` per streamed request.
+   */
+  streamUsageSink?: StreamUsageSink;
 }
 
 /**

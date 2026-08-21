@@ -15,13 +15,14 @@ import type {
   AnthropicModelOptions,
 } from '~/types';
 import { getLLMConfig as getAnthropicLLMConfig } from '~/endpoints/anthropic/llm';
+import type { StreamUsageSink } from '~/endpoints/anthropic/streamUsage';
 import { extractDefaultParams } from '~/endpoints/openai/llm';
 import { isUserProvided, checkUserKeyExpiry } from '~/utils';
 import { getOpenAIConfig } from '~/endpoints/openai/config';
 import { getScopedTokenConfigKey } from '~/endpoints/keys';
 import { getCustomEndpointConfig } from '~/app/config';
 import { fetchModels } from '~/endpoints/models';
-import { markRequestRouting } from '~/endpoints/routing';
+import { markRequestRouting, attachStreamUsageSink } from '~/endpoints/routing';
 import { validateEndpointURL } from '~/auth';
 import { tokenConfigCache } from '~/cache';
 
@@ -137,6 +138,7 @@ function buildAnthropicCustomConfig({
   endpointConfig,
   userProvidesURL,
   allowedAddresses,
+  streamUsageSink,
 }: {
   apiKey: string;
   baseURL: string;
@@ -144,6 +146,7 @@ function buildAnthropicCustomConfig({
   endpointConfig: Partial<TEndpoint>;
   userProvidesURL: boolean;
   allowedAddresses?: string[] | null;
+  streamUsageSink?: StreamUsageSink;
 }): InitializeResultBase {
   const result = getAnthropicLLMConfig(apiKey, {
     modelOptions,
@@ -157,6 +160,11 @@ function buildAnthropicCustomConfig({
     /** Apply admin `customParams.paramDefinitions` defaults (e.g. promptCache,
      *  web_search, thinking) the OpenAI-compatible path gets via `getOpenAIConfig`. */
     defaultParams: extractDefaultParams(endpointConfig.customParams?.paramDefinitions),
+    /** A custom row points at something that is not Anthropic's own API, and
+     *  gateways vary in which stream frame carries the input and cache counts.
+     *  Observing the body is what keeps those requests from billing as zero
+     *  input; it is a no-op against a destination that reports them normally. */
+    streamUsageSink,
   });
   return {
     llmConfig: result.llmConfig as InitializeResultBase['llmConfig'],
@@ -336,6 +344,7 @@ export async function initializeCustom({
       endpointConfig,
       userProvidesURL,
       allowedAddresses: appConfig?.endpoints?.allowedAddresses,
+      streamUsageSink: attachStreamUsageSink(req),
     });
     options.endpointTokenConfig = endpointTokenConfig;
   } else {

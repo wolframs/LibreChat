@@ -1,4 +1,5 @@
 import type { ServerRequest } from '~/types';
+import type { StreamUsageSink } from '~/endpoints/anthropic/streamUsage';
 
 /**
  * Records where a request is actually being sent, once its endpoint initializer
@@ -28,4 +29,28 @@ export function markRequestRouting(
     return;
   }
   req.routedVia = { endpoint, baseURL };
+}
+
+/**
+ * Attaches a per-request collector for token usage observed on the raw streamed
+ * response, and returns the sink that fills it.
+ *
+ * Lives beside {@link markRequestRouting} because it solves the same shape of
+ * problem: something only knowable while the request is being made, needed much
+ * later by the code that prices it, with nothing but `req` connecting the two.
+ *
+ * Only worth attaching where the destination might report usage in a frame the
+ * stream parser does not read — i.e. gateways, not the provider's own API. The
+ * cost when it is attached is one `ReadableStream.tee()` per streamed request;
+ * the cost of not attaching it, against such a gateway, is every request billing
+ * as zero input tokens.
+ */
+export function attachStreamUsageSink(req: ServerRequest | undefined): StreamUsageSink | undefined {
+  if (!req) {
+    return undefined;
+  }
+  const observed = (req.observedStreamUsage ??= []);
+  return (usage) => {
+    observed.push(usage);
+  };
 }

@@ -1,4 +1,5 @@
 import { logger } from '@librechat/data-schemas';
+import type { ObservedStreamUsage } from '~/endpoints/anthropic/streamUsage';
 import {
   inputTokensIncludesCache,
   reconcileContextUsage,
@@ -118,6 +119,90 @@ function splitUsage(usage: UsageMetadata): SplitUsage {
     totalInput: rawInput + cacheCreation + cacheRead,
     completion,
   };
+}
+
+/**
+ * Fills in usage records that a gateway reported in a frame the stream parser
+ * does not read, using what was observed on the raw response body.
+ *
+ * The parser takes input and cache counts from `message_start` and only
+ * `output_tokens` from `message_delta`. A gateway that streams those counts on
+ * `message_delta` therefore bills as zero input with no cache breakdown — the
+ * request succeeds, the reply is correct, and the cost is silently understated.
+ * `~/endpoints/anthropic/streamUsage` observes the body and reports what was
+ * really there; this decides whether to believe it.
+ *
+ * Deliberately conservative, because the alternative to a missing number is a
+ * wrong one:
+ *
+ * - only a record with **no** input tokens and **no** cache detail is touched,
+ *   so nothing the parser got right is ever overwritten;
+ * - an observation is accepted only if its `output_tokens` matches the record's,
+ *   which is the one field both paths agree on and enough to tell concurrent
+ *   model calls apart;
+ * - each observation is consumed once, and an unmatched record is left as it
+ *   was rather than filled from the nearest guess.
+ *
+ * **Consumes from `observed` in place.** One HTTP request drains this more than
+ * once — the reply bills under `context: 'message'` and the auto-generated title
+ * under `context: 'title'`, each with its own `collectedUsage` but both reading
+ * the request's single observation list. Removing what has been claimed is what
+ * stops the second pass re-using the first pass's numbers; anything unmatched
+ * stays, because the later pass may be the one it belongs to.
+ *
+ * Returns the number of records repaired, for the caller to log.
+ */
+export function repairStreamUsage(
+  collectedUsage: UsageMetadata[],
+  observed: ObservedStreamUsage[],
+): number {
+  if (!collectedUsage?.length || !observed?.length) {
+    return 0;
+  }
+  const unclaimed = observed;
+  let repaired = 0;
+
+  for (const usage of collectedUsage) {
+    if (usage == null) {
+      continue;
+    }
+    const hasInput = (Number(usage.input_tokens) || 0) > 0;
+    const hasCacheDetail =
+      (Number(usage.input_token_details?.cache_creation) || 0) > 0 ||
+      (Number(usage.input_token_details?.cache_read) || 0) > 0 ||
+      (Number(usage.cache_creation_input_tokens) || 0) > 0 ||
+      (Number(usage.cache_read_input_tokens) || 0) > 0;
+    if (hasInput || hasCacheDetail) {
+      continue;
+    }
+
+    const output = Number(usage.output_tokens) || 0;
+    const index = unclaimed.findIndex((o) => o.outputTokens === output);
+    if (index === -1) {
+      continue;
+    }
+    const [match] = unclaimed.splice(index, 1);
+
+    /**
+     * Written in the shape Anthropic's own responses use — `input_tokens`
+     * inclusive of the cached portion, with the split in `input_token_details` —
+     * because `splitUsage` reads it back through `inputTokensIncludesCache`,
+     * and this provider is in that set. Recording the gateway's *net* input
+     * here would double-count the cached tokens.
+     */
+    const totalInput =
+      match.inputTokens + match.cacheCreationInputTokens + match.cacheReadInputTokens;
+    usage.input_tokens = totalInput;
+    usage.total_tokens = totalInput + output;
+    usage.input_token_details = {
+      ...(usage.input_token_details ?? {}),
+      cache_creation: match.cacheCreationInputTokens,
+      cache_read: match.cacheReadInputTokens,
+    };
+    repaired += 1;
+  }
+
+  return repaired;
 }
 
 export interface RecordUsageDeps {
@@ -497,6 +582,12 @@ export interface RecordUsageParams {
    */
   resolveEndpointTokenConfig?: (usage: UsageMetadata) => EndpointTokenConfig | undefined;
   /**
+   * Token counts read off the raw streamed body for gateways that report them
+   * in a frame the parser does not read. Consumed by {@link repairStreamUsage}
+   * before billing; absent for every provider that reports usage normally.
+   */
+  observedStreamUsage?: ObservedStreamUsage[];
+  /**
    * Destination that served the request, from `req.routedVia`.
    * Applies to every usage item in the batch: they all went to the same base
    * URL, since routing is resolved once per request at initialization.
@@ -530,12 +621,24 @@ export async function recordCollectedUsage(
     collectedUsage,
     endpointTokenConfig,
     resolveEndpointTokenConfig,
+    observedStreamUsage,
     routedVia,
     context = 'message',
   } = params;
 
   if (!collectedUsage || !collectedUsage.length) {
     return;
+  }
+
+  if (observedStreamUsage?.length) {
+    const repaired = repairStreamUsage(collectedUsage, observedStreamUsage);
+    if (repaired > 0) {
+      logger.debug(
+        `[recordCollectedUsage] recovered input/cache tokens for ${repaired} of ` +
+          `${collectedUsage.length} usage record(s) from the streamed body — the ` +
+          `destination reports them on message_delta rather than message_start`,
+      );
+    }
   }
 
   const messageUsages: UsageMetadata[] = [];

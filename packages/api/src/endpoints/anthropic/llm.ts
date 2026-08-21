@@ -1,5 +1,6 @@
 import { Agent } from 'undici';
 import { logger } from '@librechat/data-schemas';
+import { observeAnthropicStreamUsage } from './streamUsage';
 import { AnthropicClientOptions } from '@librechat/agents';
 import {
   anthropicSettings,
@@ -421,6 +422,25 @@ function getLLMConfig(
       options.headers,
       requestOptions.clientOptions.defaultHeaders as Record<string, string> | undefined,
     );
+  }
+
+  /**
+   * Some Anthropic-compatible gateways report input and cache token counts on
+   * `message_delta` instead of `message_start`, where the stream parser is not
+   * looking — so they never reach billing and the request lands as zero input
+   * tokens with no cache breakdown. Observing the raw body is the only place
+   * those numbers still exist; `recordCollectedUsage` decides what to do with
+   * what comes back. Only wired up when a caller supplies a sink, so the common
+   * path is untouched.
+   */
+  if (options.streamUsageSink) {
+    if (!requestOptions.clientOptions) {
+      requestOptions.clientOptions = {};
+    }
+    requestOptions.clientOptions.fetch = observeAnthropicStreamUsage(
+      options.streamUsageSink,
+      requestOptions.clientOptions.fetch as never,
+    ) as never;
   }
 
   if (shouldProtectUserBaseURL) {

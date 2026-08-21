@@ -1,6 +1,7 @@
 import type { TConversation, TEndpointOption } from 'librechat-data-provider';
 import type { IUser, AppConfig } from '@librechat/data-schemas';
 import type { Request } from 'express';
+import type { ObservedStreamUsage } from '~/endpoints/anthropic/streamUsage';
 
 /**
  * LibreChat-specific request body type that extends Express Request body
@@ -42,4 +43,13 @@ export type ServerRequest = Request<unknown, unknown, RequestBody> & {
     endpoint?: string;
     baseURL?: string;
   };
+  /**
+   * Token counts read off the raw streamed response body, for destinations that
+   * report input and cache counts in a frame the stream parser does not read.
+   * Filled during the request by `attachStreamUsageSink`, drained by
+   * `recordCollectedUsage`. Request-scoped for the same reason as `routedVia`:
+   * it is known at request time and needed at spend time, with nothing else
+   * spanning the two.
+   */
+  observedStreamUsage?: ObservedStreamUsage[];
 };

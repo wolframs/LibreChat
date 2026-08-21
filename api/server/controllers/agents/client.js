@@ -1069,6 +1069,10 @@ class AgentClient extends BaseClient {
         /** Set only when this request went somewhere other than the provider's
          *  own API; identifies where the recorded rate should be judged against. */
         routedVia: this.options.req?.routedVia,
+        /** Token counts read off the raw streamed body, for destinations that
+         *  report input and cache counts in a frame the stream parser does not
+         *  read. Only fills records that arrived with nothing to fill. */
+        observedStreamUsage: this.options.req?.observedStreamUsage,
       },
     );
 

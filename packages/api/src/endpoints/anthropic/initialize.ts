@@ -1,7 +1,7 @@
 import { EModelEndpoint, AuthKeys } from 'librechat-data-provider';
 import type { BaseInitializeParams, InitializeResultBase, AnthropicConfigOptions } from '~/types';
 import { loadAnthropicVertexCredentials, getVertexCredentialOptions } from './vertex';
-import { markRequestRouting } from '~/endpoints/routing';
+import { markRequestRouting, attachStreamUsageSink } from '~/endpoints/routing';
 import { checkUserKeyExpiry, isEnabled, mergeHeaders } from '~/utils';
 import { getLLMConfig } from './llm';
 
@@ -98,6 +98,13 @@ export async function initializeAnthropic({
     },
     ...(headers && { headers }),
     ...(cacheTTL && { cacheTTL }),
+    /** Only when redirected, for the same reason as the routing stamp above: an
+     *  unredirected request goes to Anthropic's own API, which reports usage
+     *  where the parser reads it, so there is nothing to observe and no reason
+     *  to tee the stream. A reverse proxy may not be Anthropic underneath. */
+    ...(ANTHROPIC_REVERSE_PROXY && !useVertexAI
+      ? { streamUsageSink: attachStreamUsageSink(req) }
+      : {}),
     // Pass Vertex AI options if configured
     ...(vertexOptions && { vertexOptions }),
     // Pass full Vertex AI config including model mappings
