@@ -20,6 +20,7 @@ import {
   appendAnthropicBetaHeader,
   supportsAdaptiveThinking,
   checkPromptCacheSupport,
+  resolvePromptCacheTtlForURL,
   configureReasoning,
   getClaudeHeaders,
 } from './helpers';
@@ -276,19 +277,24 @@ function getLLMConfig(
      * standard TTL, 1.25x cache-write cost) instead of letting the agents SDK
      * fall back to '1h' (2x cache-write cost). 1h is opt-in via the
      * conversation `promptCacheTtl` parameter or the one-shot pill arm below.
+     *
+     * The one-shot per-message TTL (`req.body.cacheTTL`, armed via the cache-TTL
+     * overlay pill) overrides the conversation-level parameter for this request
+     * only, riding the agents SDK's native `promptCacheTtl` option.
+     *
+     * Both are then clamped against the destination: 1h is only sent to
+     * Anthropic's own API, because a gateway that adapts `cache_control` can
+     * turn a uniform 1h request into a 400 we never asked for. See
+     * {@link resolvePromptCacheTtlForURL}.
      */
-    (requestOptions as Record<string, unknown>).promptCacheTtl =
-      systemOptions.promptCacheTtl ?? '5m';
-  }
-
-  /**
-   * One-shot per-message prompt-cache TTL (from `req.body.cacheTTL`, armed via
-   * the cache-TTL overlay pill): overrides the conversation-level
-   * `promptCacheTtl` parameter for this request only, riding the agents SDK's
-   * native `promptCacheTtl` option. Only honored when caching is active.
-   */
-  if (supportsCacheControl && options.cacheTTL != null) {
-    (requestOptions as Record<string, unknown>).promptCacheTtl = options.cacheTTL;
+    const requestedTtl = options.cacheTTL ?? systemOptions.promptCacheTtl;
+    const effectiveTtl = resolvePromptCacheTtlForURL(requestedTtl, options.reverseProxyUrl);
+    if (requestedTtl === '1h' && effectiveTtl !== '1h') {
+      logger.debug(
+        `[AnthropicClient] Extended 1h prompt-cache TTL clamped to 5m: ${options.reverseProxyUrl} is not Anthropic's own API and may rewrite cache_control.`,
+      );
+    }
+    (requestOptions as Record<string, unknown>).promptCacheTtl = effectiveTtl;
   }
 
   const headers = getClaudeHeaders(requestOptions.model ?? '', supportsCacheControl);

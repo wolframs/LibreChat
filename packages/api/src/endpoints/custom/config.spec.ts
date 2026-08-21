@@ -128,3 +128,56 @@ describe('loadCustomEndpointsConfig – provider surfacing', () => {
     expect(config?.['Borrowed Params']?.provider).toBeUndefined();
   });
 });
+
+describe('loadCustomEndpointsConfig – extended prompt-cache TTL', () => {
+  /**
+   * A gateway may adapt `cache_control` for whichever seller answers. Surplus
+   * stamps its own 5m marker on the system block above a ~4096-token prefix,
+   * which makes any 1h marker further down the request a hard 400 at Anthropic.
+   * The server clamps the TTL there, so a control offering 1h must key off this
+   * flag rather than off `provider` — otherwise it arms a value never sent.
+   */
+  it('is false for an anthropic-native row pointed at a gateway', () => {
+    const config = loadCustomEndpointsConfig([
+      { ...baseEndpoint, name: 'Marketplace', provider: EModelEndpoint.anthropic },
+    ] as unknown as TCustomEndpoints);
+
+    expect(config?.['Marketplace']?.provider).toBe(EModelEndpoint.anthropic);
+    expect(config?.['Marketplace']?.extendedCacheTTL).toBe(false);
+  });
+
+  it('is true for an anthropic-native row pointed at Anthropic own API', () => {
+    const config = loadCustomEndpointsConfig([
+      {
+        ...baseEndpoint,
+        name: 'Direct',
+        provider: EModelEndpoint.anthropic,
+        baseURL: 'https://api.anthropic.com',
+      },
+    ] as unknown as TCustomEndpoints);
+
+    expect(config?.['Direct']?.extendedCacheTTL).toBe(true);
+  });
+
+  /** Where the user points it is unknowable, so the honest answer is no. */
+  it('is false for a user-provided base URL', () => {
+    const config = loadCustomEndpointsConfig([
+      {
+        ...baseEndpoint,
+        name: 'User URL',
+        provider: EModelEndpoint.anthropic,
+        baseURL: 'user_provided',
+      },
+    ] as unknown as TCustomEndpoints);
+
+    expect(config?.['User URL']?.extendedCacheTTL).toBe(false);
+  });
+
+  it('is false for a row with no native provider at all', () => {
+    const config = loadCustomEndpointsConfig([
+      { ...baseEndpoint, name: 'Plain' },
+    ] as unknown as TCustomEndpoints);
+
+    expect(config?.['Plain']?.extendedCacheTTL).toBe(false);
+  });
+});

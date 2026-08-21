@@ -9,6 +9,7 @@ const {
   sanitizeFileForTransmit,
   extractFileContext,
   getReferencedQuotes,
+  resolvePromptCacheTtlForURL,
   encodeAndFormatAudios,
   encodeAndFormatVideos,
   encodeAndFormatDocuments,
@@ -830,6 +831,14 @@ class BaseClient {
      * getLLMConfig, matching Anthropic's standard TTL; overrides the agents
      * SDK's 1h fallback). `promptCache` defaults to true when unset
      * (`anthropicSettings.promptCache.default`), hence the `!== false` gate.
+     *
+     * Then the same destination clamp getLLMConfig applies, keyed off the
+     * `routedVia` stamp (absent means the request went straight to Anthropic).
+     * Without it a conversation still carrying `promptCacheTtl: '1h'` from
+     * before its endpoint moved to a gateway would persist '1h' here while the
+     * request went out at 5m — and the pill would count down an hour against a
+     * cache that expires in five minutes. An instrument that lies is worse than
+     * no instrument.
      */
     if (
       this.options.agent?.provider === EModelEndpoint.anthropic &&
@@ -837,12 +846,16 @@ class BaseClient {
     ) {
       const oneShotTTL = this.options.req?.body?.cacheTTL;
       const convoTTL = this.options.agent?.model_parameters?.promptCacheTtl;
-      responseMessage.cacheTTL =
+      const requestedTTL =
         oneShotTTL === '1h' || oneShotTTL === '5m'
           ? oneShotTTL
           : convoTTL === '1h' || convoTTL === '5m'
             ? convoTTL
             : '5m';
+      responseMessage.cacheTTL = resolvePromptCacheTtlForURL(
+        requestedTTL,
+        this.options.req?.routedVia?.baseURL,
+      );
     }
 
     responseMessage.databasePromise = this.saveMessageToDatabase(

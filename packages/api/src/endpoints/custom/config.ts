@@ -1,6 +1,7 @@
 import { EModelEndpoint, extractEnvVariable, normalizeEndpointName } from 'librechat-data-provider';
 import type { TCustomEndpoints, TEndpoint } from 'librechat-data-provider';
 import type { TCustomEndpointsConfig } from '~/types/endpoints';
+import { isNativeAnthropicURL } from '~/endpoints/anthropic/helpers';
 import { isUserProvided } from '~/utils';
 
 /**
@@ -71,6 +72,18 @@ export function loadCustomEndpointsConfig(
          * reaches that provider.
          */
         provider,
+        /**
+         * Whether a 1-hour prompt-cache TTL survives to Anthropic on this row.
+         * Only true for a `provider: anthropic` row pointed at Anthropic's own
+         * API — a gateway is free to rewrite `cache_control` on the way through
+         * (Surplus stamps its own 5m marker on the system block), so the server
+         * clamps the TTL to 5m there. Surfaced so the pill offers 1h exactly
+         * where 1h is real, rather than arming a request the server downgrades.
+         * A `user_provided` base URL resolves to false: we cannot know where the
+         * user has pointed it, and the honest answer to "will 1h hold" is no.
+         */
+        extendedCacheTTL:
+          provider === EModelEndpoint.anthropic && isNativeAnthropicURL(resolvedBaseURL),
       };
     }
   }

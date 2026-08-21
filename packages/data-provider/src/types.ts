@@ -469,6 +469,15 @@ export type TConfig = {
    * provider-specific control has to key off.
    */
   provider?: string;
+  /**
+   * Whether an extended (1-hour) prompt-cache TTL actually reaches Anthropic on this
+   * endpoint. False for any gateway or marketplace: those may adapt `cache_control`
+   * for whichever seller answers, and the server clamps the TTL to 5m rather than
+   * send a directive it cannot vouch for. A control offering 1h has to key off this
+   * and not off `provider` — a row can speak Anthropic natively and still be routed
+   * somewhere that rewrites the request.
+   */
+  extendedCacheTTL?: boolean;
   userProvide?: boolean | null;
   userProvideURL?: boolean | null;
   userProvideAccessKeyId?: boolean;

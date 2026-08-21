@@ -85,6 +85,19 @@ function CacheTTLPill() {
   const cacheEnabled = conversation?.promptCache !== false;
   const visible = isAnthropic && cacheEnabled;
   /**
+   * Whether arming 1h is worth offering. A gateway may rewrite `cache_control`
+   * for the seller it picks — Surplus stamps its own 5m marker on the system
+   * block, discarding ours — so the server clamps 1h to 5m off Anthropic's own
+   * API. Offering a button that the server then downgrades would put a number
+   * on screen that was never sent.
+   *
+   * The built-in Anthropic endpoint is assumed native, which an admin-set
+   * `ANTHROPIC_REVERSE_PROXY` would falsify; that case still clamps server-side
+   * (and logs it), it just isn't reflected here.
+   */
+  const canExtend =
+    endpoint === EModelEndpoint.anthropic || endpointsConfig?.[endpoint]?.extendedCacheTTL === true;
+  /**
    * On a marketplace the seller is chosen per request, so a cache written on
    * one turn is only read on the next if the same seller answers. The countdown
    * is then the window we asked for, not one we know exists — say so rather
@@ -131,29 +144,47 @@ function CacheTTLPill() {
     anchorTime != null ? anchorTime + (TTL_MS[lastTTL] ?? TTL_MS['5m']) - now : null;
   const expired = remaining != null && remaining <= 0;
 
-  /** Cycle: idle -> arm 1h -> arm 5m -> idle. */
-  const onToggle = () =>
+  /**
+   * Cycle: idle -> arm 1h -> arm 5m -> idle. Where 1h cannot survive the trip,
+   * there is nothing left to cycle through — arming 5m only ever meant "undo
+   * the 1h", and 5m is already what gets sent — so the pill stays a readout.
+   */
+  const onToggle = () => {
+    if (!canExtend) {
+      return;
+    }
     setArmed((prev) => (prev == null ? '1h' : prev === '1h' ? '5m' : null));
+  };
+
+  /**
+   * A stale arm from before the endpoint changed (the recoil atom is keyed by
+   * conversation, not by endpoint) must not keep claiming 1h once 1h is off the
+   * table — the request would go out at 5m regardless.
+   */
+  const effectiveArmed = canExtend ? armed : null;
 
   let label: string;
   let title: string;
-  if (armed === '1h') {
+  if (effectiveArmed === '1h') {
     label = localize('com_ui_cache_ttl_armed_short');
     title = localize('com_ui_cache_ttl_armed');
-  } else if (armed === '5m') {
+  } else if (effectiveArmed === '5m') {
     label = localize('com_ui_cache_ttl_armed_5m_short');
     title = localize('com_ui_cache_ttl_armed_5m');
-  } else if (remaining == null) {
-    label = localize('com_ui_cache_ttl_idle');
-    title = localize('com_ui_cache_ttl_arm_hint');
-  } else if (expired) {
-    label = localize('com_ui_cache_ttl_expired');
-    title = localize('com_ui_cache_ttl_arm_hint');
   } else {
-    label = formatRemaining(remaining);
-    title = `${localize('com_ui_cache_ttl_remaining', { time: label })} · ${localize(
-      'com_ui_cache_ttl_arm_hint',
-    )}`;
+    const hint = canExtend
+      ? localize('com_ui_cache_ttl_arm_hint')
+      : localize('com_ui_cache_ttl_fixed_5m');
+    if (remaining == null) {
+      label = localize('com_ui_cache_ttl_idle');
+      title = hint;
+    } else if (expired) {
+      label = localize('com_ui_cache_ttl_expired');
+      title = hint;
+    } else {
+      label = formatRemaining(remaining);
+      title = `${localize('com_ui_cache_ttl_remaining', { time: label })} · ${hint}`;
+    }
   }
   if (isMarketplace) {
     title = `${title} · ${localize('com_ui_cache_ttl_marketplace')}`;
@@ -165,31 +196,36 @@ function CacheTTLPill() {
       onClick={onToggle}
       title={title}
       aria-label={title}
-      aria-pressed={armed != null}
+      aria-pressed={canExtend ? effectiveArmed != null : undefined}
+      aria-disabled={canExtend ? undefined : true}
       style={{ zIndex: 2147482000 }}
       className={cn(
         'fixed bottom-[156px] right-[10px] flex items-center gap-1 rounded-full border px-2 py-1 text-xs',
         'shadow-sm backdrop-blur transition-colors md:bottom-[50px] md:right-[14px]',
-        armed === '1h'
+        !canExtend && 'cursor-default',
+        effectiveArmed === '1h'
           ? 'border-amber-400/60 bg-amber-400/20 text-amber-700 dark:text-amber-300'
-          : armed === '5m'
+          : effectiveArmed === '5m'
             ? 'border-sky-400/60 bg-sky-400/20 text-sky-700 dark:text-sky-300'
             : expired || remaining == null
-            ? 'border-border-light bg-surface-secondary/70 text-text-secondary opacity-60 hover:opacity-100'
-            : 'border-border-light bg-surface-secondary/70 text-text-secondary hover:bg-surface-tertiary',
+              ? 'bg-surface-secondary/70 border-border-light text-text-secondary opacity-60 hover:opacity-100'
+              : cn(
+                  'bg-surface-secondary/70 border-border-light text-text-secondary',
+                  canExtend && 'hover:bg-surface-tertiary',
+                ),
       )}
     >
       <span
         aria-hidden="true"
         className={cn(
           'inline-block h-1.5 w-1.5 rounded-full',
-          armed === '1h'
+          effectiveArmed === '1h'
             ? 'bg-amber-500'
-            : armed === '5m'
+            : effectiveArmed === '5m'
               ? 'bg-sky-500'
               : expired || remaining == null
-              ? 'bg-text-secondary'
-              : 'bg-emerald-500',
+                ? 'bg-text-secondary'
+                : 'bg-emerald-500',
         )}
       />
       <span className="tabular-nums">{label}</span>

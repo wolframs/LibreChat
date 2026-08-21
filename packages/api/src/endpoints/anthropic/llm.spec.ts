@@ -427,7 +427,7 @@ describe('getLLMConfig', () => {
       expect((result.llmConfig as Record<string, unknown>).promptCacheTtl).toBe('1h');
     });
 
-    it('should omit promptCacheTtl when unset so the agents SDK applies its default', () => {
+    it('should default promptCacheTtl to 5m rather than the agents SDK 1h default', () => {
       const result = getLLMConfig('test-api-key', {
         modelOptions: {
           model: 'claude-3-5-sonnet',
@@ -435,8 +435,66 @@ describe('getLLMConfig', () => {
         },
       });
 
+      /** 1h doubles the cache-write premium; it is opt-in, never inherited. */
       expect(result.llmConfig.promptCache).toBe(true);
-      expect((result.llmConfig as Record<string, unknown>).promptCacheTtl).toBeUndefined();
+      expect((result.llmConfig as Record<string, unknown>).promptCacheTtl).toBe('5m');
+    });
+
+    it('should clamp a 1h promptCacheTtl to 5m when routed through a gateway', () => {
+      const result = getLLMConfig('test-api-key', {
+        modelOptions: {
+          model: 'claude-3-5-sonnet',
+          promptCache: true,
+          promptCacheTtl: '1h',
+        },
+        reverseProxyUrl: 'https://api.surplusintelligence.ai/anthropic',
+      });
+
+      /**
+       * A gateway free to rewrite `cache_control` can leave a 5m marker on the
+       * system block ahead of our 1h message markers, which Anthropic rejects
+       * outright. Sending 5m is the only TTL we can be sure survives.
+       */
+      expect((result.llmConfig as Record<string, unknown>).promptCacheTtl).toBe('5m');
+    });
+
+    it('should clamp the one-shot cacheTTL to 5m when routed through a gateway', () => {
+      const result = getLLMConfig('test-api-key', {
+        modelOptions: {
+          model: 'claude-3-5-sonnet',
+          promptCache: true,
+        },
+        cacheTTL: '1h',
+        reverseProxyUrl: 'https://api.surplusintelligence.ai/anthropic',
+      });
+
+      expect((result.llmConfig as Record<string, unknown>).promptCacheTtl).toBe('5m');
+    });
+
+    it('should keep 1h through a reverse proxy that is still Anthropic own API', () => {
+      const result = getLLMConfig('test-api-key', {
+        modelOptions: {
+          model: 'claude-3-5-sonnet',
+          promptCache: true,
+          promptCacheTtl: '1h',
+        },
+        reverseProxyUrl: 'https://api.anthropic.com',
+      });
+
+      expect((result.llmConfig as Record<string, unknown>).promptCacheTtl).toBe('1h');
+    });
+
+    it('should let the one-shot cacheTTL override the conversation TTL when native', () => {
+      const result = getLLMConfig('test-api-key', {
+        modelOptions: {
+          model: 'claude-3-5-sonnet',
+          promptCache: true,
+          promptCacheTtl: '5m',
+        },
+        cacheTTL: '1h',
+      });
+
+      expect((result.llmConfig as Record<string, unknown>).promptCacheTtl).toBe('1h');
     });
 
     it('should drop promptCacheTtl when promptCache is dropped via dropParams', () => {

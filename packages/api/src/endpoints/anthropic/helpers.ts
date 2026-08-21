@@ -191,10 +191,63 @@ function configureReasoning(
   return updatedOptions;
 }
 
+/**
+ * Whether a resolved base URL is Anthropic's own API.
+ *
+ * An absent URL means no reverse proxy was configured, which is the direct
+ * case. Anything else is a gateway, a marketplace or a self-hosted relay — a
+ * destination free to rewrite the request body on its way through, and the only
+ * place where a `cache_control` directive we send is not necessarily the one
+ * Anthropic receives.
+ */
+function isNativeAnthropicURL(baseURL: string | null | undefined): boolean {
+  if (!baseURL) {
+    return true;
+  }
+  try {
+    return new URL(baseURL).hostname === 'api.anthropic.com';
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Resolve the prompt-cache TTL actually safe to send to `baseURL`.
+ *
+ * The extended 1-hour cache is clamped to 5m off Anthropic's own API, because a
+ * gateway may adapt `cache_control` for the seller it routes to and there is no
+ * way to know it kept our TTL. Surplus Intelligence is the measured case: above
+ * a ~4096-token system prefix it stamps its own bare `{type: 'ephemeral'}` (5m)
+ * marker on the system block, discarding any `ttl` we set there while leaving
+ * message-level markers alone. Anthropic requires cache_control blocks in
+ * descending-TTL order across the whole request, so the resulting 5m-system +
+ * 1h-message payload is rejected outright:
+ *
+ *   messages.2.content.1.cache_control.ttl: a ttl='1h' cache_control block
+ *   must not come after a ttl='5m' cache_control block
+ *
+ * Nothing on our side mixes TTLs — every marker is stamped from this one value
+ * — so the failure is invisible from the request we build, and arrives as a
+ * hard 400 on send rather than as degraded caching. Note the clamp costs
+ * nothing real either: the system prefix, the part worth caching, is pinned to
+ * 5m by that same rewrite whatever we ask for.
+ */
+function resolvePromptCacheTtlForURL(
+  ttl: '5m' | '1h' | undefined,
+  baseURL: string | null | undefined,
+): '5m' | '1h' {
+  if (ttl !== '1h') {
+    return '5m';
+  }
+  return isNativeAnthropicURL(baseURL) ? '1h' : '5m';
+}
+
 export {
   FINE_GRAINED_TOOL_STREAMING_BETA,
   appendAnthropicBetaHeader,
   checkPromptCacheSupport,
+  isNativeAnthropicURL,
+  resolvePromptCacheTtlForURL,
   getClaudeHeaders,
   configureReasoning,
   supportsAdaptiveThinking,
