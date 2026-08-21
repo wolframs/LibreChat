@@ -83,3 +83,48 @@ describe('loadCustomEndpointsConfig – user credential prompts', () => {
     );
   });
 });
+
+describe('loadCustomEndpointsConfig – provider surfacing', () => {
+  /**
+   * The client needs to know which native client actually builds the request,
+   * so a provider-specific control (the Anthropic prompt-cache pill) can render
+   * on a gateway row. A custom row's endpoint *name* is admin-chosen and never
+   * equals `anthropic`, so the name cannot answer this.
+   */
+  it('surfaces a declared provider', () => {
+    const config = loadCustomEndpointsConfig([
+      { ...baseEndpoint, name: 'Marketplace', provider: EModelEndpoint.anthropic },
+    ] as unknown as TCustomEndpoints);
+
+    expect(config?.['Marketplace']?.provider).toBe(EModelEndpoint.anthropic);
+  });
+
+  it('leaves provider undefined when the row declares none', () => {
+    const config = loadCustomEndpointsConfig([
+      { ...baseEndpoint, name: 'Plain' },
+    ] as unknown as TCustomEndpoints);
+
+    expect(config?.['Plain']?.provider).toBeUndefined();
+  });
+
+  /**
+   * `defaultParamsEndpoint` is derived from `provider` but is not a stand-in for
+   * it: an admin can set it alone to borrow another endpoint's parameter panel,
+   * and a control that keyed off it would then appear on a row whose requests
+   * never reach that provider.
+   */
+  it('does not infer a provider from defaultParamsEndpoint alone', () => {
+    const config = loadCustomEndpointsConfig([
+      {
+        ...baseEndpoint,
+        name: 'Borrowed Params',
+        customParams: { defaultParamsEndpoint: EModelEndpoint.anthropic },
+      },
+    ] as unknown as TCustomEndpoints);
+
+    expect(config?.['Borrowed Params']?.customParams?.defaultParamsEndpoint).toBe(
+      EModelEndpoint.anthropic,
+    );
+    expect(config?.['Borrowed Params']?.provider).toBeUndefined();
+  });
+});

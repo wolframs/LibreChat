@@ -50,7 +50,7 @@ describe('paramDefinitionSchema', () => {
     const result = paramDefinitionSchema.safeParse({
       key: 'promptCache',
       readonly: true,
-      description: 'com_endpoint_prompt_cache_unsupported',
+      description: 'com_endpoint_prompt_cache_marketplace',
       descriptionCode: true,
     });
     expect(result.success).toBe(true);

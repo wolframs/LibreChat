@@ -2,9 +2,10 @@ import { memo, useEffect, useMemo, useState } from 'react';
 import { useRecoilState } from 'recoil';
 import { EModelEndpoint, Constants } from 'librechat-data-provider';
 import type { TMessage } from 'librechat-data-provider';
-import { useGetMessagesByConvoId } from '~/data-provider';
+import { useGetMessagesByConvoId, useGetEndpointsQuery } from '~/data-provider';
 import { useChatContext } from '~/Providers';
 import { useLocalize } from '~/hooks';
+import { useMarketplaceEndpoints } from '~/hooks/Chat';
 import { cn } from '~/utils';
 import store from '~/store';
 
@@ -68,10 +69,28 @@ function CacheTTLPill() {
 
   const [armed, setArmed] = useRecoilState(store.armedCacheTTLByConvoId(armKey));
 
-  const isAnthropic = conversation?.endpoint === EModelEndpoint.anthropic;
+  const { data: endpointsConfig } = useGetEndpointsQuery();
+  const endpoint = conversation?.endpoint ?? '';
+  /**
+   * Anthropic's own endpoint, or a custom row declaring `provider: anthropic` —
+   * the latter is a gateway or marketplace reached through the same native
+   * client, so `cache_control` is genuinely sent and the countdown is genuinely
+   * about a cache. A custom row's `endpoint` is its admin-chosen name, never the
+   * literal `anthropic`, so the name alone cannot answer this.
+   */
+  const isAnthropic =
+    endpoint === EModelEndpoint.anthropic ||
+    endpointsConfig?.[endpoint]?.provider === EModelEndpoint.anthropic;
   /** `promptCache` defaults to true when unset (anthropicSettings). */
   const cacheEnabled = conversation?.promptCache !== false;
   const visible = isAnthropic && cacheEnabled;
+  /**
+   * On a marketplace the seller is chosen per request, so a cache written on
+   * one turn is only read on the next if the same seller answers. The countdown
+   * is then the window we asked for, not one we know exists — say so rather
+   * than letting a ticking clock imply a certainty we don't have.
+   */
+  const isMarketplace = useMarketplaceEndpoints().includes(endpoint);
 
   const { data: messages } = useGetMessagesByConvoId(conversationId, {
     enabled: visible && !!conversationId,
@@ -135,6 +154,9 @@ function CacheTTLPill() {
     title = `${localize('com_ui_cache_ttl_remaining', { time: label })} · ${localize(
       'com_ui_cache_ttl_arm_hint',
     )}`;
+  }
+  if (isMarketplace) {
+    title = `${title} · ${localize('com_ui_cache_ttl_marketplace')}`;
   }
 
   return (

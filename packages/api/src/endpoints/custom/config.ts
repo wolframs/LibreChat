@@ -63,6 +63,14 @@ export function loadCustomEndpointsConfig(
         customParams: resolvedCustomParams,
         modelDisplayLabel,
         iconURL,
+        /**
+         * Surfaced so the client can tell which native client actually builds the
+         * request. `defaultParamsEndpoint` above is derived from it but is not a
+         * substitute: an admin can set that alone to borrow a parameter panel,
+         * which would make a provider-specific control appear on a row that never
+         * reaches that provider.
+         */
+        provider,
       };
     }
   }

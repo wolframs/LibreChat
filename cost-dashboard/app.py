@@ -18,13 +18,24 @@ from datetime import datetime, timedelta, timezone
 from flask import Flask, Response, abort, render_template_string, request
 from pymongo import MongoClient
 
+import buyer
+import markets
 import reconcile
+from listprices import list_prices
 from routing import IS_ESTIMATED
 
 MICRO_PER_USD = 1_000_000
 ROOT_PARENT = "00000000-0000-0000-0000-000000000000"
 
+#: Marketplace credit below which the dashboard stops treating the balance as
+#: background information and starts asking for a top-up. Around a dollar is a
+#: few long Opus conversations at current discounts — enough warning to act on,
+#: rare enough not to become wallpaper.
+CREDIT_LOW_USD = 1.0
+
 app = Flask(__name__)
+app.register_blueprint(markets.bp)
+app.register_blueprint(buyer.bp)
 client = MongoClient(os.environ["MONGO_URI"])
 db = client.get_default_database()
 transactions = db["transactions"]
@@ -139,6 +150,160 @@ def _savings():
         "pct": ((direct - actual) / direct * 100) if direct > 0 else 0.0,
         "requests": row["requests"],
         "ambiguous": row["ambiguous"],
+    }
+
+
+# Anthropic prices a cache write at 1.25x and a cache read at 0.10x the model's
+# own input rate, and every entry in LibreChat's `cacheTokenValues` follows those
+# two ratios exactly. Surplus preserves them as well: a settled cache read came
+# back 12.4x below the write that created it (2026-08-21, claude-opus-4.8), which
+# is 1.25/0.10 to within rounding.
+#
+# That fixed shape is what makes the panel below possible without knowing any
+# model's rate. A prompt transaction's stored cost is `rate x actual_units`,
+# where `actual_units = input + 1.25*write + 0.10*read`. The same tokens with no
+# caching would have cost `rate x (input + write + read)`. The rate cancels, so
+# scaling the cost we already have by the ratio of those two sums gives the exact
+# counterfactual — for nominal and settled rows alike, since both are
+# proportional to the same unit count.
+CACHE_WRITE_MULTIPLIER = 1.25
+CACHE_READ_MULTIPLIER = 0.10
+
+# Stored negative, exactly like `rawAmount` — a debit against the account. Every
+# use below wants the magnitude, and a `$gt: 0` test against the raw field is
+# silently always false, which reads as "caching never happened" on data where it
+# plainly did.
+_W = {"$abs": {"$ifNull": ["$writeTokens", 0]}}
+_R = {"$abs": {"$ifNull": ["$readTokens", 0]}}
+_I = {"$abs": {"$ifNull": ["$inputTokens", 0]}}
+
+#: Billable units actually incurred, cache discounts applied.
+ACTUAL_UNITS = {
+    "$add": [
+        _I,
+        {"$multiply": [_W, CACHE_WRITE_MULTIPLIER]},
+        {"$multiply": [_R, CACHE_READ_MULTIPLIER]},
+    ]
+}
+#: The same tokens billed flat, as if no cache had been used.
+UNCACHED_UNITS = {"$add": [_I, _W, _R]}
+
+#: Only prompt transactions that actually went through the cache carry the
+#: breakdown; everything else has no `writeTokens`/`readTokens` at all and must
+#: be excluded, or its plain input would read as a 0% cache hit rate.
+HAS_CACHE_TOKENS = {
+    "$and": [
+        {"$eq": ["$tokenType", "prompt"]},
+        {"$gt": [{"$add": [_W, _R]}, 0]},
+    ]
+}
+
+#: What those rows would have cost with caching off. Guarded against a zero unit
+#: count, which cannot happen given the `$gt` above but would be a divide-by-zero
+#: if a future schema change ever let it through.
+UNCACHED_MICRO = {
+    "$cond": [
+        {"$gt": [ACTUAL_UNITS, 0]},
+        {"$multiply": [EFFECTIVE_MICRO, {"$divide": [UNCACHED_UNITS, ACTUAL_UNITS]}]},
+        EFFECTIVE_MICRO,
+    ]
+}
+
+
+def _cache_stats():
+    """Did prompt caching pay for itself, per destination?
+
+    The question this exists to answer is not "is the cache working" but "is it
+    earning the write premium". On a marketplace the seller is chosen per
+    request, so a cache written on one turn is only read on the next if the same
+    seller answers; a run of misses bills every prefix at 1.25x and saves
+    nothing. That failure is silent — the requests all succeed — so it has to be
+    read off the money, which is what `saved` below is.
+
+    A negative `saved` means caching is costing more than it returns and should
+    be turned off for that destination. Nothing else in the stack will say so.
+    """
+    return _fold_cache_rows(
+        transactions.aggregate(
+            [
+                {"$match": {"$expr": HAS_CACHE_TOKENS}},
+                {
+                    "$group": {
+                        "_id": {
+                            "name": {"$ifNull": ["$routedVia.endpoint", "Direct to provider"]},
+                            "model": "$model",
+                        },
+                        "write": {"$sum": _W},
+                        "read": {"$sum": _R},
+                        "plain": {"$sum": _I},
+                        "actual": {"$sum": EFFECTIVE_MICRO},
+                        "uncached": {"$sum": UNCACHED_MICRO},
+                        "messages": {"$sum": 1},
+                    }
+                },
+            ]
+        )
+    )
+
+
+def _fold_cache_rows(rows):
+    """Collapse per-(destination, model) groups into per-destination rows.
+
+    Split out from the query so the arithmetic that decides whether caching is
+    winning can be tested without a database.
+    """
+    by_dest = {}
+    for r in rows:
+        dest = by_dest.setdefault(
+            r["_id"]["name"],
+            {"name": r["_id"]["name"], "write": 0, "read": 0, "plain": 0,
+             "actual": 0.0, "uncached": 0.0, "messages": 0, "models": []},
+        )
+        for field in ("write", "read", "plain", "messages"):
+            dest[field] += r[field]
+        dest["actual"] += r["actual"] / MICRO_PER_USD
+        dest["uncached"] += r["uncached"] / MICRO_PER_USD
+        dest["models"].append(r["_id"]["model"])
+
+    out = []
+    for dest in by_dest.values():
+        through = dest["write"] + dest["read"]
+        dest["hit_rate"] = (dest["read"] / through * 100) if through else 0.0
+        dest["saved"] = dest["uncached"] - dest["actual"]
+        dest["saved_pct"] = (
+            (dest["saved"] / dest["uncached"] * 100) if dest["uncached"] > 0 else 0.0
+        )
+        # Token counts arrive as doubles — `$abs` preserves the type, and the
+        # schema stores them alongside `rawAmount` rather than as counters. They
+        # are counts, so round them back to whole tokens rather than rendering
+        # "5,725,380.0".
+        for field in ("write", "read", "plain"):
+            dest[field] = round(dest[field])
+        models = sorted(set(dest["models"]))
+        dest["models_all"] = ", ".join(models)
+        # A busy endpoint accumulates a dozen models and the cell stops being
+        # readable. Three names say which family is doing the caching; the rest
+        # stay available on hover.
+        dest["models"] = (
+            models
+            if len(models) <= 3
+            else models[:3] + [f"+{len(models) - 3} more"]
+        )
+        out.append(dest)
+    out.sort(key=lambda d: d["uncached"], reverse=True)
+
+    total_read = sum(d["read"] for d in out)
+    total_write = sum(d["write"] for d in out)
+    through = total_read + total_write
+    return {
+        "rows": out,
+        "read": total_read,
+        "write": total_write,
+        "hit_rate": (total_read / through * 100) if through else 0.0,
+        "saved": sum(d["saved"] for d in out),
+        "actual": sum(d["actual"] for d in out),
+        "uncached": sum(d["uncached"] for d in out),
+        "messages": sum(d["messages"] for d in out),
     }
 
 
@@ -313,6 +478,12 @@ h2 { font-weight: 600; margin: 2em 0 0.4em; padding-bottom: 0.3em; border-bottom
      font-size: 1.2em; color: var(--accent); }
 .subhead { color: var(--muted); font-size: 0.9em; }
 .summary { display: grid; grid-template-columns: repeat(4, 1fr); gap: 0.8em; margin: 1.5em 0; }
+.summary.five { grid-template-columns: repeat(5, 1fr); }
+/* Credit is money still to spend, not money spent — it reads down the same row
+   as the totals, so it is tinted apart from them rather than sitting in a
+   banner of its own while it is healthy. */
+.card.credit { border-color: #3a3450; background: #1c1a24; }
+.card.credit .label { color: #a99ce0; }
 .card { background: var(--panel); border: 1px solid var(--border); border-radius: 5px; padding: 0.9em 1em; }
 .card .label { color: var(--muted); font-size: 0.78em; text-transform: uppercase; letter-spacing: 0.06em; }
 .card .value { font-size: 1.7em; margin-top: 0.25em; font-variant-numeric: tabular-nums; }
@@ -345,6 +516,20 @@ tr:hover td { background: var(--hover); }
 .note .note-title { color: #6fc7b1; font-weight: 600; margin-bottom: 0.35em; }
 .note p { margin: 0.4em 0 0; color: var(--muted); font-size: 0.92em; }
 .saved { color: #6fc7b1; font-weight: 500; }
+.lost { color: #d97a6c; font-weight: 500; }
+.bar { display: inline-block; vertical-align: middle; width: 58px; height: 6px; border-radius: 3px;
+       background: #2e2e2e; overflow: hidden; margin-right: 0.5em; }
+/* Bar and figure are one reading, so they must not be allowed to wrap apart. */
+td.hit { white-space: nowrap; }
+td.dest { white-space: nowrap; }
+.bar > span { display: block; height: 100%; background: #6fc7b1; }
+.bar.low > span { background: #d08a3e; }
+.balance { background: #1c1a24; border: 1px solid #3a3450; border-left: 4px solid #8878c4;
+           border-radius: 5px; padding: 0.9em 1.1em; margin: 1.5em 0; }
+.balance .balance-title { color: #a99ce0; font-weight: 600; margin-bottom: 0.35em; }
+.balance p { margin: 0.4em 0 0; color: var(--muted); font-size: 0.92em; }
+.balance.low { background: #2b1a18; border-color: #6b3a2a; border-left-color: #d97a6c; }
+.balance.low .balance-title { color: #e08a7a; }
 footer { color: var(--dim); font-size: 0.78em; text-align: right; margin: 3em 0 1em;
          font-family: "JetBrains Mono", ui-monospace, monospace; }
 a { color: var(--accent); text-decoration: none; }
@@ -356,11 +541,16 @@ a:hover { text-decoration: underline; }
 <h1>LibreChat cost</h1>
 <div class="subhead">Live from MongoDB <span class="mono">transactions</span>. Costs are USD; numbers reflect what LibreChat itself charged against each conversation using <span class="mono">rate × tokens</span> at message time. Rates come from the model-name table, except where a gateway's own billing records have since replaced them &mdash; see <em>By routing</em>.</div>
 
-<div class="summary">
+<div class="summary{% if account.configured %} five{% endif %}">
   <div class="card"><div class="label">Today</div><div class="value">${{ "%.4f"|format(totals.today) }}</div></div>
   <div class="card"><div class="label">Last 7 days</div><div class="value">${{ "%.4f"|format(totals.week) }}</div></div>
   <div class="card"><div class="label">Last 30 days</div><div class="value">${{ "%.4f"|format(totals.month) }}</div></div>
   <div class="card"><div class="label">All time</div><div class="value">${{ "%.4f"|format(totals.all) }}</div></div>
+  {% if account.configured %}
+  <div class="card credit" title="Marketplace credit remaining, from the gateway's own account records">
+    <div class="label">Credit left</div><div class="value">${{ "%.4f"|format(account.creditBalance) }}</div>
+  </div>
+  {% endif %}
 </div>
 
 {% if totals.nominal > 0 %}
@@ -376,21 +566,123 @@ a:hover { text-decoration: underline; }
 </div>
 {% endif %}
 
+{% if account.configured and account.creditBalance < CREDIT_LOW_USD %}
+{# Credit is the one figure here that can stop the instance working — it runs out
+   mid-conversation and the marketplace answers 402. While it is healthy it says
+   its piece as a card above and nothing more; only when it is nearly gone does it
+   earn a banner, because only then is there anything to do about it. #}
+<div class="balance low">
+  <div class="balance-title">
+    ${{ "%.4f"|format(account.creditBalance) }} of marketplace credit left &mdash; top up before it runs out
+  </div>
+  <p>At the last {{ "%.1f"|format(account.savingsPct) }}% discount that is roughly
+  ${{ "%.2f"|format(account.creditBalance / (1 - account.savingsPct / 100)) if account.savingsPct < 100 else 0 }}
+  of provider-list traffic. When it reaches zero the marketplace answers 402 and
+  conversations on those endpoints stop mid-reply.</p>
+</div>
+{% endif %}
+
 {% if savings.requests > 0 %}
 <div class="note">
   {# Six decimals: the whole point of this panel is the gap between two numbers
      that four decimals would round to the same thing. #}
-  <div class="note-title">${{ "%.6f"|format(savings.actual) }} settled against ${{ "%.6f"|format(savings.direct) }} at provider list &mdash; ${{ "%.6f"|format(savings.saved) }} saved ({{ "%.1f"|format(savings.pct) }}%)</div>
+  <div class="note-title">${{ "%.6f"|format(savings.actual) }} settled against ${{ "%.6f"|format(savings.direct) }} at the marketplace's list reference &mdash; ${{ "%.6f"|format(savings.saved) }} saved ({{ "%.1f"|format(savings.pct) }}%)</div>
   <p>Measured on {{ "{:,}".format(savings.requests) }} reconciled transactions, using the gateway's
   own billing records rather than any rate table. This is the number to judge the marketplace on:
   the catalog discount describes the cheapest listed offer, this describes what was really paid.</p>
+  {# The denominator is the marketplace's `direct_cost_usd`, and it is the marketplace's
+     claim about list price, not the provider's. Measured against tx.ts on 2026-08-21 it
+     landed exactly on Anthropic's rate for every model but two, where it sat 20% high
+     (claude-opus-4.8, claude-fable-5) — the same two the market popup footnotes. Left
+     uncorrected on purpose: this figure is the gateway's own record, and overwriting it
+     would stop it being an independent one. #}
+  <p class="dim">The denominator is the marketplace's own idea of list. Spot-checked against
+  this fork's rate table it was exact for most models and ~20% high for
+  <span class="mono">claude-opus-4.8</span> and <span class="mono">claude-fable-5</span>, which
+  flatters the percentage above by roughly that share of their traffic.</p>
   {% if savings.ambiguous > 0 %}
   <p>{{ "{:,}".format(savings.ambiguous) }} of them matched more than one billing record within the
   time window and were settled against the nearest &mdash; identical requests, so the figures differ
   only by whatever seller prices moved in between.</p>
   {% endif %}
+  {% if account.configured and account.requests > 0 %}
+  {# The same question answered by an independent source. The marketplace counts
+     every request the key ever made, LibreChat only its own, so these will not
+     tally exactly — agreement to within a few percent is the signal that
+     reconciliation is matching well, and a wide gap that it is not. #}
+  <p>The marketplace's own records say ${{ "%.6f"|format(account.spent) }} against
+  ${{ "%.6f"|format(account.directUSD) }} across {{ "{:,}".format(account.requests) }} requests
+  &mdash; <span class="saved">{{ "%.1f"|format(account.savingsPct) }}% saved</span>. That covers
+  every request this key has made, LibreChat's or not, so it is a cross-check rather than the
+  same number twice.</p>
+  {% endif %}
   <p class="dim">Last reconciliation: {{ reconcile_status }}</p>
 </div>
+{% endif %}
+
+{% if cache.messages > 0 %}
+<h2>Prompt caching</h2>
+<div class="subhead">Whether the cache is earning its keep. A write costs 1.25&times; the model's input
+rate and a read 0.10&times;, so caching only pays when writes get read back. On a marketplace the
+seller is chosen per request, and a cache written on one turn is read on the next only if the same
+seller answers &mdash; a run of misses bills every prefix at 1.25&times; and saves nothing, with no
+error to show for it. <strong>Saved</strong> is that judgement in dollars: it compares what these
+requests cost against what the identical tokens would have cost with caching off. If it goes
+negative for a destination, caching is losing money there.</div>
+<table>
+<thead><tr>
+  <th class="left">Destination</th>
+  <th class="left">Models</th>
+  <th>Messages</th>
+  <th>Written</th>
+  <th>Read</th>
+  <th class="left">Hit rate</th>
+  <th>Cost</th>
+  <th>Uncached</th>
+  <th>Saved</th>
+</tr></thead>
+<tbody>
+{% for r in cache.rows %}
+<tr>
+  <td class="left dest">{{ r.name }}</td>
+  <td class="left dim mono" style="font-size:0.78em" title="{{ r.models_all }}">{{ r.models|join(", ") }}</td>
+  <td class="num">{{ "{:,}".format(r.messages) }}</td>
+  <td class="num">{{ "{:,}".format(r.write) }}</td>
+  <td class="num">{{ "{:,}".format(r.read) }}</td>
+  <td class="left num hit">
+    {# The bar turns amber under 50%: below that, reads no longer outweigh the
+       premium paid on the writes by a comfortable margin. #}
+    <span class="bar{% if r.hit_rate < 50 %} low{% endif %}"><span style="width:{{ "%.0f"|format(r.hit_rate) }}%"></span></span>{{ "%.0f"|format(r.hit_rate) }}%
+  </td>
+  <td class="num cost">${{ "%.6f"|format(r.actual) }}</td>
+  <td class="num dim">${{ "%.6f"|format(r.uncached) }}</td>
+  <td class="num {% if r.saved >= 0 %}saved{% else %}lost{% endif %}">
+    {% if r.saved >= 0 %}${{ "%.6f"|format(r.saved) }}{% else %}&minus;${{ "%.6f"|format(-r.saved) }}{% endif %}
+    <span class="dim">({{ "%.0f"|format(r.saved_pct) }}%)</span>
+  </td>
+</tr>
+{% endfor %}
+</tbody>
+<tfoot><tr>
+  <td class="left muted">All destinations</td>
+  <td></td>
+  <td class="num muted">{{ "{:,}".format(cache.messages) }}</td>
+  <td class="num muted">{{ "{:,}".format(cache.write) }}</td>
+  <td class="num muted">{{ "{:,}".format(cache.read) }}</td>
+  <td class="left num muted hit">{{ "%.0f"|format(cache.hit_rate) }}%</td>
+  <td class="num cost">${{ "%.6f"|format(cache.actual) }}</td>
+  <td class="num dim">${{ "%.6f"|format(cache.uncached) }}</td>
+  <td class="num {% if cache.saved >= 0 %}saved{% else %}lost{% endif %}">
+    {% if cache.saved >= 0 %}${{ "%.6f"|format(cache.saved) }}{% else %}&minus;${{ "%.6f"|format(-cache.saved) }}{% endif %}
+  </td>
+</tr></tfoot>
+</table>
+<div class="subhead" style="margin-top:0.6em">Counts only the prompt transactions that carried a
+cache breakdown &mdash; a request whose prefix never reached the gateway's 4096-token cache floor is
+absent rather than counted as a miss. Slow chats are the case to watch: this fork sends a 5-minute
+TTL by default, so leaving a conversation idle longer than that guarantees the next turn rewrites
+the whole prefix at 1.25&times;. The cache pill in the chat header counts that window down and arms
+an hour on click.</div>
 {% endif %}
 
 <h2>By routing</h2>
@@ -506,6 +798,9 @@ def index():
         TEMPLATE,
         totals=totals,
         savings=_savings(),
+        cache=_cache_stats(),
+        account=buyer.summary(),
+        CREDIT_LOW_USD=CREDIT_LOW_USD,
         reconcile_status=_reconcile_status(),
         by_model=_by_model(),
         by_conv=_by_conversation(),
@@ -537,7 +832,16 @@ def reconcile_now():
 
 @app.route("/cost/healthz")
 def healthz():
-    return {"ok": True, "tx": transactions.estimated_document_count()}
+    """`rates` is the count of provider list prices read from the bind-mounted
+    tx.ts. Zero means the mount is missing, and the market popup has quietly
+    fallen back to measuring its discount against the marketplace's own
+    marked-up reference — a wrong number with no error attached, so the deploy
+    script checks this field."""
+    return {
+        "ok": True,
+        "tx": transactions.estimated_document_count(),
+        "rates": len(list_prices()),
+    }
 
 
 # ────────────────────────────────────────────────────────────────────────────

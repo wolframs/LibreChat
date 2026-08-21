@@ -460,6 +460,15 @@ export type TConfig = {
   iconURL?: string;
   version?: string;
   modelDisplayLabel?: string;
+  /**
+   * The native client a custom endpoint is routed through (`endpoints.custom[].provider`
+   * in yaml), when one is declared. Distinct from `type`, which is always `custom` for
+   * such a row, and from `customParams.defaultParamsEndpoint`, which an admin may set
+   * on its own to borrow another endpoint's parameter panel. Only this field means
+   * "the request is actually built by that provider's client", which is what a
+   * provider-specific control has to key off.
+   */
+  provider?: string;
   userProvide?: boolean | null;
   userProvideURL?: boolean | null;
   userProvideAccessKeyId?: boolean;
