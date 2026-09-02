@@ -85,6 +85,37 @@ services:
       - mongodb
     restart: unless-stopped
 
+  # MCP sidecar exposing image generation/editing to agents over SSE, backed by
+  # OpenRouter. Internal-only; the api container reaches it at
+  # http://mcp-image-gen:3013/sse (allow-listed in librechat.yaml -> mcpSettings).
+  #
+  # It reads the `files` collection and the image bind mounts directly, so a
+  # reference image the user uploaded is loaded off disk rather than re-fetched
+  # over HTTP. Both mounts must match what the api container writes:
+  #   api:  ./images  -> /app/client/public/images   (file records: /images/...)
+  #   api:  ./uploads -> /app/uploads                (file records: /uploads/...)
+  mcp-image-gen:
+    build: ./mcp-image-gen
+    container_name: mcp-image-gen
+    environment:
+      - PORT=3013
+      - MONGO_URI=mongodb://mongodb:27017/LibreChat
+      # Server-wide key: every account on this stack spends on it. The per-user
+      # daily limit below, not the key, is what bounds that.
+      - OPENROUTER_KEY=${OPENROUTER_KEY:-}
+      - IMAGE_GEN_MODEL=${IMAGE_GEN_MODEL:-meta/muse-image}
+      - IMAGE_GEN_API=${IMAGE_GEN_API:-auto}
+      - IMAGE_GEN_DAILY_LIMIT=${IMAGE_GEN_DAILY_LIMIT:-3}
+      - IMAGE_GEN_COOLDOWN_SEC=${IMAGE_GEN_COOLDOWN_SEC:-30}
+    volumes:
+      - ./images:/app/images:ro
+      - ./uploads:/app/uploads:ro
+    expose:
+      - "3013"
+    depends_on:
+      - mongodb
+    restart: unless-stopped
+
   # Self-hosted SearXNG metasearch, configured to use only the Brave Search API.
   # Internal-only: no host port. The api container reaches it via http://searxng:8080
   searxng:

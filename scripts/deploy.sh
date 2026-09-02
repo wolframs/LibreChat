@@ -159,6 +159,26 @@ if [[ $SIDECAR_BAD -eq 1 ]]; then
     docker-compose.override.yml, then:  docker compose up -d --build cost-dashboard"
 fi
 
+# The image MCP server has no nginx route, and reachability is the half that
+# actually breaks: the api container has to resolve mcp-image-gen on the compose
+# network AND get past the mcpSettings allowlist. So probe it from inside api
+# rather than from the host.
+if compose ps --services 2>/dev/null | grep -qx mcp-image-gen; then
+  mcp_body="$(compose exec -T api node -e '
+    fetch("http://mcp-image-gen:3013/healthz")
+      .then((r) => r.json())
+      .then((j) => console.log(JSON.stringify(j)))
+      .catch((e) => { console.log("ERR " + e.message); process.exitCode = 1; })
+  ' 2>/dev/null)" || mcp_body="ERR exec failed"
+  case "$mcp_body" in
+    ERR*)  warn "mcp-image-gen unreachable from api — $mcp_body" ;;
+    *'"hasKey":false'*)
+           warn "mcp-image-gen up but OPENROUTER_KEY is unset — generate_image will refuse"
+           echo "      $mcp_body" ;;
+    *)     ok "mcp-image-gen $mcp_body" ;;
+  esac
+fi
+
 # Local features must be present in the DEPLOYED image, not just on disk. Each marker
 # corresponds to one local commit; a missing marker means the image predates it or was
 # built from the wrong tree.
