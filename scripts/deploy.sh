@@ -107,18 +107,34 @@ if [[ "$MODE" == "check" ]]; then
 else
   # ------------------------------------------------------------- build/deploy --
   echo
+  # cost-dashboard is recreated alongside api because it bind-mounts the SAME single
+  # file, ./librechat.yaml. A single-file bind binds the inode, and almost every editor
+  # writes a temp file and renames over the original — a new inode. The container keeps
+  # pointing at the old, now-unlinked one, and the path inside it turns into a stale
+  # entry that cannot even be stat'd. Nothing errors: the api gets recreated and reads
+  # the new yaml, while the dashboard silently loses its copy and
+  # /cost/markets/endpoints starts returning [] — i.e. the market-price button just
+  # stops appearing. Recreating both is what keeps them looking at the same file.
   if [[ "$MODE" == "config" ]]; then
-    bold "Recreating api (config-only, no rebuild)"
-    compose up -d --force-recreate api
+    bold "Recreating api + cost-dashboard (config-only, no rebuild)"
+    compose up -d --force-recreate api cost-dashboard
   else
     bold "Building api from working tree"
     # ${a[@]+…} guard: bash 3.2 (macOS) treats an empty array as unbound under `set -u`
     compose build "${BUILD_ARGS[@]+"${BUILD_ARGS[@]}"}" api
     echo
     bold "Recreating stack"
-    compose up -d --force-recreate api
+    compose up -d --force-recreate api cost-dashboard
     compose up -d
   fi
+
+  # nginx resolves `api` and `cost-dashboard` once, at worker start, and caches the
+  # addresses for the life of the process. Recreating those two together lets them swap
+  # addresses on the compose network, at which point nginx proxies chat traffic to the
+  # dashboard and /cost to the api — every route 502s with "Connection refused" against
+  # an IP that is very much alive. Restarting nginx costs under a second and closes the
+  # whole class, including the single-container case.
+  compose restart nginx
   echo
 fi
 
@@ -157,6 +173,27 @@ if [[ $SIDECAR_BAD -eq 1 ]]; then
   die "The market-price popup would show a discount measured against the marketplace's
     own reference instead of the provider's list. Fix the tx.ts mount in
     docker-compose.override.yml, then:  docker compose up -d --build cost-dashboard"
+fi
+
+# The other half of the same mount: the dashboard names the marketplace-backed yaml rows
+# by reading librechat.yaml itself, and marketplace_endpoint_names() swallows every error
+# and returns []. A dangling bind is therefore indistinguishable from "no gateway is
+# configured" — the market-price button simply never renders, with nothing in any log.
+# Checking readability inside the container is the only place the difference shows.
+if ! compose exec -T cost-dashboard test -r /app/librechat.yaml 2>/dev/null; then
+  die "cost-dashboard cannot read its bind-mounted /app/librechat.yaml.
+    Editing librechat.yaml replaces the file's inode and detaches a single-file bind on
+    any container that was not recreated afterwards. The market-price button on gateway
+    models silently stops appearing. Fix:  docker compose up -d --force-recreate cost-dashboard"
+fi
+markets_json="$(curl -fsS "$BASE_URL/cost/markets/endpoints" 2>/dev/null)" || markets_json=""
+if [[ -n "$markets_json" ]]; then
+  if [[ "$markets_json" == '{"endpoints":[]}'* ]] && grep -q 'api.surplusintelligence.ai' librechat.yaml; then
+    warn "librechat.yaml has a marketplace baseURL but /cost/markets/endpoints is empty"
+    warn "  → the market-price button will not render; check MARKETPLACE_HOSTS in cost-dashboard/markets.py"
+  else
+    ok "/cost/markets/endpoints $markets_json"
+  fi
 fi
 
 # The image MCP server has no nginx route, and reachability is the half that
