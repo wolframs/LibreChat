@@ -135,7 +135,7 @@ export interface GoogleAudioBlock {
   data: string;
 }
 
-/** OpenRouter audio block format */
+/** OpenAI-compatible audio block format (OpenAI, OpenRouter, and gateways speaking either) */
 export interface OpenRouterAudioBlock {
   type: 'input_audio';
   input_audio: {
@@ -144,7 +144,18 @@ export interface OpenRouterAudioBlock {
   };
 }
 
-export type AudioBlock = GoogleAudioBlock | OpenRouterAudioBlock;
+/**
+ * Stand-in used where the provider has no audio content block at all (Anthropic,
+ * Bedrock). Carries the filename and file_id so the model knows a file arrived
+ * and what to hand a listening tool, instead of being asked about audio it was
+ * never told about.
+ */
+export interface AudioNoteBlock {
+  type: 'text';
+  text: string;
+}
+
+export type AudioBlock = GoogleAudioBlock | OpenRouterAudioBlock | AudioNoteBlock;
 
 export interface AudioResult {
   audios: AudioBlock[];

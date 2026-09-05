@@ -116,6 +116,39 @@ services:
       - mongodb
     restart: unless-stopped
 
+  # MCP sidecar giving text-only models ears: it reads an audio file the user
+  # uploaded, sends it to an audio-capable model on OpenRouter, and returns the
+  # description as text. Internal-only, reached at http://mcp-audio-ears:3014/sse
+  # (allow-listed in librechat.yaml -> mcpSettings).
+  #
+  # This is NOT the same thing as the native audio forwarding in the api image.
+  # That sends the file to the model the user is talking to, and only works where
+  # that model has ears. This exists for where it doesn't — Claude, Ollama text
+  # models, anything on the Anthropic protocol — and for long files, which it
+  # splits into chunks the native single-part path cannot.
+  #
+  # Only the uploads mount is needed: audio never lands in ./images.
+  mcp-audio-ears:
+    build: ./mcp-audio-ears
+    container_name: mcp-audio-ears
+    environment:
+      - PORT=3014
+      - MONGO_URI=mongodb://mongodb:27017/LibreChat
+      # Same server-wide key and same reasoning as the image sidecar: the per-user
+      # limits below, not the key, are what bound who can spend on it.
+      - OPENROUTER_KEY=${OPENROUTER_KEY:-}
+      - AUDIO_EARS_MODEL=${AUDIO_EARS_MODEL:-google/gemini-3.8-flash}
+      - AUDIO_EARS_DAILY_LIMIT=${AUDIO_EARS_DAILY_LIMIT:-20}
+      - AUDIO_EARS_COOLDOWN_SEC=${AUDIO_EARS_COOLDOWN_SEC:-5}
+      - AUDIO_EARS_TIMEOUT_SEC=${AUDIO_EARS_TIMEOUT_SEC:-600}
+    volumes:
+      - ./uploads:/app/uploads:ro
+    expose:
+      - "3014"
+    depends_on:
+      - mongodb
+    restart: unless-stopped
+
   # Self-hosted SearXNG metasearch, configured to use only the Brave Search API.
   # Internal-only: no host port. The api container reaches it via http://searxng:8080
   searxng:

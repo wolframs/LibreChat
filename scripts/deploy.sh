@@ -216,6 +216,23 @@ if compose ps --services 2>/dev/null | grep -qx mcp-image-gen; then
   esac
 fi
 
+# Same probe, same reason, for the audio sidecar.
+if compose ps --services 2>/dev/null | grep -qx mcp-audio-ears; then
+  ears_body="$(compose exec -T api node -e '
+    fetch("http://mcp-audio-ears:3014/healthz")
+      .then((r) => r.json())
+      .then((j) => console.log(JSON.stringify(j)))
+      .catch((e) => { console.log("ERR " + e.message); process.exitCode = 1; })
+  ' 2>/dev/null)" || ears_body="ERR exec failed"
+  case "$ears_body" in
+    ERR*)  warn "mcp-audio-ears unreachable from api — $ears_body" ;;
+    *'"hasKey":false'*)
+           warn "mcp-audio-ears up but OPENROUTER_KEY is unset — listen_to_audio will refuse"
+           echo "      $ears_body" ;;
+    *)     ok "mcp-audio-ears $ears_body" ;;
+  esac
+fi
+
 # Local features must be present in the DEPLOYED image, not just on disk. Each marker
 # corresponds to one local commit; a missing marker means the image predates it or was
 # built from the wrong tree.
@@ -244,6 +261,10 @@ check_marker "market-prices popover (client)" "com_ui_market_prices" "/app/clien
 # Without this, every gateway request bills as zero input tokens — silently, with
 # a correct reply and no error anywhere. See fork-customizations.md §10.
 check_marker "gateway usage recovery"       "observeAnthropicStreamUsage" "/app/packages/api/dist/index.cjs"
+# Without this, an audio attachment on an OpenAI-compatible endpoint is dropped
+# between upload and request: the file shows in the thread, the model never gets
+# it, nothing is logged. See fork-customizations.md §11.
+check_marker "audio input forwarding"       "has no audio input format" "/app/packages/api/dist/index.cjs"
 
 echo
 if [[ $MISSING -eq 1 ]]; then
