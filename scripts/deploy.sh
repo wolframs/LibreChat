@@ -265,6 +265,10 @@ check_marker "gateway usage recovery"       "observeAnthropicStreamUsage" "/app/
 # between upload and request: the file shows in the thread, the model never gets
 # it, nothing is logged. See fork-customizations.md §11.
 check_marker "audio input forwarding"       "has no audio input format" "/app/packages/api/dist/index.cjs"
+# Without this, an MCP server cannot name the file_id its image will be saved under,
+# so a model that just generated an image needs a second get_user_images call before
+# it can edit it. See fork-customizations.md §12.
+check_marker "MCP image file_id passthrough" "librechat/file_id" "/app/packages/api/dist/index.cjs"
 
 echo
 if [[ $MISSING -eq 1 ]]; then

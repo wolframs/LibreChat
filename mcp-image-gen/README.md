@@ -33,6 +33,7 @@ the comment above `createMcpServer()` in `index.js`.
 | `IMAGE_GEN_API` | `auto` | `images` \| `chat` \| `auto`. See below. |
 | `IMAGE_GEN_DAILY_LIMIT` | `3` | Per user, per container-local day. `0` disables. |
 | `IMAGE_GEN_COOLDOWN_SEC` | `30` | Per user. `0` disables. |
+| `IMAGE_GEN_MAX_INLINE_BYTES` | `10485760` | Above this the image is described but not attached. Keep at or below the api container's `MCP_IMAGE_DATA_MAX_BYTES`. |
 | `MONGO_URI` | `mongodb://mongodb:27017/LibreChat` | Reads `files`, writes `mcp_image_gen_usage`. |
 
 Values live in the stack's `.env`; the compose service passes them through.
@@ -56,6 +57,31 @@ Values live in the stack's `.env`; the compose service passes them through.
    this collection is the only record.
 8. `IMAGE_GEN_API` makes the route explicit. Upstream picks it from
    `model.includes("gemini")`, which is still the `auto` behaviour.
+9. **`generate_image` returns a text block, not just the image.** Upstream returns the
+   `image` block alone — and LibreChat diverts every image block into `artifacts`, so the
+   *model* calling the tool receives the empty string. It sees "no output", reports a
+   failure to the user over a picture already on their screen, and is one step from paying
+   for a retry. The text block states success, the file_id, the model, the format, the
+   measured dimensions, the size, the delivered aspect ratio and the cost. Full reasoning in
+   `~/LibreChatDocs/image-generation.md` → *Result shape*.
+10. **The server chooses the `file_id`** and stamps it on the image block's
+    `_meta['librechat/file_id']`. `saveBase64Image` does `file_id = _file_id ?? v4()` and
+    reports neither, so upstream's server can never name its own output; a model wanting to
+    edit what it just made had to call `get_user_images` and guess at the newest row. Needs
+    the fork change in `packages/api/src/mcp/parsers.ts` (`fork-customizations.md` §12) —
+    without it the id in the text is simply not the one on disk, which is why the text also
+    names `get_user_images` as the fallback.
+11. **Skipped reference images are reported.** `referencesToDataUrls` drops a reference it
+    cannot read and generates anyway, silently turning an edit into a fresh generation.
+    `generateImageOnOpenRouter` now returns `referencesUsed` and the summary states any
+    shortfall.
+12. **Dimensions are read from the returned bytes** (`imageinfo.js` — webp/png/jpeg/gif
+    headers, no dependency), so "requested 16:9, delivered 3:2" is measured rather than
+    assumed. Verified against `sips` on twelve real generations.
+13. **An image above `IMAGE_GEN_MAX_INLINE_BYTES` (default 10 MB) is described but not
+    attached.** LibreChat throws out of `formatToolContent` above `MCP_IMAGE_DATA_MAX_BYTES`,
+    and that throw takes the whole result including the text — leaving the model blind for
+    the second time. Keep the two values in step.
 
 ## Route selection
 

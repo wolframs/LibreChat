@@ -1,9 +1,66 @@
 import { ObjectId } from 'mongodb';
+import { randomUUID } from 'crypto';
 import { getDb } from './db.js';
 import { fetchImageById, extractFileId } from './files.js';
 import { generateImageOnOpenRouter } from './openrouter.js';
+import {
+  imageDimensions,
+  nearestRatio,
+  orientationOf,
+  formatBytes,
+  ratioValue,
+  ratiosMatch,
+} from './imageinfo.js';
 
 export const MODEL = process.env.IMAGE_GEN_MODEL || 'meta/muse-image';
+
+/**
+ * OpenRouter validates aspect_ratio against this closed set and rejects anything
+ * else with a 400, so `index.js` makes it a z.enum rather than a free string — a
+ * model that invents "1080x1920" should fail at the tool boundary with a readable
+ * message instead of burning a round-trip on a gateway error. It lives here rather
+ * than in index.js because the result summary matches the delivered dimensions
+ * against the same set.
+ */
+export const ASPECT_RATIOS = [
+  '1:1',
+  '1:2',
+  '1:4',
+  '1:8',
+  '2:1',
+  '2:3',
+  '3:2',
+  '3:4',
+  '4:1',
+  '4:3',
+  '4:5',
+  '5:4',
+  '8:1',
+  '9:16',
+  '16:9',
+  '9:19.5',
+  '19.5:9',
+  '9:20',
+  '20:9',
+  '9:21',
+  '21:9',
+  'auto',
+];
+
+/**
+ * Ceiling on the base64 payload we will hand back as an MCP `image` block.
+ *
+ * LibreChat throws out of `formatToolContent` when an image result exceeds
+ * `MCP_IMAGE_DATA_MAX_BYTES` (default 10 MB) — and that throw takes the *whole*
+ * tool result with it, text block included, so the model learns nothing about a
+ * generation it already paid for. Checking here means an oversized image costs the
+ * inline preview and nothing else: the text summary still lands, and the client
+ * still has no image either way. Keep this at or below the api container's value.
+ */
+const MAX_INLINE_IMAGE_BYTES = parseInt(
+  process.env.IMAGE_GEN_MAX_INLINE_BYTES ?? String(10 * 1024 * 1024),
+  10,
+);
 
 export async function handleGetUserImages({ limit }, context) {
   try {
@@ -156,7 +213,7 @@ async function checkImageGenerationLimit(userId) {
  * kept because this spend never reaches LibreChat's `transactions` collection and
  * is therefore invisible to /cost — this collection is the only record of it.
  */
-async function logImageGenerationUsage(userId, prompt, model, usage) {
+async function logImageGenerationUsage(userId, prompt, model, usage, meta = {}) {
   if (!userId) return;
   try {
     const db = await getDb();
@@ -167,10 +224,106 @@ async function logImageGenerationUsage(userId, prompt, model, usage) {
       model,
       cost: usage?.cost ?? null,
       usage: usage ?? null,
+      // `fileId` is the same id the saved `files` row carries, so a usage row can be
+      // joined back to the image it paid for.
+      file_id: meta.fileId ?? null,
+      width: meta.dims?.width ?? null,
+      height: meta.dims?.height ?? null,
+      bytes: meta.bytes ?? null,
+      referencesRequested: meta.referencesRequested ?? null,
+      referencesUsed: meta.referencesUsed ?? null,
     });
   } catch (err) {
     console.error('Failed to log image generation usage to DB:', err.message);
   }
+}
+
+/**
+ * The text block that makes the result legible to the model.
+ *
+ * Without it the tool returned an `image` block and nothing else, and LibreChat
+ * diverts every image block into `artifacts` — leaving `formatToolContent` to
+ * return an empty string as the tool's text. The model saw "no output", announced
+ * a failure over an image already hanging in the user's chat, and was one step
+ * from paying for a retry. So: never return a bare image, and never return an
+ * empty result. Say what was produced and say it succeeded.
+ */
+function buildResultSummary({
+  fileId,
+  dims,
+  mimeType,
+  bytes,
+  usage,
+  aspect_ratio,
+  referenceRequested,
+  referenceUsed,
+  oversized,
+}) {
+  const deliveredName = dims ? nearestRatio(dims, ASPECT_RATIOS) : null;
+  const lines = [];
+
+  if (oversized) {
+    lines.push(
+      `Image generated successfully, but at ${formatBytes(bytes)} it is too large to inline ` +
+        `(limit ${formatBytes(MAX_INLINE_IMAGE_BYTES)}), so it is NOT attached to this result and ` +
+        'will not appear in the chat. The generation was still billed. Retry with a smaller ' +
+        'aspect_ratio if the user needs to see it.',
+    );
+  } else {
+    lines.push(
+      'Image generated successfully. It is attached to this tool result and is already ' +
+        'displayed in the chat — report success. Do NOT call generate_image again to retry ' +
+        'this; every call is billed and counts against the daily limit.',
+    );
+  }
+
+  lines.push('');
+  if (!oversized) {
+    lines.push(
+      `- file_id: ${fileId} — pass this as \`reference_image_url\` to edit or re-use this image. ` +
+        '(If it does not resolve, call `get_user_images`: this image is the newest entry, INDEX_1.)',
+    );
+  }
+  lines.push(`- model: ${MODEL}`);
+  lines.push(`- format: ${mimeType}`);
+  lines.push(
+    dims
+      ? `- dimensions: ${dims.width}×${dims.height} (${orientationOf(dims)}` +
+          `${deliveredName ? `, ${deliveredName}` : ''})`
+      : `- dimensions: could not be read from the ${mimeType} header`,
+  );
+  lines.push(`- size: ${formatBytes(bytes)}`);
+
+  if (aspect_ratio) {
+    const requested = ratioValue(aspect_ratio);
+    const honoured = dims && ratiosMatch(requested, dims.width / dims.height);
+    lines.push(
+      aspect_ratio === 'auto' || !dims || honoured
+        ? `- aspect_ratio: requested ${aspect_ratio}`
+        : `- aspect_ratio: requested ${aspect_ratio}, delivered ` +
+            `${deliveredName ?? `${dims.width}:${dims.height}`}. ${MODEL} treats this argument as ` +
+            'an orientation hint rather than an exact ratio, so a mismatch is expected — it is ' +
+            'not a failure, and re-running with the same value will not change it.',
+    );
+  }
+
+  if (referenceRequested > 0) {
+    lines.push(
+      referenceUsed === referenceRequested
+        ? `- reference images used: ${referenceUsed}`
+        : `- reference images: ${referenceUsed} of ${referenceRequested} used. The rest could ` +
+            'not be read and were SKIPPED, so this is closer to a fresh generation than an ' +
+            'edit — tell the user, and re-check the ids with `get_user_images`.',
+    );
+  }
+
+  lines.push(
+    usage?.cost != null
+      ? `- cost: $${Number(usage.cost).toFixed(5)} (server OpenRouter key; this spend is not visible in /cost)`
+      : '- cost: not reported by OpenRouter for this call',
+  );
+
+  return lines.join('\n');
 }
 
 export async function handleGenerateImage(
@@ -210,7 +363,7 @@ export async function handleGenerateImage(
       `Generating image. Model: ${MODEL}, Aspect Ratio: ${aspect_ratio || 'default'}, References: ${urlsToFetch.length}`,
     );
 
-    const { base64Image, mimeType, usage } = await generateImageOnOpenRouter({
+    const { base64Image, mimeType, usage, referencesUsed } = await generateImageOnOpenRouter({
       prompt,
       selectedModel: MODEL,
       urlsToFetch,
@@ -220,11 +373,61 @@ export async function handleGenerateImage(
       aspect_ratio,
     });
 
-    console.log(`Image generated (${mimeType}), cost=${usage?.cost ?? 'unknown'}`);
-    await logImageGenerationUsage(userId, prompt, MODEL, usage);
-    return {
-      content: [{ type: 'image', data: base64Image, mimeType }],
-    };
+    const buffer = Buffer.from(base64Image, 'base64');
+    const dims = imageDimensions(buffer);
+
+    /**
+     * Chosen here rather than left to LibreChat, which otherwise mints a v4 of its
+     * own inside `saveBase64Image` and never tells anyone what it was. Sent on the
+     * image block's `_meta`; `formatToolContent` lifts it into `artifact.file_ids`
+     * and `createToolEndCallback` saves the file under it. That makes the id in the
+     * summary below a real handle the model can pass straight back as
+     * `reference_image_url` — no `get_user_images` round-trip to edit what it just
+     * made. If the api image predates that fork change the id is simply not the
+     * one on disk, which is why `get_user_images` is named as the fallback.
+     */
+    const fileId = randomUUID();
+
+    console.log(
+      `Image generated (${mimeType}, ${dims ? `${dims.width}x${dims.height}` : 'unknown size'}, ` +
+        `${buffer.length} bytes), file_id=${fileId}, refs=${referencesUsed}/${urlsToFetch.length}, ` +
+        `cost=${usage?.cost ?? 'unknown'}`,
+    );
+    await logImageGenerationUsage(userId, prompt, MODEL, usage, {
+      fileId,
+      dims,
+      bytes: buffer.length,
+      referencesRequested: urlsToFetch.length,
+      referencesUsed,
+    });
+
+    const oversized = buffer.length > MAX_INLINE_IMAGE_BYTES;
+    const content = [
+      {
+        type: 'text',
+        text: buildResultSummary({
+          fileId,
+          dims,
+          mimeType,
+          bytes: buffer.length,
+          usage,
+          aspect_ratio,
+          referenceRequested: urlsToFetch.length,
+          referenceUsed: referencesUsed,
+          oversized,
+        }),
+      },
+    ];
+    if (!oversized) {
+      content.push({
+        type: 'image',
+        data: base64Image,
+        mimeType,
+        _meta: { 'librechat/file_id': fileId },
+      });
+    }
+
+    return { content };
   } catch (err) {
     // OpenRouter puts the actionable part in the response body — an unsupported
     // aspect_ratio, for instance, is a 400 that names the values it will accept.

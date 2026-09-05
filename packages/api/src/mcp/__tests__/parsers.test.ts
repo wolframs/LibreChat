@@ -157,6 +157,74 @@ describe('formatToolContent', () => {
       expect(artifacts?.content).toHaveLength(1);
     });
 
+    it('should lift a server-supplied file_id from _meta into artifacts.file_ids', () => {
+      const result: t.MCPToolCallResponse = {
+        content: [
+          { type: 'text', text: 'Image generated successfully.' },
+          {
+            type: 'image',
+            data: 'base64data',
+            mimeType: 'image/webp',
+            _meta: { 'librechat/file_id': 'a5e0f1c2-0000-4000-8000-000000000001' },
+          },
+        ],
+      };
+
+      const [content, artifacts] = formatToolContent(result, 'anthropic');
+
+      expect(content).toBe('Image generated successfully.');
+      expect(artifacts?.file_ids).toEqual(['a5e0f1c2-0000-4000-8000-000000000001']);
+    });
+
+    it('should keep file_ids index-aligned with artifact content', () => {
+      const result: t.MCPToolCallResponse = {
+        content: [
+          { type: 'image', data: 'first', mimeType: 'image/png' },
+          {
+            type: 'image',
+            data: 'second',
+            mimeType: 'image/png',
+            _meta: { 'librechat/file_id': 'second-id' },
+          },
+        ],
+      };
+
+      const [, artifacts] = formatToolContent(result, 'openai');
+
+      expect(artifacts?.content).toHaveLength(2);
+      expect(artifacts?.file_ids).toEqual([undefined, 'second-id']);
+    });
+
+    it('should omit file_ids entirely when no image carries one', () => {
+      const result: t.MCPToolCallResponse = {
+        content: [
+          { type: 'image', data: 'base64data', mimeType: 'image/png', _meta: { unrelated: 1 } },
+        ],
+      };
+
+      const [, artifacts] = formatToolContent(result, 'openai');
+
+      expect(artifacts?.content).toHaveLength(1);
+      expect(artifacts?.file_ids).toBeUndefined();
+    });
+
+    it('should ignore a non-string file_id in _meta', () => {
+      const result: t.MCPToolCallResponse = {
+        content: [
+          {
+            type: 'image',
+            data: 'base64data',
+            mimeType: 'image/png',
+            _meta: { 'librechat/file_id': 42 },
+          },
+        ],
+      };
+
+      const [, artifacts] = formatToolContent(result, 'openai');
+
+      expect(artifacts?.file_ids).toBeUndefined();
+    });
+
     it('should handle multiple images without text', () => {
       const result: t.MCPToolCallResponse = {
         content: [

@@ -194,5 +194,10 @@ export async function generateImageOnOpenRouter({
     throw new Error('Failed to extract or download image.');
   }
 
-  return { base64Image, mimeType, usage };
+  // `referencesUsed` can be short of `urlsToFetch.length`: a reference that cannot
+  // be read is skipped with a warning above, and the generation proceeds without
+  // it. That turns "edit this image" into "generate a new one" with nothing in the
+  // tool result to say so, which is the same silent-success shape as returning a
+  // bare image block. The caller reports the shortfall.
+  return { base64Image, mimeType, usage, referencesUsed: dataUrls.length };
 }

@@ -94,6 +94,26 @@ function isImageContent(item: t.ToolContentPart): item is t.ImageContent {
   return item.type === 'image';
 }
 
+/**
+ * A server-chosen file_id for an image result, read from the content block's `_meta`.
+ *
+ * An MCP server that returns an image has no way of knowing what it will be called
+ * afterwards: `createToolEndCallback` hands the block to `saveBase64Image`, which
+ * mints a v4 when none is supplied and reports it to nobody. So a server that wants
+ * to name the id in its own text result — "pass this back as reference_image_url to
+ * edit the image you just made" — cannot, and the model has to spend a second tool
+ * call listing files to find what it just produced.
+ *
+ * `_meta` is the MCP-sanctioned place for exactly this (it survives both SDK
+ * schemas untouched), and `artifact.file_ids` is already the channel
+ * `createToolEndCallback` reads, index-aligned with `artifact.content`. This just
+ * connects the two. Anything not a plain non-empty string is ignored.
+ */
+function extractMetaFileId(item: t.ImageContent): string | undefined {
+  const value = (item._meta as Record<string, unknown> | undefined)?.['librechat/file_id'];
+  return typeof value === 'string' && value.length > 0 ? value : undefined;
+}
+
 function parseAsString(result: t.MCPToolCallResponse): string {
   const content = result?.content ?? [];
   if (!content.length) {
@@ -152,6 +172,8 @@ export function formatToolContent(
   }
 
   const imageUrls: t.FormattedContent[] = [];
+  /** Index-aligned with `imageUrls`; a slot is undefined when the server named no id. */
+  const imageFileIds: (string | undefined)[] = [];
   const uiResources: UIResource[] = [];
   let currentTextBlock = '';
 
@@ -176,6 +198,7 @@ export function formatToolContent(
 
       if (formattedImage.type === 'image_url') {
         imageUrls.push(formattedImage);
+        imageFileIds.push(extractMetaFileId(item));
       }
     },
 
@@ -241,6 +264,11 @@ UI Resource Markers Available:
   let artifacts: t.Artifacts = undefined;
   if (imageUrls.length > 0) {
     artifacts = { content: imageUrls };
+    // Only carried when at least one server actually named an id; an all-undefined
+    // array would make `saveBase64Image` behave identically while looking meaningful.
+    if (imageFileIds.some((id) => id !== undefined)) {
+      artifacts.file_ids = imageFileIds as string[];
+    }
   }
 
   if (uiResources.length > 0) {

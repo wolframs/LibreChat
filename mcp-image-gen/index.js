@@ -3,43 +3,12 @@ import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { SSEServerTransport } from '@modelcontextprotocol/sdk/server/sse.js';
 import { z } from 'zod';
 import { AsyncLocalStorage } from 'async_hooks';
-import { handleGenerateImage, handleGetUserImages, MODEL } from './tools.js';
+import { handleGenerateImage, handleGetUserImages, MODEL, ASPECT_RATIOS } from './tools.js';
 
 const app = express();
 const mcpContext = new AsyncLocalStorage();
 
 const MONGO_URI = process.env.MONGO_URI || 'mongodb://mongodb:27017/LibreChat';
-
-/**
- * OpenRouter validates aspect_ratio against this closed set and rejects anything
- * else with a 400, so it is a z.enum here rather than a free string — a model that
- * invents "1080x1920" should fail at the tool boundary with a readable message
- * instead of burning a round-trip on a gateway error.
- */
-const ASPECT_RATIOS = [
-  '1:1',
-  '1:2',
-  '1:4',
-  '1:8',
-  '2:1',
-  '2:3',
-  '3:2',
-  '3:4',
-  '4:1',
-  '4:3',
-  '4:5',
-  '5:4',
-  '8:1',
-  '9:16',
-  '16:9',
-  '9:19.5',
-  '19.5:9',
-  '9:20',
-  '20:9',
-  '9:21',
-  '21:9',
-  'auto',
-];
 
 /**
  * No `instructions` are declared here on purpose, and this is worth knowing before
