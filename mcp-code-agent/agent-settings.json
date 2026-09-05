@@ -1,0 +1,29 @@
+{
+  "$comment": [
+    "Claude Code settings for the sandboxed session. Deny rules still apply under",
+    "--dangerously-skip-permissions; allow rules are what that flag makes moot.",
+    "",
+    "This is a short list on purpose. The design stance here is reversibility over",
+    "prevention: a wrong edit costs a git revert, so the walls are only for the",
+    "things revert cannot undo — a leaked secret is out, a push is published, and a",
+    "weakened supervisor makes every later job less trustworthy without anyone",
+    "noticing."
+  ],
+  "permissions": {
+    "deny": [
+      "Read(./.env)",
+      "Read(./.env.*)",
+      "Read(./searxng/settings.yml)",
+      "Read(./data-node/**)",
+      "Edit(./.env)",
+      "Edit(./.env.*)",
+      "Edit(./searxng/settings.yml)",
+      "Edit(./scripts/deploy.sh)",
+      "Edit(./scripts/agent-test.sh)",
+      "Edit(./CHANGELOG-agent.md)",
+      "Bash(git push:*)",
+      "Bash(docker:*)",
+      "Bash(./scripts/deploy.sh:*)"
+    ]
+  }
+}
