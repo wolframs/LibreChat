@@ -449,7 +449,7 @@ def _by_conversation():
     return sorted(grouped.values(), key=lambda c: c["total_cost"], reverse=True)
 
 
-TEMPLATE = """<!doctype html>
+TEMPLATE = r"""<!doctype html>
 <html lang="en">
 <head>
 <meta charset="utf-8">
@@ -530,6 +530,37 @@ td.dest { white-space: nowrap; }
 .balance p { margin: 0.4em 0 0; color: var(--muted); font-size: 0.92em; }
 .balance.low { background: #2b1a18; border-color: #6b3a2a; border-left-color: #d97a6c; }
 .balance.low .balance-title { color: #e08a7a; }
+/* Collapsible banners: .warn and .note both carry .banner plus a unique id,
+   split into a head (caret + title) and a body div; the one toggle handler
+   in the script block drives every banner from that markup alone. */
+.banner .banner-head { display: flex; align-items: baseline; gap: 0.5em; }
+.banner-head .warn-title, .banner-head .note-title { margin-bottom: 0; }
+.banner-toggle { appearance: none; background: none; border: 0; padding: 0; margin: 0;
+                 cursor: pointer; color: inherit; font: inherit; line-height: inherit;
+                 display: inline-flex; align-items: center; flex: none; }
+.banner-toggle:focus-visible { outline: 1px solid var(--accent); border-radius: 2px; }
+.banner-caret { display: inline-block; font-size: 0.8em; transition: transform 0.15s ease; }
+.banner[data-collapsed] { padding: 0.55em 1.1em; }
+.banner[data-collapsed] .banner-body { display: none; }
+.banner[data-collapsed] .banner-caret { transform: rotate(-90deg); }
+/* Sortable headers: the caret hint is its own fixed-width node so toggling
+   direction never shifts the column. */
+th.sortable { cursor: pointer; user-select: none; -webkit-user-select: none; white-space: nowrap; }
+th.sortable:hover { color: var(--text); }
+th.sorted { color: var(--accent); }
+th .sort-hint { display: inline-block; margin-left: 0.45em; width: 0.9em;
+                color: var(--dim); font-size: 0.9em; }
+th.sorted .sort-hint { color: var(--accent); }
+/* Per-table row filtering. */
+.table-tools { display: flex; align-items: baseline; gap: 0.7em; margin: 0.5em 0 0.3em; }
+.table-filter { background: var(--panel); color: var(--text); border: 1px solid var(--border);
+                border-radius: 4px; padding: 0.3em 0.6em; font: inherit; font-size: 0.88em;
+                min-width: 280px; }
+.table-filter:focus { outline: none; border-color: var(--accent); }
+.table-filter::placeholder { color: var(--dim); }
+.filter-count { color: var(--dim); font-size: 0.78em;
+                font-family: "JetBrains Mono", ui-monospace, monospace; }
+tr[hidden] { display: none; }
 footer { color: var(--dim); font-size: 0.78em; text-align: right; margin: 3em 0 1em;
          font-family: "JetBrains Mono", ui-monospace, monospace; }
 a { color: var(--accent); text-decoration: none; }
@@ -554,18 +585,28 @@ a:hover { text-decoration: underline; }
 </div>
 
 {% if totals.nominal > 0 %}
-<div class="warn">
-  <div class="warn-title">${{ "%.4f"|format(totals.nominal) }} of the all-time total is nominal, not billed</div>
-  <p>That spend went through a gateway that does not report its own prices, so it was priced from
-  the model-name rate table &mdash; i.e. <em>what the provider would have charged</em>, not what the
-  gateway actually did. A gateway that re-routes to a different upstream, or prices differently,
-  is invisible to that table.</p>
-  <p>Treat these figures as a lower-confidence estimate. The destination is recorded on each
-  transaction (<span class="mono">routedVia</span>), so real rates are reconciled once the
-  gateway settles them.</p>
+{# Collapsible: .banner + unique id, head/body split so the shared toggle in
+   the script block can drive this and the savings note identically. #}
+<div class="warn banner" id="banner-nominal">
+  <div class="banner-head">
+    <button type="button" class="banner-toggle" aria-expanded="true"
+            aria-controls="banner-nominal-body" aria-label="Toggle nominal-spend details"
+            title="Collapse or expand">
+      <span class="banner-caret" aria-hidden="true">&#9662;</span>
+    </button>
+    <div class="warn-title">${{"%.4f"|format(totals.nominal)}} of the all-time total is nominal, not billed</div>
+  </div>
+  <div class="banner-body" id="banner-nominal-body">
+    <p>That spend went through a gateway that does not report its own prices, so it was priced from
+    the model-name rate table &mdash; i.e. <em>what the provider would have charged</em>, not what the
+    gateway actually did. A gateway that re-routes to a different upstream, or prices differently,
+    is invisible to that table.</p>
+    <p>Treat these figures as a lower-confidence estimate. The destination is recorded on each
+    transaction (<span class="mono">routedVia</span>), so real rates are reconciled once the
+    gateway settles them.</p>
+  </div>
 </div>
 {% endif %}
-
 {% if account.configured and account.creditBalance < CREDIT_LOW_USD %}
 {# Credit is the one figure here that can stop the instance working — it runs out
    mid-conversation and the marketplace answers 402. While it is healthy it says
@@ -583,11 +624,19 @@ a:hover { text-decoration: underline; }
 {% endif %}
 
 {% if savings.requests > 0 %}
-<div class="note">
-  {# Six decimals: the whole point of this panel is the gap between two numbers
-     that four decimals would round to the same thing. #}
-  <div class="note-title">${{ "%.6f"|format(savings.actual) }} settled against ${{ "%.6f"|format(savings.direct) }} at the marketplace's list reference &mdash; ${{ "%.6f"|format(savings.saved) }} saved ({{ "%.1f"|format(savings.pct) }}%)</div>
-  <p>Measured on {{ "{:,}".format(savings.requests) }} reconciled transactions, using the gateway's
+<div class="note banner" id="banner-savings">
+  <div class="banner-head">
+    <button type="button" class="banner-toggle" aria-expanded="true"
+            aria-controls="banner-savings-body" aria-label="Toggle savings details"
+            title="Collapse or expand">
+      <span class="banner-caret" aria-hidden="true">&#9662;</span>
+    </button>
+    {# Six decimals: the whole point of this panel is the gap between two numbers
+       that four decimals would round to the same thing. #}
+    <div class="note-title">${{"%.6f"|format(savings.actual)}} settled against ${{"%.6f"|format(savings.direct)}} at the marketplace's list reference &mdash; ${{"%.6f"|format(savings.saved)}} saved ({{"%.1f"|format(savings.pct)}}%)</div>
+  </div>
+  <div class="banner-body" id="banner-savings-body">
+  <p>Measured on {{"{:,}".format(savings.requests)}} reconciled transactions, using the gateway's
   own billing records rather than any rate table. This is the number to judge the marketplace on:
   the catalog discount describes the cheapest listed offer, this describes what was really paid.</p>
   {# The denominator is the marketplace's `direct_cost_usd`, and it is the marketplace's
@@ -601,7 +650,7 @@ a:hover { text-decoration: underline; }
   <span class="mono">claude-opus-4.8</span> and <span class="mono">claude-fable-5</span>, which
   flatters the percentage above by roughly that share of their traffic.</p>
   {% if savings.ambiguous > 0 %}
-  <p>{{ "{:,}".format(savings.ambiguous) }} of them matched more than one billing record within the
+  <p>{{"{:,}".format(savings.ambiguous)}} of them matched more than one billing record within the
   time window and were settled against the nearest &mdash; identical requests, so the figures differ
   only by whatever seller prices moved in between.</p>
   {% endif %}
@@ -610,16 +659,16 @@ a:hover { text-decoration: underline; }
      every request the key ever made, LibreChat only its own, so these will not
      tally exactly — agreement to within a few percent is the signal that
      reconciliation is matching well, and a wide gap that it is not. #}
-  <p>The marketplace's own records say ${{ "%.6f"|format(account.spent) }} against
-  ${{ "%.6f"|format(account.directUSD) }} across {{ "{:,}".format(account.requests) }} requests
-  &mdash; <span class="saved">{{ "%.1f"|format(account.savingsPct) }}% saved</span>. That covers
+  <p>The marketplace's own records say ${{"%.6f"|format(account.spent)}} against
+  ${{"%.6f"|format(account.directUSD)}} across {{"{:,}".format(account.requests)}} requests
+  &mdash; <span class="saved">{{"%.1f"|format(account.savingsPct)}}% saved</span>. That covers
   every request this key has made, LibreChat's or not, so it is a cross-check rather than the
   same number twice.</p>
   {% endif %}
-  <p class="dim">Last reconciliation: {{ reconcile_status }}</p>
+  <p class="dim">Last reconciliation: {{reconcile_status}}</p>
+  </div>
 </div>
 {% endif %}
-
 {% if cache.messages > 0 %}
 <h2>Prompt caching</h2>
 <div class="subhead">Whether the cache is earning its keep. A write costs 1.25&times; the model's input
@@ -629,7 +678,12 @@ seller answers &mdash; a run of misses bills every prefix at 1.25&times; and sav
 error to show for it. <strong>Saved</strong> is that judgement in dollars: it compares what these
 requests cost against what the identical tokens would have cost with caching off. If it goes
 negative for a destination, caching is losing money there.</div>
-<table>
+<div class="table-tools">
+  <input type="search" class="table-filter" data-table-target="table-cache" autocomplete="off"
+         placeholder="Filter destinations&hellip;" aria-label="Filter prompt caching rows">
+  <span class="filter-count" data-count-for="table-cache" aria-live="polite"></span>
+</div>
+<table id="table-cache" data-sortable>
 <thead><tr>
   <th class="left">Destination</th>
   <th class="left">Models</th>
@@ -687,7 +741,12 @@ an hour on click.</div>
 
 <h2>By routing</h2>
 <div class="subhead">Where requests actually went. <span class="mono">Direct to provider</span> rows are priced against rates we control; gateway rows are either settled from the gateway's billing records or still nominal.</div>
-<table>
+<div class="table-tools">
+  <input type="search" class="table-filter" data-table-target="table-routing" autocomplete="off"
+         placeholder="Filter destinations&hellip;" aria-label="Filter routing rows">
+  <span class="filter-count" data-count-for="table-routing" aria-live="polite"></span>
+</div>
+<table id="table-routing" data-sortable>
 <thead><tr>
   <th class="left">Destination</th>
   <th class="left">Base URL</th>
@@ -719,7 +778,12 @@ an hour on click.</div>
 </table>
 
 <h2>By model</h2>
-<table>
+<div class="table-tools">
+  <input type="search" class="table-filter" data-table-target="table-model" autocomplete="off"
+         placeholder="Filter models&hellip;" aria-label="Filter model rows">
+  <span class="filter-count" data-count-for="table-model" aria-live="polite"></span>
+</div>
+<table id="table-model" data-sortable>
 <thead><tr>
   <th class="left">Model</th>
   <th>Messages</th>
@@ -746,7 +810,12 @@ an hour on click.</div>
 
 <h2>By conversation</h2>
 <div class="subhead">Sorted by total cost. Endpoint and model shown reflect the conversation's last-used pairing.</div>
-<table>
+<div class="table-tools">
+  <input type="search" class="table-filter" data-table-target="table-conv" autocomplete="off"
+         placeholder="Filter conversations&hellip;" aria-label="Filter conversation rows">
+  <span class="filter-count" data-count-for="table-conv" aria-live="polite"></span>
+</div>
+<table id="table-conv" data-sortable>
 <thead><tr>
   <th class="left">Title</th>
   <th class="left">Endpoint</th>
@@ -776,6 +845,185 @@ an hour on click.</div>
 </table>
 
 <footer>Rendered {{ now }} · {{ tx_count }} transactions across {{ by_conv|length }} conversations</footer>
+
+<script>
+(function () {
+  "use strict";
+
+  /* ── Collapsible banners ────────────────────────────────────────────────
+     One mechanism for .warn and .note alike: each carries a unique id and a
+     head/body split, and visibility is driven purely by the banner's
+     data-collapsed attribute. Collapse state is remembered per banner id. */
+
+  function setCollapsed(banner, toggle, collapsed) {
+    if (collapsed) banner.setAttribute("data-collapsed", "");
+    else banner.removeAttribute("data-collapsed");
+    toggle.setAttribute("aria-expanded", collapsed ? "false" : "true");
+  }
+
+  function initBanner(banner) {
+    var toggle = banner.querySelector(".banner-toggle");
+    if (!toggle || banner.dataset.collapsible) return;
+    banner.dataset.collapsible = "1";
+    var key = "costdash:banner:" + banner.id;
+    try {
+      if (localStorage.getItem(key) === "1") setCollapsed(banner, toggle, true);
+    } catch (e) { /* storage unavailable: state just won't persist */ }
+    toggle.addEventListener("click", function () {
+      var collapsed = !banner.hasAttribute("data-collapsed");
+      setCollapsed(banner, toggle, collapsed);
+      try { localStorage.setItem(key, collapsed ? "1" : "0"); } catch (e) {}
+    });
+  }
+
+  /* ── Column sorting ─────────────────────────────────────────────────────
+     Type-sensitive per cell: datetime (YYYY-MM-DD HH:MM…), number (strips
+     $ , % and spaces; U+2212 is a real minus; a "(12%)" tail is ignored —
+     only the leading figure counts) or text. Cells are classified
+     individually, so a mixed column groups by type and "—" placeholders
+     never interleave with the numbers. Only the body is reordered, so tfoot
+     totals stay put and hidden (filtered) rows stay hidden. */
+
+  function parseNumber(text) {
+    if (!text || text === "\u2014" || text === "\u2013") return NaN;
+    var m = text.replace(/\u2212/g, "-")
+                .replace(/[$,%\u00a0\u2009\s,]/g, "")
+                .match(/^-?\d*\.?\d+(?:e[+-]?\d+)?/i);
+    return m ? parseFloat(m[0]) : NaN;
+  }
+
+  function parseDate(text) {
+    var m = text.match(/^\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}/);
+    if (!m) return NaN;
+    return new Date(m[0].replace(" ", "T") + ":00Z").getTime();
+  }
+
+  function cellKey(cell) {
+    var text = (cell.textContent || "").trim();
+    var d = parseDate(text);
+    if (!isNaN(d)) return { t: "d", v: d };
+    var n = parseNumber(text);
+    if (!isNaN(n)) return { t: "n", v: n };
+    return { t: "s", v: text.toLowerCase() };
+  }
+
+  var TYPE_RANK = { n: 0, d: 1, s: 2 };
+
+  function compareKeys(a, b, dir) {
+    if (a.t !== b.t) return (TYPE_RANK[a.t] - TYPE_RANK[b.t]) * dir;
+    if (a.v < b.v) return -dir;
+    if (a.v > b.v) return dir;
+    return 0;
+  }
+
+  function sortTable(table, colIndex, dir) {
+    var body = table.tBodies[0];
+    var keyed = Array.prototype.map.call(body.rows, function (row) {
+      var cell = row.cells[colIndex];
+      return { row: row, key: cell ? cellKey(cell) : { t: "s", v: "" } };
+    });
+    keyed.sort(function (a, b) { return compareKeys(a.key, b.key, dir); });
+    keyed.forEach(function (k) { body.appendChild(k.row); });
+  }
+
+  function initTable(table) {
+    var head = table.tHead, body = table.tBodies[0];
+    if (!head || !body || !head.rows.length || table.dataset.sortableInit) return;
+    table.dataset.sortableInit = "1";
+    var ths = Array.prototype.slice.call(head.rows[0].cells);
+
+    ths.forEach(function (th, i) {
+      th.classList.add("sortable");
+      th.setAttribute("data-col", String(i));
+      th.setAttribute("aria-sort", "none");
+      th.setAttribute("title", "Click to sort");
+      var hint = document.createElement("span");
+      hint.className = "sort-hint";
+      hint.setAttribute("aria-hidden", "true");
+      hint.textContent = "\u2195";
+      var label = document.createElement("span");
+      label.className = "th-label";
+      while (th.firstChild) label.appendChild(th.firstChild);
+      th.appendChild(label);
+      th.appendChild(hint);
+    });
+
+    function setHints(activeCol, dir) {
+      ths.forEach(function (th, i) {
+        var active = i === activeCol;
+        th.classList.toggle("sorted", active);
+        th.setAttribute("aria-sort",
+          active ? (dir === 1 ? "ascending" : "descending") : "none");
+        th.querySelector(".sort-hint").textContent =
+          active ? (dir === 1 ? "\u25b2" : "\u25bc") : "\u2195";
+      });
+    }
+
+    head.addEventListener("click", function (ev) {
+      var th = ev.target.closest ? ev.target.closest("th") : null;
+      if (!th || ths.indexOf(th) === -1) return;
+      var col = parseInt(th.getAttribute("data-col"), 10);
+      var dir;
+      var lastCol = table.dataset.sortCol === undefined
+        ? -2 : parseInt(table.dataset.sortCol, 10);
+      if (lastCol !== col) {
+        table.dataset.sortCol = String(col);
+        /* Numbers and dates read best biggest/newest first; text reads best
+           A-first — so the first click on a new column picks by its type. */
+        var sample = body.rows[0] ? cellKey(body.rows[0].cells[col]) : { t: "s" };
+        dir = sample.t === "s" ? 1 : -1;
+      } else {
+        dir = -parseInt(table.dataset.sortDir || "1", 10);
+      }
+      table.dataset.sortDir = String(dir);
+      sortTable(table, col, dir);
+      setHints(col, dir);
+    });
+  }
+
+  /* ── Row filtering ──────────────────────────────────────────────────────
+     Space-separated terms, all of which must appear somewhere in the row
+     (AND), so "surplus opus" narrows like a search box rather than needing
+     regex. The count node reports visible-of-total while a query is active. */
+
+  function applyFilter(table, query, count) {
+    var terms = query.trim().toLowerCase().split(/\s+/).filter(Boolean);
+    var shown = 0;
+    Array.prototype.forEach.call(table.tBodies[0].rows, function (row) {
+      var hay = row.textContent.toLowerCase();
+      var hit = terms.every(function (t) { return hay.indexOf(t) !== -1; });
+      row.hidden = terms.length > 0 && !hit;
+      if (!row.hidden) shown++;
+    });
+    if (count) {
+      count.textContent = terms.length
+        ? shown + " of " + table.tBodies[0].rows.length + " rows"
+        : "";
+    }
+  }
+
+  function initFilters() {
+    Array.prototype.forEach.call(
+      document.querySelectorAll(".table-filter"),
+      function (input) {
+        var table = document.getElementById(input.getAttribute("data-table-target"));
+        if (!table || input.dataset.filterInit) return;
+        input.dataset.filterInit = "1";
+        var count = document.querySelector(
+          '[data-count-for="' + input.getAttribute("data-table-target") + '"]');
+        input.addEventListener("input", function () {
+          applyFilter(table, input.value, count);
+        });
+      }
+    );
+  }
+
+  Array.prototype.forEach.call(document.querySelectorAll(".banner"), initBanner);
+  Array.prototype.forEach.call(
+    document.querySelectorAll("table[data-sortable]"), initTable);
+  initFilters();
+})();
+</script>
 
 </body>
 </html>
