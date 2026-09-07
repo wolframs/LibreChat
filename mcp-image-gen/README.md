@@ -79,12 +79,9 @@ Values live in the stack's `.env`; the compose service passes them through.
     headers, no dependency), so "requested 16:9, delivered 3:2" is measured rather than
     assumed. Verified against `sips` on twelve real generations.
 13. **An image above `IMAGE_GEN_MAX_INLINE_BYTES` (default 10 MB) is described but not
-    attached.** This keeps a payload the api container is going to refuse anyway off the
-    SSE transport, and lets the summary say *why* in this server's own words rather than
-    LibreChat's. Since 2026-09-07 the api side drops just the oversized block and keeps the
-    text (`packages/api/src/mcp/parsers.ts`); before that its cap threw and took the whole
-    result with it, which is the fault this guard was originally written for. Keep the two
-    values in step regardless.
+    attached.** LibreChat throws out of `formatToolContent` above `MCP_IMAGE_DATA_MAX_BYTES`,
+    and that throw takes the whole result including the text — leaving the model blind for
+    the second time. Keep the two values in step.
 
 ## Route selection
 

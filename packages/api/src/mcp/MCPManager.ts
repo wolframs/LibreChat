@@ -47,34 +47,6 @@ function createOboToolCallErrorMessage(
 }
 
 /**
- * Records that a tool result carried images, and how many bytes of them.
- *
- * Nothing else in the pipeline says so. When a model reports that it cannot see
- * an image a tool just produced, the only questions are whether one was
- * produced, whether it survived the size cap, and whether it left here — and
- * answering them previously meant reconstructing the whole path from source. The
- * transport already logs at debug, image results are rare, and this is one line.
- */
-function logNonTextResult(
-  logPrefix: string,
-  toolName: string,
-  [text, artifacts]: t.FormattedContentResult,
-): void {
-  const images = artifacts?.content?.length ?? 0;
-  if (images === 0) {
-    return;
-  }
-
-  const bytes = (artifacts?.content ?? []).reduce(
-    (total, part) => total + (part.type === 'image_url' ? part.image_url.url.length : 0),
-    0,
-  );
-  logger.debug(
-    `${logPrefix}[${toolName}] Result carries ${images} image artifact(s), ~${bytes} encoded bytes, ${text.length} chars of text`,
-  );
-}
-
-/**
  * Centralized manager for MCP server connections and tool execution.
  * Extends UserConnectionManager to handle both app-level and user-specific connections.
  */
@@ -560,9 +532,7 @@ Please follow these instructions when using tools from the respective MCP server
         this.updateUserLastActivity(userId);
       }
       this.checkIdleConnections();
-      const formatted = formatToolContent(result as t.MCPToolCallResponse, provider);
-      logNonTextResult(logPrefix, toolName, formatted);
-      return formatted;
+      return formatToolContent(result as t.MCPToolCallResponse, provider);
     } catch (error) {
       // Log with context and re-throw or handle as needed
       logger.error(`${logPrefix}[${toolName}] Tool call failed`, error);
