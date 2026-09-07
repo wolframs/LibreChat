@@ -53,7 +53,27 @@ instance, disagree out loud when the diagnosis is off, and decide rather than as
 |---|---|
 | `request_fix(premise)` | Files it. Returns a job id immediately and starts working. |
 | `check_fix(job_id, include_diff?)` | Status, the agent's own report, commits, diffstat, deploy result, and the undo command. Full diff on request. |
+| `resume_fix(job_id)` | Continues a job that hit the turn limit, **in its original session**. |
+| `add_note(job_id, note)` | Corrects a premise after filing; reaches a still-running agent. |
 | `list_fixes(limit?)` | Recent jobs for this account. |
+
+### Resuming, and why it matters
+
+The turn limit ends a *run*, not a *session*. The transcript stays on disk under
+`~/.claude/projects/…` with every file the agent read and every conclusion it
+reached, and `--resume <session_id>` continues it headlessly with that context
+intact — verified: a fact stated before the cut-off is still recalled after.
+
+So a job that ran out of turns is worth a message, not a whole new run. Filing
+again would pay for the same investigation twice and arrive in the same place.
+`resume_fix` reuses the job document — same premise, same notes, same base
+commit — because it is the same piece of work, and two changelog entries would
+claim otherwise. The resume prompt is deliberately short: the agent already holds
+everything except the knowledge that it was interrupted rather than finished.
+
+It is also the moment a late correction lands. `add_note` writes outside the
+repo; the resume message tells the agent to read that file first, so a premise
+corrected after filing reaches the session that is about to act on it.
 
 ## What a job actually does
 

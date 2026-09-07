@@ -3,7 +3,7 @@ import { spawn } from 'child_process';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import { getDb } from './db.js';
-import { buildPrompt } from './prompt.js';
+import { buildPrompt, buildResumePrompt } from './prompt.js';
 import {
   REPO,
   BRANCH,
@@ -244,8 +244,12 @@ export async function preflight() {
 // makes sense in a deployment shape you have left is worse than no path.
 const SETTINGS = path.join(path.dirname(fileURLToPath(import.meta.url)), 'agent-settings.json');
 
-function claudeArgs(prompt) {
+function claudeArgs(prompt, resumeSessionId) {
   return [
+    // A cut-off session is still a session: resuming carries every file it read
+    // and every conclusion it reached, so an interrupted investigation is worth
+    // a message rather than a whole new run.
+    ...(resumeSessionId ? ['--resume', resumeSessionId] : []),
     '-p',
     prompt,
     // NDJSON rather than one JSON blob at the end, which is what makes a running
@@ -279,9 +283,9 @@ function claudeArgs(prompt) {
  * right now, the files touched so far, the agent's last words. The caller
  * throttles the writes; this just parses.
  */
-function runAgent(prompt, onProgress) {
+function runAgent(prompt, onProgress, resumeSessionId) {
   return new Promise((resolve) => {
-    const child = spawn('claude', claudeArgs(prompt), {
+    const child = spawn('claude', claudeArgs(prompt, resumeSessionId), {
       cwd: REPO,
       stdio: ['ignore', 'pipe', 'pipe'],
     });
@@ -363,6 +367,49 @@ function runAgent(prompt, onProgress) {
   });
 }
 
+/**
+ * Restart a job whose session ran out of turns, in that same session.
+ *
+ * The job document is reused rather than a new one created: it is the same
+ * premise, the same notes and the same base commit, and splitting it in two
+ * would make the changelog claim two pieces of work where there was one.
+ */
+export async function resumeJob(jobId) {
+  const job = await getJob(jobId);
+  if (!job) return { ok: false, reason: `No job \`${jobId}\`.` };
+  const sessionId = job.progress?.sessionId;
+  if (!sessionId) {
+    return {
+      ok: false,
+      reason:
+        'That job recorded no session id, so there is nothing to resume — it died before ' +
+        'the session started. File it again instead.',
+    };
+  }
+  if (['running', 'testing', 'deploying'].includes(job.status)) {
+    return { ok: false, reason: `Job \`${jobId}\` is still ${job.status}.` };
+  }
+  const pre = await preflight();
+  if (!pre.ok) return pre;
+
+  activeJob = jobId;
+  await setJob(jobId, { status: 'running', resumedAt: new Date(), resumeCount: (job.resumeCount ?? 0) + 1 });
+
+  execute(jobId, {
+    premise: job.premise,
+    userId: job.userId,
+    resumeSessionId: sessionId,
+    baseSha: job.baseSha,
+    previousTurns: job.progress?.turns ?? 0,
+  }).catch(async (err) => {
+    console.error(`resume ${jobId} crashed:`, err);
+    await setJob(jobId, { status: 'error', summary: `Resume crashed: ${err.message}` });
+    activeJob = null;
+  });
+
+  return { ok: true, sessionId };
+}
+
 export async function startJob({ premise, userId }) {
   const db = await getDb();
   const { insertedId } = await db.collection('mcp_code_agent_jobs').insertOne({
@@ -389,35 +436,47 @@ export async function startJob({ premise, userId }) {
   return jobId;
 }
 
-async function execute(jobId, { premise, userId }) {
-  const baseSha = await head();
+async function execute(jobId, { premise, userId, resumeSessionId, baseSha: existingBase, previousTurns }) {
+  // On a resume the ORIGINAL base is reused, so commits made before the cut-off
+  // are still counted as this job's work rather than treated as pre-existing.
+  const baseSha = existingBase ?? (await head());
   await setJob(jobId, { baseSha });
 
   const active = await activeConversation(userId);
   const sender = active?.sender ?? null;
   const conversation = await conversationContext(active?.conversationId);
   await setJob(jobId, { sender, conversationId: active?.conversationId ?? null });
-  const prompt = buildPrompt({
-    premise,
-    sender,
-    conversation,
-    notesPath: notesPathFor(jobId),
-    maxTurns: MAX_TURNS,
-  });
+  const prompt = resumeSessionId
+    ? buildResumePrompt({ notesPath: notesPathFor(jobId), maxTurns: MAX_TURNS, previousTurns })
+    : buildPrompt({
+        premise,
+        sender,
+        conversation,
+        notesPath: notesPathFor(jobId),
+        maxTurns: MAX_TURNS,
+      });
 
-  console.log(`[${jobId}] running ${MODEL} from ${baseSha.slice(0, 9)}`);
+  console.log(
+    `[${jobId}] ${resumeSessionId ? `resuming ${resumeSessionId}` : 'running'} from ${baseSha.slice(0, 9)}`,
+  );
   const started = Date.now();
   // No credential passed and none wanted: this runs as the operator, so the
   // `claude` on PATH is the one already installed and logged in on this Mac.
   let lastWrite = 0;
-  const { result, code, stderr, timedOut } = await runAgent(prompt, (progress) => {
+  const { result, code, stderr, timedOut } = await runAgent(
+    prompt,
+    (progress) => {
     // Throttled: the stream is chatty and every write is a round trip, but a
     // watcher refreshing every few seconds should still see movement.
-    const now = Date.now();
-    if (now - lastWrite < 2000) return;
-    lastWrite = now;
-    setJob(jobId, { progress: { ...progress, at: new Date() } }).catch(() => {});
-  });
+      const now = Date.now();
+      if (now - lastWrite < 2000) return;
+      lastWrite = now;
+      setJob(jobId, {
+        progress: { ...progress, sessionId: progress.sessionId ?? resumeSessionId, at: new Date() },
+      }).catch(() => {});
+    },
+    resumeSessionId,
+  );
   const elapsed = Math.round((Date.now() - started) / 1000);
 
   const report = result?.result || '';
