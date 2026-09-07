@@ -3,7 +3,7 @@ import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { SSEServerTransport } from '@modelcontextprotocol/sdk/server/sse.js';
 import { z } from 'zod';
 import { AsyncLocalStorage } from 'async_hooks';
-import { handleRequestFix, handleCheckFix, handleListFixes, handleAddNote } from './tools.js';
+import { handleRequestFix, handleCheckFix, handleListFixes, handleAddNote, handleResumeFix } from './tools.js';
 import { activeJobId, MODEL, agentAvailable } from './runner.js';
 import { REPO, BRANCH, currentBranch, porcelain, head } from './git.js';
 import { mountView } from './view.js';
@@ -58,6 +58,20 @@ function createMcpServer() {
         .describe('Return the full diff as well as the summary. Large — ask only if you need it.'),
     },
     (args) => handleCheckFix(args, mcpContext),
+  );
+
+  server.tool(
+    'resume_fix',
+    {
+      job_id: z
+        .string()
+        .describe(
+          'A job that stopped at the turn limit. Its Claude Code session is still on disk, ' +
+            'so this continues it with everything it had already read and concluded, instead ' +
+            'of re-running the same investigation from nothing.',
+        ),
+    },
+    (args) => handleResumeFix(args, mcpContext),
   );
 
   server.tool(

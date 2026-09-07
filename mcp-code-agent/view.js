@@ -50,6 +50,8 @@ function card(job) {
     ${job.commits?.length ? `<ul>${job.commits.map((c) => `<li><code>${esc(c.short)}</code> ${esc(c.subject)}</li>`).join('')}</ul>` : ''}
     ${job.deploy ? `<p class="deploy">deploy: ${esc(job.deploy)}</p>` : ''}
     ${job.revert ? `<p class="undo">undo: <code>${esc(job.revert)}</code></p>` : ''}
+    ${job.status === 'error' && job.progress?.sessionId ? `<p class="meta">session <code>${esc(job.progress.sessionId.slice(0, 8))}</code> is intact — resumable</p>` : ''}
+    ${job.resumeCount ? `<p class="meta">resumed ${job.resumeCount}×</p>` : ''}
     ${job.usageLine ? `<p class="meta">${job.elapsed ?? '?'}s · ${esc(job.usageLine)}</p>` : ''}
   </article>`;
 }

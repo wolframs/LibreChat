@@ -1,6 +1,6 @@
 import { ObjectId } from 'mongodb';
 import { getDb } from './db.js';
-import { preflight, startJob, getJob, listJobs, activeJobId, appendNote, MODEL } from './runner.js';
+import { preflight, startJob, getJob, listJobs, activeJobId, appendNote, resumeJob, MODEL } from './runner.js';
 import { git } from './git.js';
 import { NO_CHANGE_NOTE } from './prompt.js';
 import { describeTokens } from './tokens.js';
@@ -173,6 +173,15 @@ export async function handleCheckFix({ job_id, include_diff }, context) {
     }
     if (job.stoppedBecause && job.stoppedBecause !== 'success') {
       lines.push('', `_Stopped because: \`${job.stoppedBecause}\`._`);
+      if (job.progress?.sessionId && job.status === 'error') {
+        lines.push(
+          `Its session is intact, so \`resume_fix("${job_id}")\` picks it up where it stopped ` +
+            'rather than paying for the same investigation twice.',
+        );
+      }
+    }
+    if (job.resumeCount) {
+      lines.push('', `_Resumed ${job.resumeCount}×._`);
     }
 
     if (job.summary) {
@@ -249,6 +258,39 @@ export async function handleAddNote({ job_id, note }, context) {
   } catch (err) {
     console.error('add_note failed:', err);
     return fail(`Could not add that note: ${err.message}`);
+  }
+}
+
+/**
+ * Pick a cut-off job back up in its own session.
+ *
+ * The turn limit ends a run without ending the session: the transcript is intact
+ * on disk with every file read and every conclusion reached. Filing again would
+ * pay for that investigation a second time and arrive in the same place.
+ */
+export async function handleResumeFix({ job_id }, context) {
+  try {
+    const job = await getJob(job_id);
+    if (!job) return fail(`No job \`${job_id}\`. Use list_fixes to find the right id.`);
+
+    const outcome = await resumeJob(job_id);
+    if (!outcome.ok) return fail(`Cannot resume that job.\n\n${outcome.reason}`);
+
+    return text(
+      [
+        `Resuming job \`${job_id}\` in its original session.`,
+        '',
+        'It keeps everything it had already read and worked out, so it is picking up',
+        'rather than starting over. Notes added since it was cut off are the first thing',
+        'it is told to re-read.',
+        '',
+        '**The deploy will restart the api and drop this conversation again.** Hard-refresh,',
+        `then \`check_fix("${job_id}")\`.`,
+      ].join('\n'),
+    );
+  } catch (err) {
+    console.error('resume_fix failed:', err);
+    return fail(`Could not resume: ${err.message}`);
   }
 }
 
