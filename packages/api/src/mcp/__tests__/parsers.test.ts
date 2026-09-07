@@ -342,7 +342,11 @@ describe('formatToolContent', () => {
       ]);
     });
 
-    it('should name an audio block for recognized providers, keeping other content', () => {
+    /**
+     * Anthropic and Bedrock have no audio content block, so this is the one case
+     * where the note is the honest answer rather than a refusal to try.
+     */
+    it('should name an audio block on a provider with no audio channel', () => {
       const result: t.MCPToolCallResponse = {
         content: [
           { type: 'text', text: 'Here is the recording.' },
@@ -356,6 +360,80 @@ describe('formatToolContent', () => {
       expect(content).toContain('Here is the recording.');
       expect(content).toContain('audio not delivered');
       expect(content).not.toContain('QUJDRA==');
+    });
+
+    /**
+     * These used to get the same note, on the claim that "a tool result has no
+     * audio channel on any provider". Both of these providers have one, and this
+     * repo already sends exactly these shapes for a *user's* audio upload
+     * (`files/encode/audio.ts`) — a tool result reaches the model through the
+     * following user message, which is where those parts are legal.
+     */
+    it('should deliver audio as input_audio on OpenAI-shaped providers', () => {
+      const result: t.MCPToolCallResponse = {
+        content: [
+          { type: 'text', text: 'Here is the recording.' },
+          { type: 'audio', data: 'QUJDRA==', mimeType: 'audio/mpeg' },
+        ],
+      };
+
+      const [content, artifacts] = formatToolContent(result, 'openai');
+
+      expect(content).toContain('Here is the recording.');
+      expect(content).not.toContain('audio not delivered');
+      expect(artifacts?.content).toEqual([
+        { type: 'input_audio', input_audio: { data: 'QUJDRA==', format: 'mp3' } },
+      ]);
+    });
+
+    it('should deliver audio as a media part on Google', () => {
+      const result: t.MCPToolCallResponse = {
+        content: [{ type: 'audio', data: 'QUJDRA==', mimeType: 'audio/wav' }],
+      };
+
+      const [, artifacts] = formatToolContent(result, 'google');
+
+      expect(artifacts?.content).toEqual([
+        { type: 'media', mimeType: 'audio/wav', data: 'QUJDRA==' },
+      ]);
+    });
+
+    /**
+     * No allowlist: an unrecognized subtype is passed through and the provider
+     * decides. A 400 naming the format beats this code silently deciding the
+     * model gets nothing.
+     */
+    it('should pass an unmapped audio subtype through as the format', () => {
+      const result: t.MCPToolCallResponse = {
+        content: [{ type: 'audio', data: 'QQ==', mimeType: 'audio/weird-new-codec' }],
+      };
+
+      const [, artifacts] = formatToolContent(result, 'openai');
+
+      expect(artifacts?.content).toEqual([
+        { type: 'input_audio', input_audio: { data: 'QQ==', format: 'weird-new-codec' } },
+      ]);
+    });
+
+    it('should keep file_ids aligned with images when audio is alongside', () => {
+      const result: t.MCPToolCallResponse = {
+        content: [
+          { type: 'audio', data: 'QQ==', mimeType: 'audio/wav' },
+          {
+            type: 'image',
+            data: 'QUJDRA==',
+            mimeType: 'image/png',
+            _meta: { 'librechat/file_id': 'img-1' },
+          },
+        ],
+      } as t.MCPToolCallResponse;
+
+      const [, artifacts] = formatToolContent(result, 'openai');
+
+      /** Images first, so index 0 of `content` is the one `file_ids[0]` names. */
+      expect(artifacts?.file_ids).toEqual(['img-1']);
+      expect((artifacts?.content as Array<{ type: string }>)[0].type).toBe('image_url');
+      expect((artifacts?.content as Array<{ type: string }>)[1].type).toBe('input_audio');
     });
 
     it('should elide oversized strings from unknown content types', () => {

@@ -111,6 +111,25 @@ export type FormattedContent =
       image_url: {
         url: string;
       };
+    }
+  /**
+   * Audio for an OpenAI-compatible destination, and for Google. Both shapes are
+   * the ones `files/encode/audio.ts` already sends for a user's audio upload —
+   * a tool result reaches the model through the same following user message, so
+   * the same parts are legal there. Anthropic and Bedrock have no audio block
+   * and get a text note instead; see `describeAudio` in `mcp/parsers.ts`.
+   */
+  | {
+      type: 'input_audio';
+      input_audio: {
+        data: string;
+        format: string;
+      };
+    }
+  | {
+      type: 'media';
+      mimeType: string;
+      data: string;
     };
 
 export type FileSearchSource = {

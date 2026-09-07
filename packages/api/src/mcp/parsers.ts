@@ -81,17 +81,71 @@ function oversizedImageNote(image: InlineImage): string | undefined {
 }
 
 /**
- * Audio has nowhere to go in a tool result: `FormattedContent` has no audio
- * member, and neither the Anthropic nor the OpenAI tool-result shape accepts one
- * — audio rides user turns only, and only on some providers. Before this, an
- * `audio` block fell through to `JSON.stringify` and put its entire base64
- * payload into the model's context: a two-megabyte recording is ~2.7 million
- * characters of text no model can decode, billed as input. Name it instead.
+ * MIME to the `format` field of an OpenAI-compatible `input_audio` part.
+ *
+ * Deliberately not an allowlist. An unknown subtype is passed through as-is and
+ * the provider rejects it if it cannot read it — a 400 naming the format is a
+ * better outcome than this table silently deciding the model gets nothing, which
+ * is what the previous version of this code did to every audio result.
+ */
+const AUDIO_MIME_TO_FORMAT: Record<string, string> = {
+  'audio/mpeg': 'mp3',
+  'audio/mpeg3': 'mp3',
+  'audio/mp3': 'mp3',
+  'audio/wave': 'wav',
+  'audio/x-wav': 'wav',
+  'audio/vorbis': 'ogg',
+  'audio/x-flac': 'flac',
+  'audio/x-m4a': 'm4a',
+  'audio/mp4': 'm4a',
+  'audio/x-aiff': 'aiff',
+};
+
+function audioFormatFromMime(mimeType: string): string {
+  const mime = mimeType.toLowerCase();
+  return AUDIO_MIME_TO_FORMAT[mime] ?? mime.replace(/^audio\//, '').replace(/;.*$/, '');
+}
+
+/**
+ * How this provider carries audio, if it does.
+ *
+ * The shapes are the ones `files/encode/audio.ts` already sends for an audio file
+ * the *user* uploads (fork-customizations.md §11), verified end to end. A tool
+ * result reaches the model through the same following-user-message that an upload
+ * does on every provider that merges artifacts that way, so the same block works.
+ */
+function audioPartFor(
+  provider: t.Provider,
+  item: t.AudioContent,
+): t.FormattedContent | undefined {
+  const resolved = PROVIDERS_BY_LOWERCASE.get(provider.toLowerCase()) ?? (provider as Providers);
+  if (isGoogleLike(resolved)) {
+    return { type: 'media', mimeType: item.mimeType, data: item.data };
+  }
+  if (isOpenAILike(resolved) && resolved !== Providers.DEEPSEEK) {
+    return {
+      type: 'input_audio',
+      input_audio: { data: item.data, format: audioFormatFromMime(item.mimeType) },
+    };
+  }
+  return undefined;
+}
+
+/**
+ * Said only where the provider genuinely has no audio content block — Anthropic
+ * and Bedrock. Names the size and type so the model can say what it was handed,
+ * rather than answering a question about a recording as though none was attached.
+ *
+ * This used to be said for *every* provider, on the claim that "a tool result has
+ * no audio channel on any provider". That was false: OpenAI-compatible endpoints
+ * take `input_audio` and Google takes a `media` part, and this repo already sends
+ * both for user uploads.
  */
 function describeAudio(item: t.AudioContent): string {
   return (
     `[audio not delivered: ${item.mimeType}, ~${estimateBase64Bytes(item.data)} bytes. ` +
-    'A tool result has no audio channel on any provider, so the model cannot hear it.]'
+    'This provider has no audio content block, so the model cannot hear it. Say so rather ' +
+    'than describing what it might contain.]'
   );
 }
 
@@ -323,6 +377,8 @@ export function formatToolContent(
   /** Index-aligned with `imageUrls`; a slot is undefined when the server named no id. */
   const imageFileIds: (string | undefined)[] = [];
   const uiResources: UIResource[] = [];
+  /** Non-image media (audio today) that this provider can actually carry. */
+  const mediaParts: t.FormattedContent[] = [];
   const artifactsReachTheModel = deliversImageArtifacts(provider);
   let currentTextBlock = '';
 
@@ -379,7 +435,12 @@ export function formatToolContent(
     },
 
     audio: (item) => {
-      appendText(describeAudio(item));
+      const part = artifactsReachTheModel ? audioPartFor(provider, item) : undefined;
+      if (part == null) {
+        appendText(describeAudio(item));
+        return;
+      }
+      mediaParts.push(part);
     },
 
     resource: (item) => {
@@ -461,8 +522,12 @@ UI Resource Markers Available:
   }
 
   let artifacts: t.Artifacts = undefined;
-  if (imageUrls.length > 0) {
-    artifacts = { content: imageUrls };
+  if (imageUrls.length > 0 || mediaParts.length > 0) {
+    /**
+     * Images first so `file_ids` stays index-aligned with them —
+     * `createToolEndCallback` walks the two together, and media parts have no id.
+     */
+    artifacts = { content: [...imageUrls, ...mediaParts] };
     // Only carried when at least one server actually named an id; an all-undefined
     // array would make `saveBase64Image` behave identically while looking meaningful.
     if (imageFileIds.some((id) => id !== undefined)) {

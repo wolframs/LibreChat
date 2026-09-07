@@ -1,11 +1,11 @@
-import { liftToolResultImages, liftToolResultImagesInRequest } from './toolResultImages';
+import { liftToolResultMedia, liftToolResultMediaInRequest } from './toolResultMedia';
 import { getLLMConfig } from './llm';
 
 /**
  * These assert the shape measured against Surplus Intelligence on 2026-09-07,
  * where an image nested inside a `tool_result` came back "NOIMAGE" and the same
  * image one position away, as a sibling of that block, was described correctly.
- * The header of `toolResultImages.ts` has the four-request table.
+ * The header of `toolResultMedia.ts` has the four-request table.
  */
 
 const IMAGE = {
@@ -31,13 +31,13 @@ function body(content: unknown[]) {
   };
 }
 
-describe('liftToolResultImages', () => {
+describe('liftToolResultMedia', () => {
   it('moves an image out of a tool result to sit beside it', () => {
     const request = body([
       toolResult('toolu_01', [{ type: 'text', text: 'Image generated.' }, IMAGE]),
     ]);
 
-    expect(liftToolResultImages(request)).toBe(1);
+    expect(liftToolResultMedia(request)).toBe(1);
 
     const content = request.messages[2].content as Array<Record<string, unknown>>;
     expect(content.map((b) => b.type)).toEqual(['tool_result', 'image']);
@@ -52,7 +52,7 @@ describe('liftToolResultImages', () => {
       toolResult('toolu_02', [{ type: 'text', text: 'second' }, second]),
     ]);
 
-    expect(liftToolResultImages(request)).toBe(2);
+    expect(liftToolResultMedia(request)).toBe(2);
 
     const content = request.messages[2].content as Array<Record<string, unknown>>;
     expect(content.map((b) => b.type)).toEqual(['tool_result', 'image', 'tool_result', 'image']);
@@ -64,23 +64,54 @@ describe('liftToolResultImages', () => {
   it('never leaves a tool result empty', () => {
     const request = body([toolResult('toolu_01', [IMAGE])]);
 
-    expect(liftToolResultImages(request)).toBe(1);
+    expect(liftToolResultMedia(request)).toBe(1);
 
     const content = request.messages[2].content as Array<Record<string, unknown>>;
-    expect(content[0].content).toEqual([{ type: 'text', text: 'Image attached below.' }]);
+    expect(content[0].content).toEqual([{ type: 'text', text: 'Attached below.' }]);
     expect(content[1]).toEqual(IMAGE);
   });
 
-  it('leaves non-image content where the model expects it', () => {
+  /**
+   * Text stays, everything else moves — the rule is not a media-type list, because
+   * the OpenAI tool message a gateway adapts to carries text and nothing else.
+   */
+  it('lifts every non-text block, not just images', () => {
     const doc = { type: 'document', source: { type: 'text', data: 'x' } };
+    const audio = { type: 'audio', source: { type: 'base64', media_type: 'audio/wav', data: 'QQ' } };
+    const video = { type: 'video', source: { type: 'base64', media_type: 'video/mp4', data: 'QQ' } };
     const request = body([
-      toolResult('toolu_01', [{ type: 'text', text: 'Image generated.' }, doc, IMAGE]),
+      toolResult('toolu_01', [{ type: 'text', text: 'done' }, doc, IMAGE, audio, video]),
     ]);
 
-    expect(liftToolResultImages(request)).toBe(1);
+    expect(liftToolResultMedia(request)).toBe(4);
 
     const content = request.messages[2].content as Array<Record<string, unknown>>;
-    expect(content[0].content).toEqual([{ type: 'text', text: 'Image generated.' }, doc]);
+    expect(content[0].content).toEqual([{ type: 'text', text: 'done' }]);
+    expect(content.map((b) => b.type)).toEqual([
+      'tool_result',
+      'document',
+      'image',
+      'audio',
+      'video',
+    ]);
+  });
+
+  it('keeps every text block inside the tool result', () => {
+    const request = body([
+      toolResult('toolu_01', [
+        { type: 'text', text: 'first' },
+        IMAGE,
+        { type: 'text', text: 'second' },
+      ]),
+    ]);
+
+    expect(liftToolResultMedia(request)).toBe(1);
+
+    const content = request.messages[2].content as Array<Record<string, unknown>>;
+    expect(content[0].content).toEqual([
+      { type: 'text', text: 'first' },
+      { type: 'text', text: 'second' },
+    ]);
     expect(content.map((b) => b.type)).toEqual(['tool_result', 'image']);
   });
 
@@ -88,29 +119,29 @@ describe('liftToolResultImages', () => {
     const request = body([toolResult('toolu_01', [{ type: 'text', text: 'no picture' }])]);
     const before = JSON.stringify(request);
 
-    expect(liftToolResultImages(request)).toBe(0);
+    expect(liftToolResultMedia(request)).toBe(0);
     expect(JSON.stringify(request)).toBe(before);
   });
 
   it('ignores an image that is already a sibling', () => {
     const request = body([toolResult('toolu_01', [{ type: 'text', text: 'ok' }]), IMAGE]);
 
-    expect(liftToolResultImages(request)).toBe(0);
+    expect(liftToolResultMedia(request)).toBe(0);
   });
 
   it('survives shapes it does not understand', () => {
-    expect(liftToolResultImages(undefined)).toBe(0);
-    expect(liftToolResultImages({ messages: 'not an array' })).toBe(0);
-    expect(liftToolResultImages({ messages: [null, 42, { role: 'user' }] })).toBe(0);
+    expect(liftToolResultMedia(undefined)).toBe(0);
+    expect(liftToolResultMedia({ messages: 'not an array' })).toBe(0);
+    expect(liftToolResultMedia({ messages: [null, 42, { role: 'user' }] })).toBe(0);
     expect(
-      liftToolResultImages({
+      liftToolResultMedia({
         messages: [{ role: 'user', content: [{ type: 'tool_result', content: 'a string' }] }],
       }),
     ).toBe(0);
   });
 });
 
-describe('liftToolResultImagesInRequest', () => {
+describe('liftToolResultMediaInRequest', () => {
   function capture() {
     const seen: { body?: string } = {};
     const next = jest.fn(async (_input: unknown, init?: unknown) => {
@@ -123,7 +154,7 @@ describe('liftToolResultImagesInRequest', () => {
   it('rewrites the outgoing body', async () => {
     const { seen, next } = capture();
     const onLift = jest.fn();
-    const wrapped = liftToolResultImagesInRequest(next, onLift);
+    const wrapped = liftToolResultMediaInRequest(next, onLift);
 
     const request = body([
       toolResult('toolu_01', [{ type: 'text', text: 'Image generated.' }, IMAGE]),
@@ -148,7 +179,7 @@ describe('liftToolResultImagesInRequest', () => {
    */
   it('passes an ordinary request straight through', async () => {
     const { next } = capture();
-    const wrapped = liftToolResultImagesInRequest(next);
+    const wrapped = liftToolResultMediaInRequest(next);
     const init = { method: 'POST', body: JSON.stringify({ messages: [{ role: 'user' }] }) };
 
     await wrapped('https://gateway.example/v1/messages', init);
@@ -158,7 +189,7 @@ describe('liftToolResultImagesInRequest', () => {
 
   it('passes through a body it cannot parse rather than failing the request', async () => {
     const { next } = capture();
-    const wrapped = liftToolResultImagesInRequest(next);
+    const wrapped = liftToolResultMediaInRequest(next);
     const init = { method: 'POST', body: '{"tool_result" "image" broken' };
 
     await expect(wrapped('https://gateway.example/v1/messages', init)).resolves.toBeDefined();
@@ -167,7 +198,7 @@ describe('liftToolResultImagesInRequest', () => {
 
   it('passes through a non-string body', async () => {
     const { next } = capture();
-    const wrapped = liftToolResultImagesInRequest(next);
+    const wrapped = liftToolResultMediaInRequest(next);
     const init = { method: 'POST', body: new Uint8Array([1, 2, 3]) };
 
     await wrapped('https://gateway.example/v1/messages', init);

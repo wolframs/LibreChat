@@ -1,5 +1,5 @@
 /**
- * Moves images out of `tool_result` blocks so a gateway cannot lose them.
+ * Moves non-text content out of `tool_result` blocks so a gateway cannot lose it.
  *
  * Anthropic lets an image sit inside a `tool_result`, and that is what
  * LibreChat sends: `StandardGraph` merges a tool's `artifact.content` into the
@@ -27,7 +27,12 @@
  * So the gateway carries images perfectly well; it loses them in exactly one
  * position. The ~70-token gap is the image, absent from the second request.
  *
- * This lifts each image out of its `tool_result` and re-inserts it immediately
+ * Images were simply the first case to be noticed. The OpenAI tool message a
+ * gateway adapts to holds text and nothing else, so audio and video nested in a
+ * tool result are lost by the same mechanism — hence text stays and everything
+ * else moves, rather than an allowlist of media types.
+ *
+ * This lifts each block out of its `tool_result` and re-inserts it immediately
  * after, as a sibling block in the same user turn — the third row above. That
  * shape was chosen over the fourth for being the smaller edit: no new message,
  * so role alternation, the tool_use/tool_result adjacency rule and the
@@ -58,9 +63,17 @@ function isBlockOfType(value: unknown, type: string): value is JsonObject {
 /**
  * Split a `tool_result`'s content into what stays and what is lifted out.
  *
- * Only `image` blocks move. Anything else a tool result may legitimately carry
- * — text, and the document/search-result blocks Anthropic has since added —
- * stays where the model expects to find it.
+ * **Text stays, everything else moves.** Stated that way round on purpose: the
+ * reason a nested block is lost is that the OpenAI tool message a gateway adapts
+ * to carries text and nothing else, so *anything* that is not text is at risk in
+ * that position, and an allowlist of media types would just be a list of the
+ * ones someone happened to think of. Images were the first to be noticed; audio
+ * and video reach the same place by the same route.
+ *
+ * Nothing here inspects a MIME type or decides what the destination supports.
+ * If a lifted block is one the endpoint does not accept, it answers with a 400
+ * naming it — which is a better failure than this function quietly deciding the
+ * model gets nothing, and is the failure the previous shape had.
  */
 function partitionToolResultContent(content: unknown[]): {
   kept: unknown[];
@@ -69,7 +82,7 @@ function partitionToolResultContent(content: unknown[]): {
   const kept: unknown[] = [];
   const lifted: unknown[] = [];
   for (const block of content) {
-    if (isBlockOfType(block, 'image')) {
+    if (isObject(block) && block.type !== 'text') {
       lifted.push(block);
     } else {
       kept.push(block);
@@ -79,11 +92,11 @@ function partitionToolResultContent(content: unknown[]): {
 }
 
 /**
- * Rewrite one message's content array, lifting images out of every tool result.
+ * Rewrite one message's content array, lifting media out of every tool result.
  *
- * Each image is re-inserted directly after the block it came from, so a turn
- * carrying several tool results keeps each image next to its own — the model
- * has no other way to tell which result a picture belongs to.
+ * Each block is re-inserted directly after the tool result it came from, so a
+ * turn carrying several tool results keeps each one's media next to it — the
+ * model has no other way to tell which result a picture belongs to.
  */
 function liftInMessageContent(content: unknown[]): { content: unknown[]; moved: number } {
   let moved = 0;
@@ -102,13 +115,13 @@ function liftInMessageContent(content: unknown[]): { content: unknown[]; moved: 
     }
 
     /**
-     * A `tool_result` whose only content was the image would be left empty, and
+     * A `tool_result` whose only content was the media would be left empty, and
      * an empty tool result is both invalid and a lie — the call succeeded. Say
-     * what happened instead; the image is one block further along.
+     * what happened instead; the content is one block further along.
      */
     next.push({
       ...block,
-      content: kept.length > 0 ? kept : [{ type: 'text', text: 'Image attached below.' }],
+      content: kept.length > 0 ? kept : [{ type: 'text', text: 'Attached below.' }],
     });
     next.push(...lifted);
     moved += lifted.length;
@@ -118,12 +131,13 @@ function liftInMessageContent(content: unknown[]): { content: unknown[]; moved: 
 }
 
 /**
- * Lift every `tool_result` image in an Anthropic request body, in place.
+ * Lift every `tool_result`'s non-text content in an Anthropic request body,
+ * in place.
  *
  * Returns how many moved, so a caller can log the interesting case and stay
  * silent on the overwhelmingly common one where nothing did.
  */
-export function liftToolResultImages(body: unknown): number {
+export function liftToolResultMedia(body: unknown): number {
   if (!isObject(body) || !Array.isArray(body.messages)) {
     return 0;
   }
@@ -146,16 +160,16 @@ export function liftToolResultImages(body: unknown): number {
 /**
  * Cheap reject for the ordinary request.
  *
- * A body carrying a tool-result image is a few megabytes of base64, and parsing
- * every request to discover it has none would be paid on every turn of every
- * conversation. Both substrings must be present before it is worth looking.
+ * A body carrying tool-result media is often megabytes of base64, and parsing
+ * every request only to find it has none would be paid on every turn of every
+ * conversation. No tool result, nothing to do.
  */
-function mightCarryToolResultImage(body: string): boolean {
-  return body.includes('"tool_result"') && body.includes('"image"');
+function mightCarryNestedMedia(body: string): boolean {
+  return body.includes('"tool_result"');
 }
 
 /**
- * Wrap a `fetch` so outgoing Anthropic requests get their tool-result images
+ * Wrap a `fetch` so outgoing Anthropic requests get their tool-result media
  * lifted out.
  *
  * Composes with the other wrapper on this path (`observeAnthropicStreamUsage`)
@@ -164,14 +178,14 @@ function mightCarryToolResultImage(body: string): boolean {
  * `messages` — is passed through untouched: this is a delivery improvement, and
  * failing to make it must never cost the request itself.
  */
-export function liftToolResultImagesInRequest(
+export function liftToolResultMediaInRequest(
   next?: FetchLike,
   onLift?: (moved: number) => void,
 ): FetchLike {
   const base: FetchLike = next ?? ((input, init) => fetch(input as string, init as RequestInit));
 
   return async function liftingFetch(input: unknown, init?: unknown): Promise<Response> {
-    if (!isObject(init) || typeof init.body !== 'string' || !mightCarryToolResultImage(init.body)) {
+    if (!isObject(init) || typeof init.body !== 'string' || !mightCarryNestedMedia(init.body)) {
       return base(input, init);
     }
 
@@ -182,7 +196,7 @@ export function liftToolResultImagesInRequest(
       return base(input, init);
     }
 
-    const moved = liftToolResultImages(parsed);
+    const moved = liftToolResultMedia(parsed);
     if (moved === 0) {
       return base(input, init);
     }

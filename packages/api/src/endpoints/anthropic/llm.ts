@@ -25,7 +25,7 @@ import {
   configureReasoning,
   getClaudeHeaders,
 } from './helpers';
-import { liftToolResultImagesInRequest } from './toolResultImages';
+import { liftToolResultMediaInRequest } from './toolResultMedia';
 import {
   createAnthropicVertexClient,
   isAnthropicVertexCredentials,
@@ -458,13 +458,13 @@ function getLLMConfig(
    * Intelligence — same image, same prompt, "NOIMAGE" from inside a tool result
    * and the right answer from a sibling block one position away. So off
    * Anthropic's own API the images are lifted out to sit beside the tool result
-   * instead of within it. See {@link liftToolResultImages}.
+   * instead of within it. See {@link liftToolResultMedia}.
    */
   if (!isNativeAnthropicURL(options.reverseProxyUrl) && !shouldDropClientOptions) {
     if (!requestOptions.clientOptions) {
       requestOptions.clientOptions = {};
     }
-    requestOptions.clientOptions.fetch = liftToolResultImagesInRequest(
+    requestOptions.clientOptions.fetch = liftToolResultMediaInRequest(
       requestOptions.clientOptions.fetch as never,
       (moved) =>
         logger.debug(
