@@ -98,11 +98,13 @@ app.get('/sse', async (req, res) => {
 });
 
 app.post('/messages', async (req, res) => {
-  const store = {
-    userId: req.headers['x-user-id'],
-    conversationId: req.headers['x-conversation-id'],
-    sender: req.headers['x-endpoint'] || req.headers['x-model'],
-  };
+  // Only the user id. A `{{LIBRECHAT_BODY_CONVERSATIONID}}` header would be the
+  // obvious way to know which chat this came from, and it makes the server
+  // impossible to switch on: a BODY placeholder makes the connection require a
+  // chat request body, and enabling a server from the MCP dropdown is a
+  // reinitialize with no body — a hard -32600 and a "failed to initialize MCP
+  // server" popup. The conversation is found from the user instead (runner.js).
+  const store = { userId: req.headers['x-user-id'] };
   mcpContext.run(store, async () => {
     const transport = transports.get(req.query.sessionId);
     if (transport) await transport.handlePostMessage(req, res);

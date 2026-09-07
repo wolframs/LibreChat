@@ -49,10 +49,12 @@ instance, disagree out loud when the diagnosis is off, and decide rather than as
    `git status --porcelain` so the model can tell its user *what* is in the way.
    A dirty tree matters because the agent's commit would otherwise sweep up
    somebody's unrelated work and ship it without anyone deciding to.
-2. **Context.** Pulls the last dozen messages of the calling conversation out of
-   Mongo and hands them to the agent as raw evidence. The sender never has to
-   curate a bug report; the transcript showing the empty tool result is simply
-   there.
+2. **Context.** Finds the caller's most recently touched conversation, pulls its
+   last dozen messages out of Mongo, and hands them to the agent as raw evidence.
+   The sender never has to curate a bug report; the transcript showing the empty
+   tool result is simply there. Skipped if that conversation has not moved in
+   `CODE_AGENT_CONTEXT_MAX_AGE_MIN` (30) — a stale transcript presented as
+   evidence is worse than none, and the premise alone is a valid input anyway.
 3. **The session.** `claude -p` with the briefing from `prompt.js`, deny rules
    from `agent-settings.json`, in the real working tree.
 4. **Tests.** The wrapper runs `./scripts/agent-test.sh` itself over the touched
@@ -67,6 +69,23 @@ instance, disagree out loud when the diagnosis is off, and decide rather than as
    to be undone. So it undoes itself and redeploys.
 7. **Changelog.** `CHANGELOG-agent.md`, prepended and committed separately, so
    reverting a change does not also revert the record that it happened.
+
+## Why there is no conversation header
+
+`{{LIBRECHAT_BODY_CONVERSATIONID}}` is the only placeholder that would name the
+calling chat, and it cannot be used here. A `LIBRECHAT_BODY_*` placeholder makes
+the connection **require** a chat request body carrying that field
+(`UserConnectionManager.getUserConnection` → `getMissingRuntimeBodyPlaceholderFields`),
+and switching a server on from the MCP dropdown is a *reinitialize with no body*.
+So it fails with `MCP error -32600: Request body field(s) required to resolve
+runtime MCP placeholders: conversationId` and the UI shows **"failed to
+initialize MCP server"** — the server cannot be enabled in the one place it is
+meant to be enabled.
+
+The conversation is therefore found from the user id: their most recently updated
+conversation, and only if it moved in the last 30 minutes. That is a heuristic,
+deliberately bounded rather than trusted, and the job runs on the premise alone
+when the window lapses.
 
 ## The two unusual mounts
 
@@ -136,10 +155,7 @@ mcpServers:
     url: "http://mcp-code-agent:3015/sse"
     headers:
       x-user-id: "{{LIBRECHAT_USER_ID}}"
-      # The ONLY conversation placeholder LibreChat substitutes. An invented one
-      # (LIBRECHAT_CONVERSATION_ID, say) is passed through as the literal string
-      # and the context-gathering silently reads nothing.
-      x-conversation-id: "{{LIBRECHAT_BODY_CONVERSATIONID}}"
+      # No conversation header — see "Why there is no conversation header" below.
     chatMenu: true
     timeout: 60000
     requiresOAuth: false

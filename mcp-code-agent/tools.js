@@ -31,8 +31,7 @@ export async function handleRequestFix({ premise }, context) {
       return fail('Say what you noticed — a sentence is enough.');
     }
 
-    const store = context.getStore();
-    const { userId, conversationId, sender } = store || {};
+    const { userId } = context.getStore() || {};
 
     const limit = await checkLimit(userId);
     if (!limit.allowed) return fail(limit.reason);
@@ -40,7 +39,7 @@ export async function handleRequestFix({ premise }, context) {
     const pre = await preflight();
     if (!pre.ok) return fail(`Cannot start a fix right now.\n\n${pre.reason}`);
 
-    const jobId = await startJob({ premise: premise.trim(), userId, conversationId, sender });
+    const jobId = await startJob({ premise: premise.trim(), userId });
 
     return text(
       [

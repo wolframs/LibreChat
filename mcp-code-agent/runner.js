@@ -66,26 +66,47 @@ export async function listJobs(userId, limit) {
 }
 
 /**
- * Which endpoint and model filed this.
+ * Which conversation filed this, found from the user rather than passed in.
  *
- * Read from the conversation rather than passed as a header, because LibreChat
- * only substitutes a fixed set of placeholders into MCP headers —
- * `LIBRECHAT_USER_*`, `LIBRECHAT_OPENID_*`, `LIBRECHAT_GRAPH_*` and
- * `LIBRECHAT_BODY_{CONVERSATIONID,PARENTMESSAGEID,MESSAGEID}` (see
- * `packages/api/src/mcp/utils.ts`). An invented placeholder is not an error: it
- * is passed through as the literal `{{...}}` string and everything downstream
- * quietly reads nothing.
+ * The obvious way to know is a `{{LIBRECHAT_BODY_CONVERSATIONID}}` header, and it
+ * cannot be used: a BODY placeholder makes the connection *require* a chat
+ * request body carrying that field (UserConnectionManager.getUserConnection ->
+ * getMissingRuntimeBodyPlaceholderFields), and enabling a server from the chat
+ * MCP dropdown is a reinitialize with no body at all. The result is a hard
+ * `MCP error -32600` and a "failed to initialize MCP server" popup, so the server
+ * can never be switched on in the one place it is meant to be switched on.
+ *
+ * So: the caller's most recently touched conversation. That is a heuristic, and
+ * it is bounded rather than trusted — a conversation that has not moved in
+ * MAX_CONTEXT_AGE_MIN is not plausibly the one being typed in, and handing the
+ * agent a stale transcript as evidence is worse than handing it none. When the
+ * window lapses the job simply runs on the premise alone, which is the input the
+ * whole design is built to accept anyway.
  */
-async function conversationMeta(conversationId) {
-  if (!conversationId) return null;
+const MAX_CONTEXT_AGE_MIN = parseInt(process.env.CODE_AGENT_CONTEXT_MAX_AGE_MIN ?? '30', 10);
+
+async function activeConversation(userId) {
+  if (!userId) return null;
   try {
     const db = await getDb();
     const c = await db
       .collection('conversations')
-      .findOne({ conversationId }, { projection: { endpoint: 1, model: 1, title: 1 } });
+      .findOne(
+        { user: userId },
+        { sort: { updatedAt: -1 }, projection: { conversationId: 1, endpoint: 1, model: 1, updatedAt: 1 } },
+      );
     if (!c) return null;
-    return [c.endpoint, c.model].filter(Boolean).join(' / ') || null;
-  } catch {
+    const ageMin = (Date.now() - new Date(c.updatedAt).getTime()) / 60000;
+    if (ageMin > MAX_CONTEXT_AGE_MIN) {
+      console.log(`newest conversation is ${Math.round(ageMin)}m old — running without context`);
+      return null;
+    }
+    return {
+      conversationId: c.conversationId,
+      sender: [c.endpoint, c.model].filter(Boolean).join(' / ') || null,
+    };
+  } catch (err) {
+    console.error('conversation lookup failed:', err.message);
     return null;
   }
 }
@@ -168,13 +189,11 @@ function claudeArgs(prompt) {
   ];
 }
 
-export async function startJob({ premise, userId, conversationId, sender }) {
+export async function startJob({ premise, userId }) {
   const db = await getDb();
   const { insertedId } = await db.collection('mcp_code_agent_jobs').insertOne({
     premise,
     userId,
-    conversationId,
-    sender,
     model: MODEL,
     status: 'running',
     createdAt: new Date(),
@@ -187,7 +206,7 @@ export async function startJob({ premise, userId, conversationId, sender }) {
   // connection the caller is holding, so the tool has to have returned long
   // before we get there. This container is not recreated by deploy.sh, so the
   // job outlives the api restart and is still here to be collected afterwards.
-  execute(jobId, { premise, conversationId }).catch(async (err) => {
+  execute(jobId, { premise, userId }).catch(async (err) => {
     console.error(`job ${jobId} crashed:`, err);
     await setJob(jobId, { status: 'error', summary: `Job crashed: ${err.message}` });
     activeJob = null;
@@ -196,15 +215,14 @@ export async function startJob({ premise, userId, conversationId, sender }) {
   return jobId;
 }
 
-async function execute(jobId, { premise, conversationId }) {
+async function execute(jobId, { premise, userId }) {
   const baseSha = await head();
   await setJob(jobId, { baseSha });
 
-  const [sender, conversation] = await Promise.all([
-    conversationMeta(conversationId),
-    conversationContext(conversationId),
-  ]);
-  await setJob(jobId, { sender });
+  const active = await activeConversation(userId);
+  const sender = active?.sender ?? null;
+  const conversation = await conversationContext(active?.conversationId);
+  await setJob(jobId, { sender, conversationId: active?.conversationId ?? null });
   const prompt = buildPrompt({ premise, sender, conversation });
 
   console.log(`[${jobId}] running ${MODEL} from ${baseSha.slice(0, 9)}`);
