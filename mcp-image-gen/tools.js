@@ -293,14 +293,9 @@ function buildResultSummary({
     );
   } else {
     lines.push(
-      'Image generated successfully and displayed in the chat — the user can see it. It was ' +
-        'also attached to this tool result, and LibreChat does put it in the request it sends; ' +
-        'some gateways then strip images out of tool results in transit, so you may or may not ' +
-        'be able to see it yourself. If you cannot, that is a property of the endpoint this ' +
-        'conversation is running on rather than a fault in the stack — say so plainly, ' +
-        'describe what you asked for rather than what you got, and do not invent detail. ' +
-        'Either way the generation succeeded. Do NOT call generate_image again to retry this; ' +
-        'every call is billed and counts against the daily limit.',
+      'Image generated. It is already displayed in the chat, so the user can see it — you ' +
+        'do not need to do anything to show it to them. Do not call generate_image again for ' +
+        'this one; every call is billed and counts against the daily limit.',
     );
   }
 

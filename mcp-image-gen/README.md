@@ -64,8 +64,15 @@ Values live in the stack's `.env`; the compose service passes them through.
    for a retry. The text block states success, the file_id, the model, the format, the
    measured dimensions, the size, the delivered aspect ratio and the cost. Full reasoning in
    `~/LibreChatDocs/image-generation.md` → *Result shape*.
-    The one thing it does **not** claim is that the model can see the image. See the trap
-    below.
+    It explains **what happens to the picture** — that it is already in the chat and the model
+    need do nothing to show it — and says **nothing about whether the model can see it**. Both
+    halves are deliberate, and both were learned by getting them wrong. The mechanism has to be
+    stated because a model reading this in a bare chat, with none of these docs, has no way to
+    know LibreChat renders the artifact for the user; without that line it may try to "deliver"
+    an image the user is already looking at. The perception half has to be absent because every
+    version that included it made things worse: asserting the model could see it was false on a
+    gateway; hedging got read as "the stack is broken" and escalated; asking the model to report
+    what it could and could not see turned a chat into a QA session. See the trap.
 10. **The server chooses the `file_id`** and stamps it on the image block's
     `_meta['librechat/file_id']`. `saveBase64Image` does `file_id = _file_id ?? v4()` and
     reports neither, so upstream's server can never name its own output; a model wanting to
@@ -90,7 +97,10 @@ Values live in the stack's `.env`; the compose service passes them through.
 
 ## The trap: attaching an image is not delivering one
 
-**A gateway can remove the image between here and the model, and nothing reports it.**
+**A gateway will remove an image nested inside a `tool_result`, and nothing reports it.**
+Fixed on 2026-09-07 by moving the image out of that position — see *The fix* at the end of
+this section — but the shape of the fault is worth keeping, because it took three
+investigations to pin and the next media type will fail the same way.
 
 Measured 2026-09-07 on `Surplus (Claude)` / `claude-fable-5`. The tool returned a
 1600×1600 webp; `formatToolContent` built the artifact (the saved `files` row carries
@@ -113,21 +123,45 @@ its own), and an image *inside a tool result* is the newest and least portable p
 Anthropic shape — the OpenAI tool-message shape has no room for one at all, so any seller
 reached through an OpenAI-shaped adapter must drop it.
 
-Three consequences worth knowing:
+### The fix: position, not transport
 
-- The **OpenAI-compatible row is the more robust one for images**. On `provider: openai`
-  LibreChat sends tool-result images as a *separate user message*
-  (`formatArtifactPayload`), which is an ordinary vision input every gateway carries. Only
-  `provider: anthropic` puts them inside the `tool_result`. If an image has to reach the
-  model, prefer the plain `Surplus` row over `Surplus (Claude)`.
-- The result text must not assert that the model can see the image, because on this
-  gateway that is false and the model can tell. Item 9 above. It must also say where
-  LibreChat's responsibility *ends*, or the model resolves "you may or may not see it" as
-  "the stack is broken" and escalates — which is what produced the second report.
+The gateway carries images perfectly well. It loses them in exactly one position. Four
+requests on 2026-09-07 differing only in where the image block sat — a 200×200 magenta PNG,
+one word asked back:
+
+| Where the image sat | Reply | Input tokens |
+|---|---|---|
+| plain user message, no tools | `Magenta` | 110 |
+| **nested inside `tool_result`** | **`NOIMAGE`** | **667** |
+| sibling of `tool_result`, same user turn | `magenta` | 735 |
+| in a following user message | `magenta` | 741 |
+
+The ~70-token hole in row 2 is the image, absent. Rows 3 and 4 are the same request with
+the block moved one position.
+
+So LibreChat now moves it. `packages/api/src/endpoints/anthropic/toolResultImages.ts`
+lifts every image out of its `tool_result` and re-inserts it immediately after, as a
+sibling in the same user turn (row 3), in a `fetch` wrapper on the outgoing body — and
+only off `api.anthropic.com`, where the nested shape is correct and delivered. Row 3 over
+row 4 because it adds no message, so role alternation, the tool_use/tool_result adjacency
+rule and `cache_control` ordering are all untouched. `deploy.sh` marker 15 guards it, and
+`toolResultImages.spec.ts` pins the shape.
+
+Three consequences still worth knowing:
+
+- **Write the result text for a model in a bare chat.** It has none of these docs and 40k
+  tokens of nothing: it needs to know the call worked, that the user is already looking at the
+  picture, how to name it later, and not to retry a billed call. It does not need to be asked
+  what it can and cannot perceive — that is a QA protocol, and this is a chat. The same goes
+  for `serverInstructions` in `librechat.yaml`, which is the same text in a different place.
+  Item 9 above has the three ways the visibility line has been got wrong. It now
+  says the image should be visible and to describe what is actually there.
 - Not every provider even gets that far. `formatToolContent` recognizes providers that
   `StandardGraph` has no merge branch for (DeepSeek, `ollama`), and there the artifact is
   saved for the user and never shown to the model at all. `parsers.ts` now says so in the
   result text; that is a LibreChat-side gap, not a gateway one.
+- Video and audio returned from an MCP tool will hit this identically the day something
+  returns them, and the lift only handles `image` blocks. Widen it there, not here.
 
 ## Route selection
 
