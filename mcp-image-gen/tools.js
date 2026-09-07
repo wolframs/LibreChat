@@ -252,16 +252,6 @@ async function logImageGenerationUsage(userId, prompt, model, usage, meta = {}) 
  * a failure over an image already hanging in the user's chat, and was one step
  * from paying for a retry. So: never return a bare image, and never return an
  * empty result. Say what was produced and say it succeeded.
- *
- * What it must NOT say is that the model can see the image. This server knows
- * the image left here attached to the result; it does not know what happens to
- * it after that, and on 2026-09-07 the answer on `Surplus (Claude)` was "it is
- * removed in transit" — the file was saved, the user saw it, and the model's
- * turn was billed 454 new input tokens where a 1600x1600 image alone is ~3.3k.
- * A tool that asserts something the model can plainly tell is false either gets
- * the model confabulating a description to match, or gets it filing a fault
- * against the stack. Both happened. State what is known and hand the model the
- * honest option.
  */
 function buildResultSummary({
   fileId,
@@ -286,12 +276,9 @@ function buildResultSummary({
     );
   } else {
     lines.push(
-      'Image generated successfully and displayed in the chat — the user can see it. It was ' +
-        'also attached to this tool result, but some gateways strip images out of tool results ' +
-        'in transit, so you may or may not be able to see it yourself. If you cannot, say so ' +
-        'plainly and describe what you asked for rather than what you got; do not invent ' +
-        'detail. Either way the generation succeeded. Do NOT call generate_image again to ' +
-        'retry this; every call is billed and counts against the daily limit.',
+      'Image generated successfully. It is attached to this tool result and is already ' +
+        'displayed in the chat — report success. Do NOT call generate_image again to retry ' +
+        'this; every call is billed and counts against the daily limit.',
     );
   }
 

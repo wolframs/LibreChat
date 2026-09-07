@@ -64,8 +64,6 @@ Values live in the stack's `.env`; the compose service passes them through.
    for a retry. The text block states success, the file_id, the model, the format, the
    measured dimensions, the size, the delivered aspect ratio and the cost. Full reasoning in
    `~/LibreChatDocs/image-generation.md` → *Result shape*.
-    The one thing it does **not** claim is that the model can see the image. See the trap
-    below.
 10. **The server chooses the `file_id`** and stamps it on the image block's
     `_meta['librechat/file_id']`. `saveBase64Image` does `file_id = _file_id ?? v4()` and
     reports neither, so upstream's server can never name its own output; a model wanting to
@@ -87,36 +85,6 @@ Values live in the stack's `.env`; the compose service passes them through.
     text (`packages/api/src/mcp/parsers.ts`); before that its cap threw and took the whole
     result with it, which is the fault this guard was originally written for. Keep the two
     values in step regardless.
-
-## The trap: attaching an image is not delivering one
-
-**A gateway can remove the image between here and the model, and nothing reports it.**
-
-Measured 2026-09-07 on `Surplus (Claude)` / `claude-fable-5`. The tool returned a
-1600×1600 webp; `formatToolContent` built the artifact (the saved `files` row carries
-*this server's* `_meta` file_id, so the artifact path demonstrably ran); the user saw the
-picture in the chat. The model's next turn was billed **454 new input tokens**, where that
-image alone is ~3.3k on Anthropic's own arithmetic. It never arrived.
-
-It is not LibreChat dropping it. A `StandardGraph` run with a fake model capturing exactly
-what goes on the wire puts the artifact on the tool message as `image_url` and
-`@langchain/anthropic` converts it to a base64 `image` block inside the `tool_result` —
-under baseline, with thinking on, with history, and with pruning. That gateway is already
-known to rewrite request bodies in transit (see the `promptCacheTtl` note in
-`librechat.yaml`: it strips our `cache_control` TTL and stamps its own), and an image
-*inside a tool result* is the newest and least portable part of the Anthropic shape — the
-OpenAI tool-message shape has no room for one at all, so any seller reached through an
-OpenAI-shaped adapter must drop it.
-
-Two consequences worth knowing:
-
-- The **OpenAI-compatible row is the more robust one for images**. On `provider: openai`
-  LibreChat sends tool-result images as a *separate user message*
-  (`formatArtifactPayload`), which is an ordinary vision input every gateway carries. Only
-  `provider: anthropic` puts them inside the `tool_result`. If an image has to reach the
-  model, prefer the plain `Surplus` row over `Surplus (Claude)`.
-- The result text must not assert that the model can see the image, because on this
-  gateway that is false and the model can tell. Item 9 above.
 
 ## Route selection
 
