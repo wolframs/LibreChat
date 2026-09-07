@@ -5,7 +5,17 @@ import { git } from './git.js';
 import { NO_CHANGE_NOTE } from './prompt.js';
 import { describeTokens } from './tokens.js';
 
-const DAILY_LIMIT = parseInt(process.env.CODE_AGENT_DAILY_LIMIT ?? '3', 10);
+/**
+ * No daily limit by default.
+ *
+ * It was there to bound spend when this ran against a paid key. It runs on the
+ * operator's own Claude Code now, and filing only happens from a chat the
+ * operator is sitting in — so the limit was rationing something nobody could
+ * spend behind their back, while getting in the way of the one case that
+ * actually needs several filings in a row: a bad afternoon. Set
+ * CODE_AGENT_DAILY_LIMIT to a number to bring it back.
+ */
+const DAILY_LIMIT = parseInt(process.env.CODE_AGENT_DAILY_LIMIT ?? '0', 10);
 
 const text = (t) => ({ content: [{ type: 'text', text: t }] });
 
@@ -205,6 +215,15 @@ export async function handleCheckFix({ job_id, include_diff }, context) {
     }
     if (job.deploy) {
       lines.push('', `**Deploy:** ${job.deploy}`);
+    }
+    if (job.stashed) {
+      lines.push(
+        '',
+        `**The agent left uncommitted changes behind**, so they were set aside before the`,
+        `tests ran rather than tested and shipped: \`git stash list\` shows them as`,
+        `_"${job.stashed}"_, and \`git stash pop\` brings them back. Tell the user — it`,
+        'usually means the agent was cut off mid-edit.',
+      );
     }
     if (job.revert) {
       lines.push(

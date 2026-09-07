@@ -49,6 +49,7 @@ function card(job) {
     ${job.summary && !live ? `<pre>${esc(job.summary.slice(0, 4000))}</pre>` : ''}
     ${job.commits?.length ? `<ul>${job.commits.map((c) => `<li><code>${esc(c.short)}</code> ${esc(c.subject)}</li>`).join('')}</ul>` : ''}
     ${job.deploy ? `<p class="deploy">deploy: ${esc(job.deploy)}</p>` : ''}
+    ${job.stashed ? `<p class="note"><b>stashed</b> uncommitted leftovers set aside: <code>git stash pop</code></p>` : ''}
     ${job.revert ? `<p class="undo">undo: <code>${esc(job.revert)}</code></p>` : ''}
     ${job.status === 'error' && job.progress?.sessionId ? `<p class="meta">session <code>${esc(job.progress.sessionId.slice(0, 8))}</code> is intact — resumable</p>` : ''}
     ${job.resumeCount ? `<p class="meta">resumed ${job.resumeCount}×</p>` : ''}

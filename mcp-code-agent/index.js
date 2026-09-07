@@ -117,7 +117,7 @@ async function healthPayload() {
     head: sha.slice(0, 9),
     activeJob: activeJobId(),
     uid: process.getuid(),
-    dailyLimit: parseInt(process.env.CODE_AGENT_DAILY_LIMIT ?? '3', 10),
+    dailyLimit: parseInt(process.env.CODE_AGENT_DAILY_LIMIT ?? '0', 10) || 'none',
     sessions: transports.size,
   };
 }

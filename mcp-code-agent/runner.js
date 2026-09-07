@@ -80,6 +80,8 @@ const MAX_TURNS = parseInt(process.env.CODE_AGENT_MAX_TURNS ?? '250', 10);
 const AGENT_TIMEOUT_MS = parseInt(process.env.CODE_AGENT_TIMEOUT_SEC ?? '2700', 10) * 1000;
 const DEPLOY_TIMEOUT_MS = parseInt(process.env.CODE_AGENT_DEPLOY_TIMEOUT_SEC ?? '1800', 10) * 1000;
 const CONTEXT_MESSAGES = parseInt(process.env.CODE_AGENT_CONTEXT_MESSAGES ?? '12', 10);
+const AGENT_NAME = 'LibreChat code-agent';
+const AGENT_EMAIL = 'code-agent@librechat.local';
 
 /**
  * One job at a time, process-wide.
@@ -199,6 +201,34 @@ async function conversationContext(conversationId) {
  * evidence rather than a verdict — the model asking should be able to tell its
  * user *what* is in the way, not just that something is.
  */
+/**
+ * Commits made since `sinceSha` that this agent actually authored.
+ *
+ * The author filter is the safety net under the segment boundary: even if the
+ * boundary were wrong again, a human's commit can never end up in a set the
+ * wrapper is willing to revert.
+ */
+async function ownCommitsSince(sinceSha, jobId) {
+  const { stdout } = await git([
+    'log',
+    '--format=%H%x00%an%x00%s',
+    `${sinceSha}..HEAD`,
+  ]);
+  const all = stdout.split('\n').filter(Boolean).map((line) => {
+    const [hash, author, subject] = line.split('\0');
+    return { hash, short: hash.slice(0, 9), subject, author };
+  });
+  const mine = all.filter((c) => c.author === AGENT_NAME);
+  const foreign = all.filter((c) => c.author !== AGENT_NAME);
+  if (foreign.length) {
+    console.warn(
+      `[${jobId}] ignoring ${foreign.length} commit(s) by someone else in this range: ` +
+        foreign.map((c) => `${c.short} (${c.author})`).join(', '),
+    );
+  }
+  return mine;
+}
+
 export async function preflight() {
   // Claude Code refuses --dangerously-skip-permissions as root, and there is no
   // reason for this to ever run as root now that it is a plain user process.
@@ -440,6 +470,12 @@ async function execute(jobId, { premise, userId, resumeSessionId, baseSha: exist
   // On a resume the ORIGINAL base is reused, so commits made before the cut-off
   // are still counted as this job's work rather than treated as pre-existing.
   const baseSha = existingBase ?? (await head());
+  // The boundary for THIS run, which is not the job's original base. Between a
+  // cut-off and its resume, other people commit to the same branch — and using
+  // the original base swept three of the operator's own commits into a job's
+  // "work", then reverted them when the tests failed. A segment can only ever
+  // contain commits made while the agent was actually running.
+  const segmentBase = await head();
   await setJob(jobId, { baseSha });
 
   const active = await activeConversation(userId);
@@ -463,6 +499,15 @@ async function execute(jobId, { premise, userId, resumeSessionId, baseSha: exist
   // No credential passed and none wanted: this runs as the operator, so the
   // `claude` on PATH is the one already installed and logged in on this Mac.
   let lastWrite = 0;
+  // Restored from the container version, which set this in the image: every
+  // commit the agent makes is authored `LibreChat code-agent`, so
+  // `git log --author=code-agent` separates model work from human work — and,
+  // more importantly, the revert path can refuse to touch anything else.
+  process.env.GIT_AUTHOR_NAME = AGENT_NAME;
+  process.env.GIT_AUTHOR_EMAIL = AGENT_EMAIL;
+  process.env.GIT_COMMITTER_NAME = AGENT_NAME;
+  process.env.GIT_COMMITTER_EMAIL = AGENT_EMAIL;
+
   const { result, code, stderr, timedOut } = await runAgent(
     prompt,
     (progress) => {
@@ -504,7 +549,7 @@ async function execute(jobId, { premise, userId, resumeSessionId, baseSha: exist
   // 810 seconds and $8 of investigation were discarded the first time this
   // happened, and if that run had committed anything the commits would have been
   // orphaned in the tree for the operator's next deploy to ship unannounced.
-  const earlyCommits = err ? await commitsSince(baseSha) : [];
+  const earlyCommits = err ? await ownCommitsSince(segmentBase, jobId) : [];
   if (err && earlyCommits.length === 0) {
     await finish(jobId, {
       status: 'error',
@@ -523,7 +568,11 @@ async function execute(jobId, { premise, userId, resumeSessionId, baseSha: exist
     return;
   }
 
-  const commits = err ? earlyCommits : await commitsSince(baseSha);
+  const priorCommits = (await getJob(jobId))?.commits ?? [];
+  const segmentCommits = err ? earlyCommits : await ownCommitsSince(segmentBase, jobId);
+  // Everything this job has produced across all of its runs — which is what the
+  // changelog should show, and the only thing the revert path may touch.
+  const commits = [...segmentCommits, ...priorCommits];
   const cutOff = err ? why ?? 'The agent stopped before finishing.' : null;
 
   // An agent that looked and found nothing wrong is a real answer, and the tree
@@ -557,6 +606,32 @@ async function execute(jobId, { premise, userId, resumeSessionId, baseSha: exist
    * tested honestly three commits ago and then fixed one more thing has not
    * lied about anything, and this still catches it.
    */
+  /**
+   * Anything the agent left uncommitted is set aside before the tests run.
+   *
+   * This is the bug that cost eight commits: the gate tests the working tree,
+   * but the remedy only undoes commits. A half-finished edit left behind by a
+   * cut-off agent made 22 tests fail in files the diff never touched, and the
+   * wrapper responded by reverting every commit in range — which could not
+   * possibly have fixed it, and destroyed good work instead. It is also what
+   * would have shipped, since the image builds from the working tree.
+   *
+   * `git stash` rather than discard: it is recoverable with one command, and
+   * throwing away an agent's unfinished thought is not the wrapper's call.
+   */
+  let stashed = null;
+  const leftovers = await porcelain();
+  if (leftovers) {
+    const label = `code-agent job ${jobId} leftovers`;
+    const { err: stashErr } = await git(['stash', 'push', '-u', '-m', label]);
+    stashed = stashErr ? null : label;
+    console.log(`[${jobId}] set aside uncommitted leftovers: ${stashed ?? 'STASH FAILED'}`);
+    await setJob(jobId, {
+      stashed,
+      leftovers: leftovers.split('\n').slice(0, 40),
+    });
+  }
+
   const tests = await runTests(files);
   await setJob(jobId, { tests: tests.text });
 

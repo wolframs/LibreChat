@@ -95,12 +95,19 @@ corrected after filing reaches the session that is about to act on it.
    the tree as it stands *now*, and only a run now establishes it. Failure
    reverts the commits, because otherwise the human's next deploy ships code
    that failed its tests.
-5. **Deploy.** `./scripts/deploy.sh --yes`, which is the real validation chain:
+5. **Set aside leftovers.** Anything the agent left uncommitted is `git stash`ed
+   first. The gate tests the working tree but the remedy only undoes commits, so
+   a half-finished edit left by a cut-off agent would otherwise fail the tests
+   and provoke a revert that could not possibly fix it — which is exactly what
+   happened once, costing eight commits. It is also what would have shipped,
+   since the image builds from the working tree. Stashed rather than discarded:
+   `git stash pop` brings it back.
+6. **Deploy.** `./scripts/deploy.sh --yes`, which is the real validation chain:
    branch check, health wait, both sidecar probes, 14 feature markers.
-6. **Auto-revert on failure.** A stack that fails verification is a stack the
+7. **Auto-revert on failure.** A stack that fails verification is a stack the
    user cannot talk to a model on — nobody is left who could ask for the change
    to be undone. So it undoes itself and redeploys.
-7. **Changelog.** `CHANGELOG-agent.md`, prepended and committed separately, so
+8. **Changelog.** `CHANGELOG-agent.md`, prepended and committed separately, so
    reverting a change does not also revert the record that it happened.
 
 ## Why there is no conversation header
@@ -178,7 +185,7 @@ did, permanently, with no list to maintain.
 |---|---|---|
 | `CODE_AGENT_MAX_TURNS` | `250` | A backstop, not a budget — 80 cut a real investigation off mid-thought. |
 | `CODE_AGENT_MODEL` | unset | Empty means whatever the installed Claude Code defaults to, which is usually right. |
-| `CODE_AGENT_DAILY_LIMIT` | `3` | Per user, per day. `0` disables. |
+| `CODE_AGENT_DAILY_LIMIT` | `0` (off) | Filing only happens from a chat the operator is in, so there is nothing to ration. |
 | `MONGO_URI` | `mongodb://127.0.0.1:27017/LibreChat` | Loopback, via the compose port binding. |
 | `CODE_AGENT_MAX_TURNS` | `80` | `claude --max-turns`. |
 | `CODE_AGENT_TIMEOUT_SEC` | `2700` | Wall clock for one session. |
@@ -208,8 +215,11 @@ breakdown, with the list-price figure last and labelled as notional.
 Live totals during a run are summed from each assistant message; the final
 figures come from the stream's `result` event, which is authoritative.
 
-`CODE_AGENT_DAILY_LIMIT` (3) still bounds how much of a day's capacity one
-conversation can spend.
+There is no daily limit by default. It existed to bound spend against a paid key;
+the agent runs on the operator's own subscription now, and a filing only ever
+happens from a chat they are sitting in — so it was rationing something nobody
+could spend behind their back, while blocking the one case that genuinely needs
+several filings in a row: a bad afternoon.
 
 ### Health
 
