@@ -50,12 +50,17 @@ export const ASPECT_RATIOS = [
 /**
  * Ceiling on the base64 payload we will hand back as an MCP `image` block.
  *
- * LibreChat throws out of `formatToolContent` when an image result exceeds
- * `MCP_IMAGE_DATA_MAX_BYTES` (default 10 MB) — and that throw takes the *whole*
- * tool result with it, text block included, so the model learns nothing about a
- * generation it already paid for. Checking here means an oversized image costs the
- * inline preview and nothing else: the text summary still lands, and the client
- * still has no image either way. Keep this at or below the api container's value.
+ * LibreChat refuses an image result above `MCP_IMAGE_DATA_MAX_BYTES` (default
+ * 10 MB), so anything over that is bytes pushed through the SSE transport for a
+ * preview nobody will ever see. Checking here costs the inline preview and
+ * nothing else: the text summary still lands, and it can say why in this
+ * server's own words. Keep this at or below the api container's value.
+ *
+ * It used to matter more. Until 2026-09-07 the api-side cap *threw*, and the
+ * throw took the whole tool result with it — text block included — so an
+ * oversized image left the model with `tool call failed` for a generation it had
+ * already paid for. `packages/api/src/mcp/parsers.ts` now drops just the
+ * offending block and keeps the rest, so this guard is belt to that braces.
  */
 const MAX_INLINE_IMAGE_BYTES = parseInt(
   process.env.IMAGE_GEN_MAX_INLINE_BYTES ?? String(10 * 1024 * 1024),
