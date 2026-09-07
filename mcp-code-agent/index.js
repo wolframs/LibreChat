@@ -1,4 +1,7 @@
 import express from 'express';
+import fs from 'fs/promises';
+import path from 'path';
+import { fileURLToPath } from 'url';
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { SSEServerTransport } from '@modelcontextprotocol/sdk/server/sse.js';
 import { z } from 'zod';
@@ -104,8 +107,39 @@ function createMcpServer() {
 
 const transports = new Map();
 
+const BOOTED_AT = Date.now();
+const SRC_DIR = path.dirname(fileURLToPath(import.meta.url));
+
+/**
+ * True when a source file here has been edited since this process started.
+ *
+ * Node does not reload, and the LaunchAgent's KeepAlive restarts on crash, not on
+ * edit — so the ordinary way to work on this server is to change it and then keep
+ * talking to the version that was running before the change. That failure is
+ * completely silent: the server answers, healthily, with old behaviour.
+ *
+ * Reported rather than acted on. Restarting itself mid-job would be worse than
+ * being stale, and the operator may well be mid-edit on purpose.
+ */
+async function staleSources() {
+  try {
+    const names = (await fs.readdir(SRC_DIR)).filter((n) => n.endsWith('.js') || n.endsWith('.json'));
+    const stats = await Promise.all(
+      names.map(async (n) => [n, (await fs.stat(path.join(SRC_DIR, n))).mtimeMs]),
+    );
+    return stats.filter(([, mtime]) => mtime > BOOTED_AT).map(([n]) => n).sort();
+  } catch {
+    return [];
+  }
+}
+
 async function healthPayload() {
-  const [branch, dirty, sha] = await Promise.all([currentBranch(), porcelain(), head()]);
+  const [branch, dirty, sha, stale] = await Promise.all([
+    currentBranch(),
+    porcelain(),
+    head(),
+    staleSources(),
+  ]);
   return {
     ok: true,
     model: MODEL || '(claude default)',
@@ -119,6 +153,8 @@ async function healthPayload() {
     uid: process.getuid(),
     dailyLimit: parseInt(process.env.CODE_AGENT_DAILY_LIMIT ?? '0', 10) || 'none',
     sessions: transports.size,
+    startedAt: new Date(BOOTED_AT).toISOString(),
+    ...(stale.length ? { stale } : {}),
   };
 }
 

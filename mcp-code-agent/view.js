@@ -92,6 +92,8 @@ blockquote{margin:.6rem 0;padding-left:.8rem;border-left:2px solid var(--border)
 .say{color:var(--dim);font-style:italic;margin:.5rem 0}
 .note{background:#1c2128;border-left:2px solid #d29922;padding:.4rem .7rem;margin:.5rem 0;font-size:.9rem}
 .note b{color:#d29922}
+.stale{border-color:#d29922}
+.stale b{color:#d29922}
 pre{white-space:pre-wrap;background:#0d1117;border:1px solid var(--border);border-radius:4px;padding:.7rem;max-height:22rem;overflow:auto}
 ul{margin:.5rem 0;padding-left:1.1rem}
 .deploy,.undo,.meta{color:var(--dim);font-size:.85rem;margin:.35rem 0 0}
@@ -105,6 +107,17 @@ ul{margin:.5rem 0;padding-left:1.1rem}
   · ${h.activeJob ? 'job running' : 'idle'}
   · limit ${h.dailyLimit}/day
 </div>
+${
+  /* A stale server answers every probe healthily and behaves like the version
+     you already replaced. Worth a banner, because the page is where you come
+     when a job did something the code in front of you cannot explain. */
+  h.stale?.length
+    ? `<article class="stale"><b>Running pre-edit code.</b> ${h.stale.map(esc).join(', ')}
+       ${h.stale.length === 1 ? 'was' : 'were'} changed after this process started
+       (${esc(h.startedAt)}). Node does not reload; restart to pick it up:
+       <pre>launchctl kickstart -k gui/${process.getuid()}/local.librechat.code-agent</pre></article>`
+    : ''
+}
 ${jobs.length ? jobs.map(card).join('') : '<article>No jobs filed yet.</article>'}`);
   });
 }

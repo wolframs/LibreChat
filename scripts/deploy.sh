@@ -11,6 +11,8 @@
 #   ./scripts/deploy.sh              full deploy: guards -> build -> recreate -> verify
 #   ./scripts/deploy.sh --config     .env / librechat.yaml change only (no rebuild)
 #   ./scripts/deploy.sh --check      verify the running stack, change nothing
+#   ./scripts/deploy.sh --sidecars   like --check, then rebuild any sidecar whose
+#                                    running code has drifted from the working tree
 #   ./scripts/deploy.sh --no-cache   full deploy with a from-scratch image build
 #   ./scripts/deploy.sh --yes        don't prompt (for unattended runs)
 #
@@ -33,6 +35,7 @@ while [[ $# -gt 0 ]]; do
   case "$1" in
     --config)   MODE=config ;;
     --check)    MODE=check ;;
+    --sidecars) MODE=sidecars ;;
     --no-cache) BUILD_ARGS+=(--no-cache) ;;
     --yes|-y)   ASSUME_YES=1 ;;
     -h|--help)  sed -n '2,20p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
@@ -68,7 +71,7 @@ ok "docker reachable"
 
 BRANCH="$(git rev-parse --abbrev-ref HEAD)"
 if [[ "$BRANCH" != "$EXPECT_BRANCH" ]]; then
-  if [[ "$MODE" == "check" ]]; then
+  if [[ "$MODE" == "check" || "$MODE" == "sidecars" ]]; then
     warn "on '$BRANCH', expected '$EXPECT_BRANCH'"
   else
     die "On branch '$BRANCH', expected '$EXPECT_BRANCH'.
@@ -81,7 +84,7 @@ else
   ok "on branch $BRANCH ($(git rev-parse --short HEAD))"
 fi
 
-if [[ "$MODE" != "check" ]]; then
+if [[ "$MODE" != "check" && "$MODE" != "sidecars" ]]; then
   DIRTY="$(git status --porcelain)"
   if [[ -n "$DIRTY" ]]; then
     warn "working tree is dirty — these uncommitted changes WILL ship in the image:"
@@ -102,7 +105,7 @@ if grep -q 'CHANGEME' searxng/settings.yml; then
 fi
 ok "runtime config files present"
 
-if [[ "$MODE" == "check" ]]; then
+if [[ "$MODE" == "check" || "$MODE" == "sidecars" ]]; then
   echo
 else
   # ------------------------------------------------------------- build/deploy --
@@ -250,6 +253,97 @@ case "$ca_body" in
          echo "      $ca_body" ;;
   *)     ok "mcp-code-agent $ca_body" ;;
 esac
+
+# ------------------------------------------------------- sidecar staleness --
+#
+# The sidecars are not part of the api image, so this script does not rebuild
+# them — and nothing else noticed when their source moved on without them.
+#
+# On 2026-09-07 mcp-image-gen ran for 46 hours on code two commits behind the
+# tree. It was healthy the whole time and answered every probe above. What it
+# actually did was hand models the *old* result text — the text that claimed
+# they could see an image the gateway had stripped — so a model duly filed a
+# fault against a stack that had already fixed it. There is no error to grep
+# for; the only observable is that the words are wrong, and only a reader who
+# remembers the previous wording can tell.
+#
+# So: compare the source in the working tree against the copy baked into the
+# running container, file by file. A warning, not a failure — a stale sidecar
+# does not invalidate an api deploy, and the operator may be mid-edit.
+# `--sidecars` rebuilds exactly the ones that drifted.
+bold "Sidecar code vs. working tree"
+
+DRIFTED=""
+
+# Echoes the names of files whose working-tree copy differs from the container's,
+# and separately any that never made it into the image at all.
+#
+# `cat | cmp` rather than hashing: busybox, coreutils and macOS disagree about
+# which md5 binary exists, and these files are a few kB each.
+#
+# Test files are skipped. cost-dashboard's Dockerfile copies its modules by name
+# and deliberately leaves `test_*.py` out, so including them would report drift on
+# every run — a check that always fires is a check nobody reads. A *non*-test file
+# missing from the image is the opposite: that is a COPY line someone forgot to
+# update, and it is reported as its own thing rather than folded into "differs".
+sidecar_drift() {
+  local svc="$1"; shift
+  local f name
+  for f in "$@"; do
+    [[ -f "$f" ]] || continue
+    name="$(basename "$f")"
+    case "$name" in test_*|*_test.*|*.spec.*) continue ;; esac
+    if ! compose exec -T "$svc" test -f "/app/$name" 2>/dev/null; then
+      echo "!$name"
+    elif ! compose exec -T "$svc" cat "/app/$name" 2>/dev/null | cmp -s - "$f"; then
+      echo "$name"
+    fi
+  done
+}
+
+check_sidecar() {
+  local svc="$1"; shift
+  compose ps --services 2>/dev/null | grep -qx "$svc" || return 0
+  local all differs missing
+  all="$(sidecar_drift "$svc" "$@")"
+  differs="$(echo "$all" | grep -v '^!' | grep . | paste -sd' ' - || true)"
+  missing="$(echo "$all" | grep '^!' | tr -d '!' | paste -sd' ' - || true)"
+  if [[ -z "$differs" && -z "$missing" ]]; then
+    ok "$svc matches the tree"
+    return 0
+  fi
+  if [[ -n "$differs" ]]; then
+    warn "$svc is running code that differs from the tree: $differs"
+  fi
+  if [[ -n "$missing" ]]; then
+    warn "$svc image is missing source files entirely: $missing
+      (its Dockerfile copies modules by name — add them there, or they never ship)"
+  fi
+  echo "      fix:  docker compose up -d --build $svc"
+  DRIFTED="$DRIFTED $svc"
+}
+
+check_sidecar mcp-image-gen  mcp-image-gen/*.js mcp-image-gen/package.json
+check_sidecar mcp-audio-ears mcp-audio-ears/*.js mcp-audio-ears/*.py mcp-audio-ears/package.json
+check_sidecar cost-dashboard cost-dashboard/*.py cost-dashboard/requirements.txt
+
+# The code-agent is a host process, so there is no image to compare against —
+# node just never reloads. It reports the answer itself; see staleSources().
+case "$ca_body" in
+  *'"stale"'*)
+    warn "mcp-code-agent has been running since before its source last changed"
+    echo "      fix:  launchctl kickstart -k gui/$(id -u)/local.librechat.code-agent" ;;
+esac
+
+if [[ -n "$DRIFTED" && "$MODE" == "sidecars" ]]; then
+  echo
+  bold "Rebuilding$DRIFTED"
+  compose up -d --build $DRIFTED
+  ok "rebuilt — re-run --check to confirm"
+elif [[ -n "$DRIFTED" ]]; then
+  echo "      or rebuild every drifted one:  $0 --sidecars"
+fi
+echo
 
 # Local features must be present in the DEPLOYED image, not just on disk. Each marker
 # corresponds to one local commit; a missing marker means the image predates it or was
