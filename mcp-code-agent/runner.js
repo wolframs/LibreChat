@@ -1,4 +1,7 @@
 import { ObjectId } from 'mongodb';
+import { spawn } from 'child_process';
+import path from 'path';
+import { fileURLToPath } from 'url';
 import { getDb } from './db.js';
 import { buildPrompt } from './prompt.js';
 import {
@@ -196,24 +199,119 @@ export async function preflight() {
   return { ok: true };
 }
 
+// Resolved from this module, not hardcoded. It was '/app/agent-settings.json',
+// which was the path inside the container that no longer exists — the flag then
+// pointed at nothing and Claude Code refused to start at all. A path that only
+// makes sense in a deployment shape you have left is worse than no path.
+const SETTINGS = path.join(path.dirname(fileURLToPath(import.meta.url)), 'agent-settings.json');
+
 function claudeArgs(prompt) {
   return [
     '-p',
     prompt,
+    // NDJSON rather than one JSON blob at the end, which is what makes a running
+    // job observable: every tool use and every turn arrives while it is still
+    // happening, instead of the wrapper having nothing to report but "started".
     '--output-format',
-    'json',
+    'stream-json',
+    '--verbose',
     ...(MODEL ? ['--model', MODEL] : []),
     '--max-turns',
     String(MAX_TURNS),
     // Deny rules only — the short list of things `git revert` cannot undo.
     '--settings',
-    '/app/agent-settings.json',
-    // No human is present to answer a permission prompt, so there is no useful
-    // interactive mode here. Safety is the container, not the dialog: the agent
-    // reaches this repository and nothing else, and everything it does is a
-    // commit that `git revert` undoes.
+    SETTINGS,
+    // Nobody is present to answer a permission prompt, so there is no useful
+    // interactive mode here. What bounds this is the deny list plus the fact
+    // that everything it does is a commit `git revert` undoes.
     '--dangerously-skip-permissions',
   ];
+}
+
+/**
+ * Run the agent, reporting what it is doing while it does it.
+ *
+ * The first version used execFile and a single JSON blob, so a job in flight was
+ * a black box: `check_fix` could say "still working" and nothing else, and the
+ * only real information arrived after the process had exited. A model watching
+ * its own repair had no more insight than `ps`.
+ *
+ * `onProgress` is called with a rolling summary — turn count, the tool running
+ * right now, the files touched so far, the agent's last words. The caller
+ * throttles the writes; this just parses.
+ */
+function runAgent(prompt, onProgress) {
+  return new Promise((resolve) => {
+    const child = spawn('claude', claudeArgs(prompt), {
+      cwd: REPO,
+      stdio: ['ignore', 'pipe', 'pipe'],
+    });
+
+    const progress = { turns: 0, tools: 0, lastTool: null, files: [], lastText: null, phase: 'starting' };
+    let stderr = '';
+    let buffer = '';
+    let result = null;
+    let timedOut = false;
+
+    const timer = setTimeout(() => {
+      timedOut = true;
+      child.kill('SIGTERM');
+    }, AGENT_TIMEOUT_MS);
+
+    const note = (event) => {
+      if (event.type === 'system' && event.subtype === 'init') {
+        progress.phase = 'working';
+        progress.sessionId = event.session_id ?? null;
+        progress.model = event.model ?? null;
+      } else if (event.type === 'assistant') {
+        progress.turns += 1;
+        for (const part of event.message?.content ?? []) {
+          if (part.type === 'text' && part.text?.trim()) {
+            progress.lastText = part.text.trim().slice(-400);
+          } else if (part.type === 'tool_use') {
+            progress.tools += 1;
+            // The file path is the useful half of a tool call for a watcher;
+            // the rest is noise at this level of detail.
+            const target =
+              part.input?.file_path ?? part.input?.pattern ?? part.input?.command ?? '';
+            progress.lastTool = `${part.name}${target ? ` ${String(target).slice(0, 120)}` : ''}`;
+            const f = part.input?.file_path;
+            if (f && !progress.files.includes(f)) progress.files.push(f);
+          }
+        }
+      } else if (event.type === 'result') {
+        result = event;
+        progress.phase = 'finishing';
+      }
+      onProgress({ ...progress, files: [...progress.files] });
+    };
+
+    child.stdout.on('data', (chunk) => {
+      buffer += chunk;
+      const lines = buffer.split('\n');
+      buffer = lines.pop() ?? '';
+      for (const line of lines) {
+        if (!line.trim()) continue;
+        try {
+          note(JSON.parse(line));
+        } catch {
+          /* a partial or non-JSON line; the stream is best-effort telemetry */
+        }
+      }
+    });
+    child.stderr.on('data', (chunk) => {
+      stderr += chunk;
+    });
+
+    child.on('close', (code) => {
+      clearTimeout(timer);
+      resolve({ result, code, stderr, timedOut, progress });
+    });
+    child.on('error', (err) => {
+      clearTimeout(timer);
+      resolve({ result: null, code: -1, stderr: `${stderr}\n${err.message}`, timedOut, progress });
+    });
+  });
 }
 
 export async function startJob({ premise, userId }) {
@@ -256,30 +354,26 @@ async function execute(jobId, { premise, userId }) {
   const started = Date.now();
   // No credential passed and none wanted: this runs as the operator, so the
   // `claude` on PATH is the one already installed and logged in on this Mac.
-  // That is the whole point of the sidecar being a host process — an isolated
-  // Claude Code needed its own API key, its own image, a uid to drop to and a
-  // base URL to aim at, and every one of those was a tax on putting it
-  // somewhere it did not need to be.
-  const { err, stdout, stderr } = await run('claude', claudeArgs(prompt), {
-    timeout: AGENT_TIMEOUT_MS,
+  let lastWrite = 0;
+  const { result, code, stderr, timedOut } = await runAgent(prompt, (progress) => {
+    // Throttled: the stream is chatty and every write is a round trip, but a
+    // watcher refreshing every few seconds should still see movement.
+    const now = Date.now();
+    if (now - lastWrite < 2000) return;
+    lastWrite = now;
+    setJob(jobId, { progress: { ...progress, at: new Date() } }).catch(() => {});
   });
   const elapsed = Math.round((Date.now() - started) / 1000);
 
-  let report = '';
-  let cost = null;
-  try {
-    const parsed = JSON.parse(stdout);
-    report = parsed.result || '';
-    cost = parsed.total_cost_usd ?? null;
-  } catch {
-    report = stdout.trim();
-  }
+  const report = result?.result || '';
+  const cost = result?.total_cost_usd ?? null;
+  const err = code !== 0 || result?.is_error ? { code, killed: timedOut } : null;
 
   if (err && !report) {
     await finish(jobId, {
       status: 'error',
       summary:
-        `The agent did not finish (${err.killed ? `timed out after ${AGENT_TIMEOUT_MS / 1000}s` : err.message}).` +
+        `The agent did not finish (${err.killed ? `timed out after ${AGENT_TIMEOUT_MS / 1000}s` : `exit ${err.code}`}).` +
         `\n\n${(stderr || '').trim().slice(-1500)}`,
       cost,
       elapsed,

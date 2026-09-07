@@ -6,6 +6,7 @@ import { AsyncLocalStorage } from 'async_hooks';
 import { handleRequestFix, handleCheckFix, handleListFixes } from './tools.js';
 import { activeJobId, MODEL, agentAvailable } from './runner.js';
 import { REPO, BRANCH, currentBranch, porcelain, head } from './git.js';
+import { mountView } from './view.js';
 
 const app = express();
 const mcpContext = new AsyncLocalStorage();
@@ -72,9 +73,9 @@ function createMcpServer() {
 
 const transports = new Map();
 
-app.get('/healthz', async (_req, res) => {
+async function healthPayload() {
   const [branch, dirty, sha] = await Promise.all([currentBranch(), porcelain(), head()]);
-  res.json({
+  return {
     ok: true,
     model: MODEL || '(claude default)',
     agentAvailable: (await agentAvailable()) == null,
@@ -87,8 +88,12 @@ app.get('/healthz', async (_req, res) => {
     uid: process.getuid(),
     dailyLimit: parseInt(process.env.CODE_AGENT_DAILY_LIMIT ?? '3', 10),
     sessions: transports.size,
-  });
-});
+  };
+}
+
+app.get('/healthz', async (_req, res) => res.json(await healthPayload()));
+// Human-facing live view of the same data, proxied to /agent by nginx.
+mountView(app, healthPayload);
 
 app.get('/sse', async (req, res) => {
   const transport = new SSEServerTransport('/messages', res);

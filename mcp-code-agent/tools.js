@@ -7,6 +7,46 @@ import { NO_CHANGE_NOTE } from './prompt.js';
 const DAILY_LIMIT = parseInt(process.env.CODE_AGENT_DAILY_LIMIT ?? '3', 10);
 
 const text = (t) => ({ content: [{ type: 'text', text: t }] });
+
+function elapsedOf(job) {
+  const secs = Math.round((Date.now() - new Date(job.createdAt).getTime()) / 1000);
+  return secs < 90 ? `${secs}s` : `${Math.round(secs / 60)}m`;
+}
+
+/**
+ * What the session is doing right now, not merely that it is alive.
+ *
+ * The first version of this could say "still working" and nothing else, because
+ * the agent's output only arrived when the process exited. A model watching its
+ * own repair had no more insight into it than `ps` would give. The runner now
+ * parses the session's event stream as it happens, so this can report the turn
+ * count, the tool in flight and the files touched so far — and, when it has been
+ * quiet for a while, say so plainly rather than implying healthy progress.
+ */
+function liveProgress(job) {
+  const p = job.progress;
+  if (!p) return ['No progress reported yet — the session is still starting up.'];
+
+  const out = [
+    `**Turn ${p.turns}${p.tools ? `, ${p.tools} tool calls` : ''}**` +
+      (p.model ? ` · ${p.model}` : ''),
+  ];
+  if (p.lastTool) out.push(`- now: \`${p.lastTool}\``);
+  if (p.files?.length) {
+    out.push(`- files touched so far: ${p.files.map((f) => `\`${f}\``).join(', ')}`);
+  }
+  if (p.lastText) out.push('', '> ' + p.lastText.split('\n').join('\n> '));
+
+  const quiet = Math.round((Date.now() - new Date(p.at).getTime()) / 1000);
+  if (quiet > 120) {
+    out.push(
+      '',
+      `_No activity for ${Math.round(quiet / 60)} minutes. It may be on a long tool call, ` +
+        'or it may be stuck; the job times out on its own._',
+    );
+  }
+  return out;
+}
 const fail = (t) => ({ isError: true, content: [{ type: 'text', text: t }] });
 
 async function checkLimit(userId) {
@@ -40,7 +80,7 @@ export async function handleRequestFix({ premise }, context) {
 
     return text(
       [
-        `Filed. Job \`${jobId}\` is running on ${MODEL}.`,
+        `Filed. Job \`${jobId}\` is running${MODEL ? ` on ${MODEL}` : ''}.`,
         '',
         'What happens now: the agent reads the repository, works out what is actually wrong,',
         'fixes it, runs the tests, commits, and deploys. That takes minutes, not seconds.',
@@ -69,14 +109,32 @@ export async function handleCheckFix({ job_id, include_diff }, context) {
     switch (job.status) {
       case 'running':
         lines.push(
-          `Job \`${job_id}\` is still working (started ${job.createdAt.toISOString().slice(11, 16)} UTC).`,
-          'Nothing has been deployed yet. Check again in a few minutes.',
+          `Job \`${job_id}\` is still working — ${elapsedOf(job)} in.`,
+          'Nothing has been deployed yet.',
+          '',
+          ...liveProgress(job),
+        );
+        break;
+      case 'testing':
+        lines.push(
+          `Job \`${job_id}\` has finished editing and the wrapper is re-running the tests`,
+          'before it will deploy anything.',
+          '',
+          ...liveProgress(job),
         );
         break;
       case 'deploying':
         lines.push(
           `Job \`${job_id}\` has committed its work and is deploying now.`,
           'The api is restarting; if this call succeeded, it is already back.',
+          '',
+          ...(job.tests ? [`Tests: ${job.tests}`] : []),
+        );
+        break;
+      case 'tests_failed':
+        lines.push(
+          `Job \`${job_id}\`: **the wrapper re-ran the tests before deploying and they failed.**`,
+          'Nothing was deployed and the commits were reverted. The stack is untouched.',
         );
         break;
       case 'no_change':
