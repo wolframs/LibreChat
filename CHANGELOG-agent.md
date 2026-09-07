@@ -10,6 +10,71 @@ senses, and a paraphrase would launder exactly the drift it exists to show.
 The `Undo` line on each entry is a real command. It is the point of the whole
 arrangement.
 
+## 2026-09-07 18:21 UTC — `6a9efae563687a981bbfb6a2`
+
+**Premise** (from a model on *Surplus (Claude) / claude-fable-5*):
+
+> Image blocks in MCP tool results still don't reach the model, even after the parsers.ts fix went live. Verified just now: the imager's new honest sidecar text arrives, but no image content with it — the model gets text blocks only. The remaining gap is somewhere between the parsed tool result and what actually lands in the model's API request; the user's LibreChat UI shows the image fine. Focus hard on this single issue — checking whether the image block actually survives into the outbound Anthropic API payload is probably the decisive observation. You have roughly 200 turns, so there is room to investigate properly, but don't spend it on side quests.
+
+**What the agent reported back:**
+
+Working tree clean, both suites green, three commits. Here's what happened.
+
+## The reported bug isn't in LibreChat
+
+The premise was that the gap sits "between the parsed tool result and what actually lands in the model's API request." I went and looked at that stretch, and it's clean. The image survives every hop this repo owns:
+
+`formatToolContent` lifts the MCP `image` block into `artifacts.content` as an `image_url` block → LangChain's `content_and_artifact` tool puts it on `ToolMessage.artifact` → `StandardGraph` merges it back into the model's turn → the Anthropic converter turns it into a base64 `image` block **inside the `tool_result`**.
+
+I ran that end to end six ways — baseline, with history, with prompt caching on, with thinking on and a signed thinking block, with thinking on and an *unsigned* one, and with the run-start-index signal absent. One image in the outbound payload every time. I also confirmed the OpenAI-shaped path puts it in a following user message, which is what makes that row the more portable one.
+
+So: if a model can't see the image, it was removed downstream of LibreChat — by the endpoint the request went to. On `Surplus (Claude)` that means the gateway, which is already documented as rewriting request bodies in transit. An image inside a `tool_result` is the least portable part of the Anthropic shape; the OpenAI tool-message shape has no slot for one at all, so any seller reached through an OpenAI-shaped adapter has to drop it. **Practical advice for the user: switch to the plain `Surplus` row when an image actually has to reach the model.**
+
+A previous job reached the same conclusion and wrote it into `mcp-image-gen/README.md` as prose. That's why this happened twice — prose can't be run, so the next model re-derived it from scratch and filed the same report.
+
+## What I changed
+
+**1. Pinned the chain as a test** (`packages/api/src/mcp/__tests__/delivery.test.ts`). Real MCP result → real `formatToolContent` → real LangChain tool → the agents package's real merge functions, asserting the base64 image comes out the far end on both provider shapes. The README now says: *run the test, don't re-read the path.* That turns a two-job question into one command.
+
+**2. Found and fixed a real silent loss, which is not the one reported.** `formatToolContent` recognizes ten providers and moves images into artifacts for all of them. `StandardGraph` only merges artifacts back for Anthropic-like, Google-like, and OpenAI-like-*minus-DeepSeek*. Those two lists disagree on **DeepSeek** (excluded by name) and **`ollama`** (not a provider the runtime knows at all). Where they disagree, the image is pulled out of the text, saved as a file the user sees in the chat, and never put in front of the model — and nothing says so. Same silence the oversize path had until last week, in a second place.
+
+The fix keeps the artifact (the user keeps the picture) and adds a line to the text saying the model can't see it and should describe what was asked for rather than what was produced. The predicate is derived from the agents package's own exported `isAnthropicLike`/`isGoogleLike`/`isOpenAILike` rather than restated, so it can't drift; the test fails if that package grows a branch, which is the signal to delete the warning.
+
+Two wrinkles handled, worth knowing about: the provider string arrives **lowercased** from `createToolInstance`, which would silently miss the camelCase `Providers` members (`openAI`, `azureOpenAI`) — that's why the existing `RECOGNIZED_PROVIDERS` is lowercase. And Bedrock's branch turns on whether the model is a Claude, which isn't visible at that layer, so I assume delivery there: telling a model it can't see an image it's looking at is the worse error.
+
+**3. Fixed the thing that actually caused this job.** The sidecar told the model "some gateways strip images in transit, so you may or may not be able to see it yourself." Honest, but a fork with no boundary — a model given it resolves it as "the stack is broken" and escalates. The text now names where LibreChat's responsibility ends.
+
+## Keep an eye on
+
+- **Bedrock + a non-Claude vision model (Nova)** loses MCP images silently. `isAnthropicLike('bedrock', {model:'nova'})` is false, `isOpenAILike('bedrock')` is false, so nothing merges the artifact. I can't warn about it from `parsers.ts` because the model name isn't available there. The real fix is a merge branch in `@librechat/agents`.
+- **Moonshot** is missing from *both* lists, so it takes the string path — the model gets an honest note, but the user gets no attachment either. Also an agents-package fix.
+- One measurement in the old README deserves a caveat I couldn't resolve from here: the "454 new input tokens" evidence. With `promptCache: true` and the tail breakpoint on the final message, an arriving image would bill as `cache_creation_input_tokens`, not `input_tokens`. The conclusion still holds — the model reports not seeing it — but if you ever want to re-measure, check the cache-creation bucket, not just input.
+
+**Commits:**
+
+- `566734f3f` Tell the model where LibreChat's responsibility for an image ends
+- `bca00e0d9` Pin the MCP image delivery chain in a test, instead of in prose
+- `0c8653e8c` Say when an MCP image is saved for the user but never shown to the model
+
+```
+mcp-image-gen/README.md                         |  35 +++--
+ mcp-image-gen/tools.js                          |  19 ++-
+ packages/api/src/mcp/__tests__/delivery.test.ts | 193 ++++++++++++++++++++++++
+ packages/api/src/mcp/__tests__/parsers.test.ts  |  56 ++++++-
+ packages/api/src/mcp/parsers.ts                 |  55 +++++++
+ 5 files changed, 340 insertions(+), 18 deletions(-)
+```
+
+**Tests:** run by the agent; see its report
+
+**Deploy:** ok — /health, both sidecars, and all feature markers verified
+
+**Usage:** 81k out / 43k thinking / 199k cache-write / 16.31M cache-read / 244 in tokens · claude-opus-5[1m] · list-price equivalent $12.17, not a charge on a subscription
+
+**Undo:** `git revert --no-edit 566734f3f bca00e0d9 0c8653e8c && ./scripts/deploy.sh --yes`
+
+---
+
 ## 2026-09-07 16:47 UTC — `6a9ed6c8a5e75bc0d722784f`
 
 **Premise** (from a model on *Surplus (Claude) / claude-fable-5*):
