@@ -19,12 +19,6 @@ const originalEnv = {
 process.env.CREDS_KEY = '0123456789abcdef0123456789abcdef';
 process.env.CREDS_IV = '0123456789abcdef';
 
-/** Skip tests if ANTHROPIC_API_KEY is not available */
-const SKIP_INTEGRATION_TESTS = !process.env.ANTHROPIC_API_KEY;
-if (SKIP_INTEGRATION_TESTS) {
-  console.warn('ANTHROPIC_API_KEY not found - skipping integration tests');
-}
-
 jest.mock('meilisearch', () => ({
   MeiliSearch: jest.fn().mockImplementation(() => ({
     getIndex: jest.fn().mockRejectedValue(new Error('mocked')),
@@ -81,6 +75,7 @@ const { v4: uuidv4 } = require('uuid');
 const { MongoMemoryServer } = require('mongodb-memory-server');
 const { hashToken, getRandomValues, createModels } = require('@librechat/data-schemas');
 const {
+  AuthType,
   SystemRoles,
   ResourceType,
   AccessRoleIds,
@@ -89,6 +84,20 @@ const {
   PermissionBits,
   EModelEndpoint,
 } = require('librechat-data-provider');
+
+/**
+ * Skip unless a usable ANTHROPIC_API_KEY is present. `user_provided` is
+ * LibreChat's sentinel for "every user brings their own key", not a key — but it
+ * is a non-empty string, so a bare truthiness check un-skips this live-API suite
+ * on any install configured that way and then fails all twelve compliance tests
+ * with `{"type":"no_user_key"}` before a request ever leaves the process. That is
+ * the documented multi-user configuration, and it is this deployment's.
+ */
+const SKIP_INTEGRATION_TESTS =
+  !process.env.ANTHROPIC_API_KEY || process.env.ANTHROPIC_API_KEY === AuthType.USER_PROVIDED;
+if (SKIP_INTEGRATION_TESTS) {
+  console.warn('No usable ANTHROPIC_API_KEY - skipping integration tests');
+}
 
 /** @type {import('mongoose').Model} */
 let Agent;
