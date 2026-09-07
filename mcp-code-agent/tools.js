@@ -1,6 +1,6 @@
 import { ObjectId } from 'mongodb';
 import { getDb } from './db.js';
-import { preflight, startJob, getJob, listJobs, activeJobId, appendNote, MODEL } from './runner.js';
+import { preflight, startJob, getJob, listJobs, activeJobId, MODEL } from './runner.js';
 import { git } from './git.js';
 import { NO_CHANGE_NOTE } from './prompt.js';
 
@@ -162,15 +162,6 @@ export async function handleCheckFix({ job_id, include_diff }, context) {
     }
 
     lines.push('', '**The premise you filed:**', `> ${job.premise.split('\n').join('\n> ')}`);
-    if (job.notes?.length) {
-      lines.push('', '**Notes added after filing:**');
-      for (const n of job.notes) {
-        lines.push(`- _${n.from ?? 'someone'}:_ ${n.text.split('\n').join(' ')}`);
-      }
-    }
-    if (job.stoppedBecause && job.stoppedBecause !== 'success') {
-      lines.push('', `_Stopped because: \`${job.stoppedBecause}\`._`);
-    }
 
     if (job.summary) {
       lines.push('', "**The agent's own report:**", '', job.summary.trim());
@@ -210,39 +201,6 @@ export async function handleCheckFix({ job_id, include_diff }, context) {
   } catch (err) {
     console.error('check_fix failed:', err);
     return fail(`Could not read that job: ${err.message}`);
-  }
-}
-
-/**
- * Correct a filing that is already running.
- *
- * A headless session has no input channel once started, so the note goes to a
- * file the briefing tells the agent to re-read before it commits. That makes the
- * correction land if the agent has not finished yet, and land in the record
- * either way — which matters, because the premise is stored verbatim and a
- * premise that was wrong should not sit there uncontested.
- */
-export async function handleAddNote({ job_id, note }, context) {
-  try {
-    const job = await getJob(job_id);
-    if (!job) return fail(`No job \`${job_id}\`.`);
-    if (!note || note.trim().length < 4) return fail('Say what you want to add.');
-
-    const path = await appendNote(job_id, note, job.sender || 'the filing model');
-    const live = ['running', 'testing'].includes(job.status);
-
-    return text(
-      live
-        ? `Noted on job \`${job_id}\`. The agent is still working and is told to re-read ` +
-            `its notes before committing, so this should reach it — but it may already be ` +
-            `past that point, so treat it as likely rather than certain.\n\n${path}`
-        : `Noted on job \`${job_id}\`, but it is already **${job.status}** — the agent will ` +
-            'not see this. It is recorded against the job and in the changelog, so the ' +
-            'correction is on the record even though it did not change the outcome.',
-    );
-  } catch (err) {
-    console.error('add_note failed:', err);
-    return fail(`Could not add that note: ${err.message}`);
   }
 }
 

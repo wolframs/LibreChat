@@ -19,37 +19,6 @@ import {
   revertCommand,
 } from './git.js';
 import { renderEntry, writeEntry } from './changelog.js';
-import fs from 'fs/promises';
-import os from 'os';
-
-/**
- * Where a note filed *after* a job started is left for the agent to find.
- *
- * Deliberately outside the repository: anything written inside it is a dirty
- * working tree at best and swept into the agent's own commit at worst. The
- * briefing tells the agent to re-read this path before committing, which is what
- * makes a mid-flight correction possible at all — a headless `claude -p` session
- * has no input channel once it has started, so the file is the channel.
- */
-const NOTES_DIR = path.join(os.homedir(), '.cache', 'librechat-code-agent', 'notes');
-const notesPathFor = (jobId) => path.join(NOTES_DIR, `${jobId}.md`);
-
-export async function appendNote(jobId, note, from) {
-  await fs.mkdir(NOTES_DIR, { recursive: true });
-  const stamp = new Date().toISOString().slice(0, 16).replace('T', ' ');
-  await fs.appendFile(
-    notesPathFor(jobId),
-    `## Note added ${stamp} UTC${from ? ` by ${from}` : ''}\n\n${note.trim()}\n\n`,
-  );
-  const db = await getDb();
-  await db
-    .collection('mcp_code_agent_jobs')
-    .updateOne(
-      { _id: new ObjectId(jobId) },
-      { $push: { notes: { at: new Date(), from: from ?? null, text: note.trim() } } },
-    );
-  return notesPathFor(jobId);
-}
 
 /** Empty means "whatever the installed Claude Code defaults to", which is right. */
 export const MODEL = process.env.CODE_AGENT_MODEL || '';
@@ -68,14 +37,7 @@ export async function agentAvailable() {
   console.log(`claude available: ${stdout.trim().split('\n')[0]}`);
   return null;
 }
-/**
- * 80 was far too low and cost $8 to learn: a real investigation spent every one
- * of them reading code and never reached the fix, then exited non-zero with the
- * work discarded. The wall clock is the better bound — it fails at a predictable
- * cost — so this is high enough to be a backstop rather than a guillotine, and
- * the agent is told its budget so it can spend it deliberately.
- */
-const MAX_TURNS = parseInt(process.env.CODE_AGENT_MAX_TURNS ?? '250', 10);
+const MAX_TURNS = parseInt(process.env.CODE_AGENT_MAX_TURNS ?? '80', 10);
 const AGENT_TIMEOUT_MS = parseInt(process.env.CODE_AGENT_TIMEOUT_SEC ?? '2700', 10) * 1000;
 const DEPLOY_TIMEOUT_MS = parseInt(process.env.CODE_AGENT_DEPLOY_TIMEOUT_SEC ?? '1800', 10) * 1000;
 const CONTEXT_MESSAGES = parseInt(process.env.CODE_AGENT_CONTEXT_MESSAGES ?? '12', 10);
@@ -386,13 +348,7 @@ async function execute(jobId, { premise, userId }) {
   const sender = active?.sender ?? null;
   const conversation = await conversationContext(active?.conversationId);
   await setJob(jobId, { sender, conversationId: active?.conversationId ?? null });
-  const prompt = buildPrompt({
-    premise,
-    sender,
-    conversation,
-    notesPath: notesPathFor(jobId),
-    maxTurns: MAX_TURNS,
-  });
+  const prompt = buildPrompt({ premise, sender, conversation });
 
   console.log(`[${jobId}] running ${MODEL} from ${baseSha.slice(0, 9)}`);
   const started = Date.now();
@@ -413,41 +369,19 @@ async function execute(jobId, { premise, userId }) {
   const cost = result?.total_cost_usd ?? null;
   const err = code !== 0 || result?.is_error ? { code, killed: timedOut } : null;
 
-  // The stream's final event says exactly why it stopped; `exit 1` says nothing
-  // and is what the first version reported for a run that had simply used up its
-  // turns. Whoever reads this next should not have to guess.
-  const REASONS = {
-    error_max_turns:
-      `The agent used all ${MAX_TURNS} of its turns and was cut off before it finished. ` +
-      'It was not failing — it ran out of room. Raise CODE_AGENT_MAX_TURNS, or file a ' +
-      'narrower premise.',
-    error_during_execution: 'The agent hit an internal error part-way through.',
-  };
-  const why = result?.subtype && result.subtype !== 'success' ? REASONS[result.subtype] ?? `The agent stopped: ${result.subtype}.` : null;
-
-  // Work already committed is not thrown away just because the run ended badly.
-  // 810 seconds and $8 of investigation were discarded the first time this
-  // happened, and if that run had committed anything the commits would have been
-  // orphaned in the tree for the operator's next deploy to ship unannounced.
-  const earlyCommits = err ? await commitsSince(baseSha) : [];
-  if (err && earlyCommits.length === 0) {
+  if (err && !report) {
     await finish(jobId, {
       status: 'error',
       summary:
-        (why ??
-          `The agent did not finish (${err.killed ? `timed out after ${AGENT_TIMEOUT_MS / 1000}s` : `exit ${err.code}`}).`) +
-        (report ? `\n\nWhat it had to say before stopping:\n\n${report}` : '') +
-        `\n\nIt made no commits, so nothing changed.` +
-        ((stderr || '').trim() ? `\n\n${stderr.trim().slice(-1200)}` : ''),
-      stoppedBecause: result?.subtype ?? null,
+        `The agent did not finish (${err.killed ? `timed out after ${AGENT_TIMEOUT_MS / 1000}s` : `exit ${err.code}`}).` +
+        `\n\n${(stderr || '').trim().slice(-1500)}`,
       cost,
       elapsed,
     });
     return;
   }
 
-  const commits = err ? earlyCommits : await commitsSince(baseSha);
-  const cutOff = err ? why ?? 'The agent stopped before finishing.' : null;
+  const commits = await commitsSince(baseSha);
 
   // An agent that looked and found nothing wrong is a real answer, and the tree
   // is already exactly where it started, so there is nothing to deploy.
@@ -548,7 +482,7 @@ async function execute(jobId, { premise, userId }) {
     jobId,
     premise,
     sender,
-    report: (cutOff ? `**${cutOff} What follows is the work it had committed before that.**\n\n` : '') + report + rollbackNote,
+    report: report + rollbackNote,
     commits,
     diffstat: stat,
     tests: 'run by the agent; see its report',
@@ -558,7 +492,7 @@ async function execute(jobId, { premise, userId }) {
 
   await finish(jobId, {
     status,
-    summary: (cutOff ? `**${cutOff} What follows is the work it had committed before that.**\n\n` : '') + report + rollbackNote,
+    summary: report + rollbackNote,
     deploy: deployResult.text,
     cost,
     elapsed,

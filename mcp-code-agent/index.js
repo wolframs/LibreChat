@@ -3,7 +3,7 @@ import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { SSEServerTransport } from '@modelcontextprotocol/sdk/server/sse.js';
 import { z } from 'zod';
 import { AsyncLocalStorage } from 'async_hooks';
-import { handleRequestFix, handleCheckFix, handleListFixes, handleAddNote } from './tools.js';
+import { handleRequestFix, handleCheckFix, handleListFixes } from './tools.js';
 import { activeJobId, MODEL, agentAvailable } from './runner.js';
 import { REPO, BRANCH, currentBranch, porcelain, head } from './git.js';
 import { mountView } from './view.js';
@@ -58,23 +58,6 @@ function createMcpServer() {
         .describe('Return the full diff as well as the summary. Large — ask only if you need it.'),
     },
     (args) => handleCheckFix(args, mcpContext),
-  );
-
-  server.tool(
-    'add_note',
-    {
-      job_id: z.string().describe('The job to add to.'),
-      note: z
-        .string()
-        .describe(
-          'Something you realised after filing — a correction, a detail you left out, or ' +
-            '"actually the cause is X". If the job is still running the agent is told to ' +
-            're-read its notes before committing, so this can still change the outcome. ' +
-            'Use it especially when part of your premise turns out to be wrong: it is much ' +
-            'cheaper than letting the agent chase it.',
-        ),
-    },
-    (args) => handleAddNote(args, mcpContext),
   );
 
   server.tool(
