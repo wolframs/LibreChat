@@ -136,7 +136,10 @@ mcpServers:
     url: "http://mcp-code-agent:3015/sse"
     headers:
       x-user-id: "{{LIBRECHAT_USER_ID}}"
-      x-conversation-id: "{{LIBRECHAT_CONVERSATION_ID}}"
+      # The ONLY conversation placeholder LibreChat substitutes. An invented one
+      # (LIBRECHAT_CONVERSATION_ID, say) is passed through as the literal string
+      # and the context-gathering silently reads nothing.
+      x-conversation-id: "{{LIBRECHAT_BODY_CONVERSATIONID}}"
     chatMenu: true
     timeout: 60000
     requiresOAuth: false

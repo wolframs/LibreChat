@@ -65,6 +65,31 @@ export async function listJobs(userId, limit) {
     .toArray();
 }
 
+/**
+ * Which endpoint and model filed this.
+ *
+ * Read from the conversation rather than passed as a header, because LibreChat
+ * only substitutes a fixed set of placeholders into MCP headers —
+ * `LIBRECHAT_USER_*`, `LIBRECHAT_OPENID_*`, `LIBRECHAT_GRAPH_*` and
+ * `LIBRECHAT_BODY_{CONVERSATIONID,PARENTMESSAGEID,MESSAGEID}` (see
+ * `packages/api/src/mcp/utils.ts`). An invented placeholder is not an error: it
+ * is passed through as the literal `{{...}}` string and everything downstream
+ * quietly reads nothing.
+ */
+async function conversationMeta(conversationId) {
+  if (!conversationId) return null;
+  try {
+    const db = await getDb();
+    const c = await db
+      .collection('conversations')
+      .findOne({ conversationId }, { projection: { endpoint: 1, model: 1, title: 1 } });
+    if (!c) return null;
+    return [c.endpoint, c.model].filter(Boolean).join(' / ') || null;
+  } catch {
+    return null;
+  }
+}
+
 /** Raw transcript around the premise, so the sender never has to curate evidence. */
 async function conversationContext(conversationId) {
   if (!conversationId) return [];
@@ -162,7 +187,7 @@ export async function startJob({ premise, userId, conversationId, sender }) {
   // connection the caller is holding, so the tool has to have returned long
   // before we get there. This container is not recreated by deploy.sh, so the
   // job outlives the api restart and is still here to be collected afterwards.
-  execute(jobId, { premise, conversationId, sender }).catch(async (err) => {
+  execute(jobId, { premise, conversationId }).catch(async (err) => {
     console.error(`job ${jobId} crashed:`, err);
     await setJob(jobId, { status: 'error', summary: `Job crashed: ${err.message}` });
     activeJob = null;
@@ -171,11 +196,15 @@ export async function startJob({ premise, userId, conversationId, sender }) {
   return jobId;
 }
 
-async function execute(jobId, { premise, conversationId, sender }) {
+async function execute(jobId, { premise, conversationId }) {
   const baseSha = await head();
   await setJob(jobId, { baseSha });
 
-  const conversation = await conversationContext(conversationId);
+  const [sender, conversation] = await Promise.all([
+    conversationMeta(conversationId),
+    conversationContext(conversationId),
+  ]);
+  await setJob(jobId, { sender });
   const prompt = buildPrompt({ premise, sender, conversation });
 
   console.log(`[${jobId}] running ${MODEL} from ${baseSha.slice(0, 9)}`);
