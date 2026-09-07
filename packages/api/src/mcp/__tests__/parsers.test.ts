@@ -118,7 +118,9 @@ describe('formatToolContent', () => {
           };
 
           const [content, artifacts] = formatToolContent(result, provider);
-          expect(content).toBe('Before image\n\nAfter image');
+          expect(content).toContain('Before image');
+          expect(content).toContain('After image');
+          expect(content).not.toContain('base64data');
           expect(artifacts).toEqual({
             content: [
               {
@@ -135,6 +137,58 @@ describe('formatToolContent', () => {
           expect(content).toBe('(No response)');
           expect(artifacts).toBeUndefined();
         });
+      });
+    });
+
+    /**
+     * Recognizing a provider gets the image out of the text and into an
+     * artifact; it does not get it in front of the model. `StandardGraph`
+     * merges `artifact.content` back only on Anthropic-like, Google-like and
+     * OpenAI-like-minus-DeepSeek providers, so on the rest the picture is saved
+     * for the user and the model is shown a result that talks about something
+     * it was never given. Say which of the two happened.
+     */
+    describe('providers whose artifacts never reach the model', () => {
+      const imageResult: t.MCPToolCallResponse = {
+        content: [
+          { type: 'text', text: 'Before image' },
+          { type: 'image', data: 'base64data', mimeType: 'image/png' },
+        ],
+      };
+
+      it.each(['deepseek', 'ollama'] as t.Provider[])(
+        'says the model cannot see the image on %s',
+        (provider) => {
+          const [content, artifacts] = formatToolContent(imageResult, provider);
+
+          expect(content).toContain('Before image');
+          expect(content).toContain('[image not delivered to the model: image/png');
+          expect(content).toContain('the user can see it');
+          /** Still an artifact, so the file is saved and shown in the chat. */
+          expect(artifacts?.content).toHaveLength(1);
+        },
+      );
+
+      it.each(['anthropic', 'openai', 'google', 'vertexai', 'bedrock'] as t.Provider[])(
+        'stays quiet on %s, where the artifact is merged back',
+        (provider) => {
+          const [content] = formatToolContent(imageResult, provider);
+          expect(content).toBe('Before image');
+        },
+      );
+
+      it('names a remote URL rather than inventing a byte count', () => {
+        const [content] = formatToolContent(
+          {
+            content: [
+              { type: 'image', data: 'https://example.com/cat.png', mimeType: 'image/png' },
+            ],
+          } as t.MCPToolCallResponse,
+          'deepseek' as t.Provider,
+        );
+
+        expect(content).toContain('image/png at https://example.com/cat.png');
+        expect(content).not.toContain('bytes');
       });
     });
   });

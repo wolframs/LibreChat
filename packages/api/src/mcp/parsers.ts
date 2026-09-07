@@ -1,5 +1,6 @@
 import crypto from 'node:crypto';
 import { Tools } from 'librechat-data-provider';
+import { Providers, isOpenAILike, isGoogleLike, isAnthropicLike } from '@librechat/agents';
 import type { UIResource } from 'librechat-data-provider';
 import type * as t from './types';
 
@@ -107,6 +108,55 @@ function describeUndeliverableImage(item: t.ImageContent): string {
   return (
     `[image not delivered: ${item.mimeType}, ~${estimateBase64Bytes(item.data)} bytes. ` +
     'This provider has no image channel for tool results, so the model cannot see it.]'
+  );
+}
+
+/**
+ * Whether the agent runtime will merge an image artifact back into the model's
+ * turn for this provider.
+ *
+ * Moving an image into `artifacts` is only half of delivering it. `StandardGraph`
+ * decides separately, per provider, whether to merge `artifact.content` into the
+ * tool message (`formatAnthropicArtifactContent`) or into a following user
+ * message (`formatArtifactPayload`) — and its branches do not cover every
+ * provider recognized here. Where they miss, the image is taken out of the text,
+ * saved as a file for the user, and never put in front of the model: the result
+ * describes a picture the model was never shown, and nothing says so. That is the
+ * same silence the oversize path used to have, in a second place.
+ *
+ * Derived from the runtime's own exported predicates rather than restated, so it
+ * cannot drift out of step with them. Two wrinkles: `provider` arrives lowercased
+ * from `createToolInstance`, which would miss the camelCase `Providers` members
+ * (`openAI`, `azureOpenAI`); and Bedrock's branch turns on whether the model is a
+ * Claude, which is not visible here — assume delivery, because telling a model it
+ * cannot see an image it is looking at is the worse of the two errors.
+ */
+const PROVIDERS_BY_LOWERCASE: Map<string, Providers> = new Map(
+  Object.values(Providers).map((provider) => [provider.toLowerCase(), provider]),
+);
+
+function deliversImageArtifacts(provider: t.Provider): boolean {
+  const resolved = PROVIDERS_BY_LOWERCASE.get(provider.toLowerCase()) ?? (provider as Providers);
+  if (resolved === Providers.BEDROCK || isAnthropicLike(resolved) || isGoogleLike(resolved)) {
+    return true;
+  }
+  return isOpenAILike(resolved) && resolved !== Providers.DEEPSEEK;
+}
+
+/**
+ * The image is saved and shown in the chat, so it is not lost to the user — but
+ * on this provider it never enters the model's context. Says both halves, because
+ * "it is displayed in the chat" and "you can see it" are different claims and the
+ * model has no way to tell them apart from the inside.
+ */
+function describeUserOnlyImage(image: InlineImage): string {
+  const what = isRemoteImageUrl(image.data)
+    ? `${image.mimeType} at ${image.data}`
+    : `${image.mimeType}, ~${estimateBase64Bytes(image.data)} bytes`;
+  return (
+    `[image not delivered to the model: ${what}. It is saved and displayed in the chat, so the ` +
+    'user can see it, but this provider has no image channel for tool results and the model ' +
+    'cannot. Describe what was asked for rather than what was produced.]'
   );
 }
 
@@ -273,6 +323,7 @@ export function formatToolContent(
   /** Index-aligned with `imageUrls`; a slot is undefined when the server named no id. */
   const imageFileIds: (string | undefined)[] = [];
   const uiResources: UIResource[] = [];
+  const artifactsReachTheModel = deliversImageArtifacts(provider);
   let currentTextBlock = '';
 
   const appendText = (text: string): void => {
@@ -298,6 +349,10 @@ export function formatToolContent(
 
     imageUrls.push(formattedImage);
     imageFileIds.push(image.fileId);
+
+    if (!artifactsReachTheModel) {
+      appendText(describeUserOnlyImage(image));
+    }
   };
 
   type ContentHandler = undefined | ((item: t.ToolContentPart) => void);
