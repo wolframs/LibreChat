@@ -5,8 +5,21 @@ and deployed. It spawns a Claude Code session against this repository; that
 session investigates, decides, fixes, tests and commits, and then this wrapper
 deploys and verifies.
 
-Reached over SSE at `http://mcp-code-agent:3015/sse`. Not built by
-`./scripts/deploy.sh` — `docker compose up -d --build mcp-code-agent`.
+**This is a host process, not a container.** It runs as the operator and drives
+the Claude Code already installed and logged in on this Mac — so there is no
+image, no API key, no uid to drop to and no base URL to aim at. Every one of
+those existed in the first version only because the agent had been put somewhere
+it did not need to be.
+
+Started by `~/Library/LaunchAgents/local.librechat.code-agent.plist`
+(`RunAtLoad`, `KeepAlive`), logging to `mcp-code-agent/agent.log`. LibreChat
+reaches it at `http://host.docker.internal:3015/sse`.
+
+```bash
+launchctl load   ~/Library/LaunchAgents/local.librechat.code-agent.plist   # start
+launchctl unload ~/Library/LaunchAgents/local.librechat.code-agent.plist   # stop
+tail -f ~/projects/librechat/mcp-code-agent/agent.log
+```
 
 ## The design stance
 
@@ -87,19 +100,35 @@ conversation, and only if it moved in the last 30 minutes. That is a heuristic,
 deliberately bounded rather than trusted, and the job runs on the premise alone
 when the window lapses.
 
-## The two unusual mounts
+## Why it is not a container
 
-Both are load-bearing.
+It was one, briefly, and everything that went wrong with it was container tax:
 
-**The repo, read-write, at its own host path.** Same path on both sides is not
-cosmetic: `deploy.sh` runs `docker compose` against the host daemon, and the
-daemon resolves the compose file's relative bind mounts against the *host*
-filesystem. Mount the repo anywhere else and every path in a deploy triggered
-from in here resolves to somewhere that does not exist.
+- Claude Code refuses `--dangerously-skip-permissions` as root, but the container
+  had to be root to reach the mounted docker socket to run `deploy.sh` — so the
+  agent had to be spawned at a dropped uid, with `git config` written for both
+  uids, and the repo bind-mounted at its own host path so the daemon would
+  resolve relative binds correctly.
+- It needed its own credential, and `ANTHROPIC_API_KEY` on this stack is the
+  literal string `user_provided` (LibreChat's per-user-key sentinel), so it had
+  to be pointed at a separate key and base URL.
+- And that meant paying per token — $0.96 for a single one-word turn on the
+  marketplace — for a Claude Code that was worse than the one already sitting on
+  the machine, authenticated, one version newer.
 
-**The docker socket**, which is root-equivalent on the host. It is here because
-the wrapper's whole promise is "when this says done, it is deployed and one hard
-refresh shows it", and that promise cannot be kept without running `deploy.sh`.
+As a host process all of that is simply absent. `git`, `docker compose`,
+`deploy.sh` and `claude` all behave exactly as they do when the operator runs
+them, because it *is* the operator running them.
+
+The one thing the container did buy was isolation from the rest of the home
+directory. That is gone, and the deny list gained the specific things `git
+revert` cannot undo — the Forgejo PAT, `~/.ssh`, `~/.aws`, `gh` credentials.
+File tools are already confined to the repo by the working directory; those
+entries cover the shell path around it.
+
+**Mongo has to be reachable from the host** for this, so
+`docker-compose.override.yml` binds it to `127.0.0.1:27017` — loopback only, off
+the LAN and off Tailscale.
 
 ## What is denied, and why only this
 
@@ -127,53 +156,34 @@ did, permanently, with no list to maintain.
 
 | Var | Default | Notes |
 |---|---|---|
-| `CODE_AGENT_ANTHROPIC_KEY` | `${SURPLUS_API_KEY}` | Required. **Not** `ANTHROPIC_API_KEY` — see below. |
-| `CODE_AGENT_BASE_URL` | Surplus `/anthropic` | Must not end in `/v1`; the client appends `/v1/messages`. Empty = api.anthropic.com. |
-| `CODE_AGENT_MODEL` | `claude-opus-4.8` | Dotted id, because that is the marketplace's spelling. |
-| `CODE_AGENT_UID` / `_GID` | `1000` / `1000` | The uid the agent runs as. Must not be 0. |
+| `CODE_AGENT_MODEL` | unset | Empty means whatever the installed Claude Code defaults to, which is usually right. |
 | `CODE_AGENT_DAILY_LIMIT` | `3` | Per user, per day. `0` disables. |
+| `MONGO_URI` | `mongodb://127.0.0.1:27017/LibreChat` | Loopback, via the compose port binding. |
 | `CODE_AGENT_MAX_TURNS` | `80` | `claude --max-turns`. |
 | `CODE_AGENT_TIMEOUT_SEC` | `2700` | Wall clock for one session. |
 | `CODE_AGENT_REPO_PATH` | `/Users/wolfram/projects/librechat` | Must be identical on host and in the container. |
 | `DEPLOY_BRANCH` | `local-features` | Preflight refuses anything else. |
 
-### Two credentials that are not what they look like
-
-**`ANTHROPIC_API_KEY` on this stack is the literal string `user_provided`** —
-LibreChat's sentinel meaning each user supplies their own key through the UI. It
-is 13 bytes, it is not a key, and passing it to the agent produces a 401 three
-seconds into every job with nothing on the wire to suggest the problem is
-configuration rather than code. Hence the separate `CODE_AGENT_ANTHROPIC_KEY`,
-and `preflight` refusing that exact string by name.
-
-**The wrapper runs as root and the agent must not.** Claude Code exits
-immediately with *"--dangerously-skip-permissions cannot be used with root/sudo
-privileges for security reasons"*. The container is root because the wrapper
-needs the docker socket for `deploy.sh`, so the agent is dropped to uid 1000 via
-`execFile`'s `uid`/`gid` — no `su` wrapper, therefore no shell to escape a
-multi-thousand-character prompt through. `git config` is set for **both** uids in
-the Dockerfile; configure only `/root` and the agent's commits fail with "please
-tell me who you are". `stdio: ['ignore', …]` closes the child's stdin, or the CLI
-waits on an inherited one that nothing will ever close.
-
-`/healthz` reports `keyOk`, `baseUrl`, `agentUid` and `wrapperUid` so all of that
-is visible without filing a job.
-
 ### Cost
 
-Measured on Surplus, 2026-09-07: **a single one-word turn cost $0.96.** Claude
-Code sends a large system prompt and full tool definitions on the first request,
-and that is what you are paying for — later turns in the same session are far
-cheaper because of prompt caching, but the floor for *any* job is around a
-dollar. A real repair is plausibly $5–30.
+It runs on the operator's own Claude Code session, so this is subscription usage
+rather than a per-token bill against a key. For reference, the same trivial
+one-turn prompt measured $0.17 here against $0.96 through the marketplace.
 
-That makes this by far the most expensive thing on the stack: an image is $0.01,
-an audio listen ~$0.016. `CODE_AGENT_DAILY_LIMIT` defaults to **3** for that
-reason, and it is the only thing bounding the spend.
+`CODE_AGENT_DAILY_LIMIT` (3) still exists, because a repair session is many turns
+and the point of a limit is to bound how much of the day's capacity one
+conversation can spend.
 
-Spend draws down the **Surplus buyer credit**, so it does show up in `/cost`'s
-credit-remaining card — but not as transactions, and not attributed to this
-sidecar. Run out and the gateway answers 402 mid-job.
+Job records live in `mcp_code_agent_jobs` either way.
+
+### Health
+
+`/healthz` reports `agentAvailable`, which actually runs `claude --version`. That
+is the check worth having: a LaunchAgent inherits no login shell, so a `PATH`
+missing `~/.local/bin` shows up as "claude: not found" — and without the probe it
+would only show up after a job had been filed and a conversation dropped.
+`deploy.sh` warns (does not fail) when it cannot reach the sidecar, since the
+stack is fine without it.
 
 ## Turning it on
 

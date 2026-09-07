@@ -17,53 +17,27 @@ import {
 } from './git.js';
 import { renderEntry, writeEntry } from './changelog.js';
 
-export const MODEL = process.env.CODE_AGENT_MODEL || 'opus';
+/** Empty means "whatever the installed Claude Code defaults to", which is right. */
+export const MODEL = process.env.CODE_AGENT_MODEL || '';
+
+/**
+ * That the host CLI exists and is authenticated, checked before anything is
+ * spawned. `claude --version` costs nothing and catches a missing binary or a
+ * broken PATH — the two ways a launchd-started process differs from a shell.
+ */
+export async function agentAvailable() {
+  const { err, stdout } = await run('claude', ['--version'], { timeout: 20_000 });
+  if (err) {
+    return `The \`claude\` CLI is not runnable from this process: ${err.message}. ` +
+      'Check PATH — a launchd agent does not inherit a login shell.';
+  }
+  console.log(`claude available: ${stdout.trim().split('\n')[0]}`);
+  return null;
+}
 const MAX_TURNS = parseInt(process.env.CODE_AGENT_MAX_TURNS ?? '80', 10);
 const AGENT_TIMEOUT_MS = parseInt(process.env.CODE_AGENT_TIMEOUT_SEC ?? '2700', 10) * 1000;
 const DEPLOY_TIMEOUT_MS = parseInt(process.env.CODE_AGENT_DEPLOY_TIMEOUT_SEC ?? '1800', 10) * 1000;
 const CONTEXT_MESSAGES = parseInt(process.env.CODE_AGENT_CONTEXT_MESSAGES ?? '12', 10);
-
-/**
- * The uid the agent itself runs as, which is not the uid this wrapper runs as.
- *
- * Claude Code refuses `--dangerously-skip-permissions` outright when it is root:
- * `--dangerously-skip-permissions cannot be used with root/sudo privileges for
- * security reasons`. The container is root because the *wrapper* needs the docker
- * socket to run deploy.sh — so the two halves need different privileges, and the
- * agent gets the lesser one.
- *
- * The bind-mounted repo is presented as root-owned by OrbStack's virtiofs but is
- * writable by any uid, which is what makes this work at all; on a stricter mount
- * this would need the uid to match the owner instead.
- */
-const AGENT_UID = parseInt(process.env.CODE_AGENT_UID ?? '1000', 10);
-const AGENT_GID = parseInt(process.env.CODE_AGENT_GID ?? '1000', 10);
-const AGENT_HOME = process.env.CODE_AGENT_HOME || '/home/node';
-
-/**
- * The agent's own credential, deliberately NOT `ANTHROPIC_API_KEY`.
- *
- * On this stack that variable holds the literal string "user_provided" —
- * LibreChat's sentinel meaning each user supplies their own key through the UI.
- * It is 13 bytes, it is not a key, and passing it through produces a 401 three
- * seconds into every job with nothing on the wire to suggest the problem is
- * configuration rather than code. `keyProblem()` states it instead.
- */
-const AGENT_KEY = process.env.CODE_AGENT_ANTHROPIC_KEY || '';
-const AGENT_BASE_URL = process.env.CODE_AGENT_BASE_URL || '';
-
-export function keyProblem() {
-  if (!AGENT_KEY) return 'CODE_AGENT_ANTHROPIC_KEY is not set on the code-agent server.';
-  if (AGENT_KEY === 'user_provided') {
-    return 'CODE_AGENT_ANTHROPIC_KEY is the literal string "user_provided" — that is ' +
-      "LibreChat's per-user-key sentinel, not a credential. Point it at a real key.";
-  }
-  return null;
-}
-
-export function agentInfo() {
-  return { keyOk: keyProblem() == null, baseUrl: AGENT_BASE_URL || 'api.anthropic.com', agentUid: AGENT_UID };
-}
 
 /**
  * One job at a time, process-wide.
@@ -184,21 +158,18 @@ async function conversationContext(conversationId) {
  * user *what* is in the way, not just that something is.
  */
 export async function preflight() {
-  // Cheap guard for a failure that otherwise only shows up after a job has been
-  // filed, a conversation dropped, and a user has waited: Claude Code exits
-  // immediately when asked to skip permissions as root, and the whole run is
-  // wasted. It costs nothing to know this before spawning anything.
-  if (AGENT_UID === 0) {
+  // Claude Code refuses --dangerously-skip-permissions as root, and there is no
+  // reason for this to ever run as root now that it is a plain user process.
+  if (process.getuid() === 0) {
     return {
       ok: false,
       reason:
-        'The agent would run as root, and Claude Code refuses ' +
-        '--dangerously-skip-permissions as root. Set CODE_AGENT_UID to a non-root uid ' +
-        '(1000 is the `node` user in this image).',
+        'The sidecar is running as root, and Claude Code refuses ' +
+        '--dangerously-skip-permissions as root. Run it as the operator instead.',
     };
   }
-  const keyIssue = keyProblem();
-  if (keyIssue) return { ok: false, reason: keyIssue };
+  const agentIssue = await agentAvailable();
+  if (agentIssue) return { ok: false, reason: agentIssue };
   if (activeJob) {
     return { ok: false, reason: `A fix is already running (job ${activeJob}). Wait for it.` };
   }
@@ -231,8 +202,7 @@ function claudeArgs(prompt) {
     prompt,
     '--output-format',
     'json',
-    '--model',
-    MODEL,
+    ...(MODEL ? ['--model', MODEL] : []),
     '--max-turns',
     String(MAX_TURNS),
     // Deny rules only — the short list of things `git revert` cannot undo.
@@ -284,19 +254,14 @@ async function execute(jobId, { premise, userId }) {
 
   console.log(`[${jobId}] running ${MODEL} from ${baseSha.slice(0, 9)}`);
   const started = Date.now();
+  // No credential passed and none wanted: this runs as the operator, so the
+  // `claude` on PATH is the one already installed and logged in on this Mac.
+  // That is the whole point of the sidecar being a host process — an isolated
+  // Claude Code needed its own API key, its own image, a uid to drop to and a
+  // base URL to aim at, and every one of those was a tax on putting it
+  // somewhere it did not need to be.
   const { err, stdout, stderr } = await run('claude', claudeArgs(prompt), {
     timeout: AGENT_TIMEOUT_MS,
-    uid: AGENT_UID,
-    gid: AGENT_GID,
-    // HOME must follow the uid: Claude Code writes its own config and session
-    // state there, and /root is not writable by the dropped user.
-    env: {
-      ANTHROPIC_API_KEY: AGENT_KEY,
-      // Unset means api.anthropic.com. Must not end in /v1: the client appends
-      // /v1/messages itself, the same trap as a `provider: anthropic` yaml row.
-      ...(AGENT_BASE_URL ? { ANTHROPIC_BASE_URL: AGENT_BASE_URL } : {}),
-      HOME: AGENT_HOME,
-    },
   });
   const elapsed = Math.round((Date.now() - started) / 1000);
 

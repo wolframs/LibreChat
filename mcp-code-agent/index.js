@@ -4,7 +4,7 @@ import { SSEServerTransport } from '@modelcontextprotocol/sdk/server/sse.js';
 import { z } from 'zod';
 import { AsyncLocalStorage } from 'async_hooks';
 import { handleRequestFix, handleCheckFix, handleListFixes } from './tools.js';
-import { activeJobId, MODEL, agentInfo } from './runner.js';
+import { activeJobId, MODEL, agentAvailable } from './runner.js';
 import { REPO, BRANCH, currentBranch, porcelain, head } from './git.js';
 
 const app = express();
@@ -76,17 +76,15 @@ app.get('/healthz', async (_req, res) => {
   const [branch, dirty, sha] = await Promise.all([currentBranch(), porcelain(), head()]);
   res.json({
     ok: true,
-    model: MODEL,
-    ...agentInfo(),
+    model: MODEL || '(claude default)',
+    agentAvailable: (await agentAvailable()) == null,
     repo: REPO,
     branch,
     expectedBranch: BRANCH,
     clean: dirty === '',
     head: sha.slice(0, 9),
     activeJob: activeJobId(),
-    // Wrapper runs as root for the docker socket; the agent must not, or Claude
-    // Code refuses --dangerously-skip-permissions and every job dies in 3s.
-    wrapperUid: process.getuid(),
+    uid: process.getuid(),
     dailyLimit: parseInt(process.env.CODE_AGENT_DAILY_LIMIT ?? '3', 10),
     sessions: transports.size,
   });
@@ -118,9 +116,9 @@ app.post('/messages', async (req, res) => {
 const PORT = process.env.PORT || 3015;
 app.listen(PORT, async () => {
   console.log(`MCP code-agent server on port ${PORT}`);
-  console.log(`  model:  ${MODEL}`);
   console.log(`  repo:   ${REPO} (${await currentBranch()} @ ${(await head()).slice(0, 9)})`);
-  const info = agentInfo();
-  console.log(`  key:    ${info.keyOk ? 'ok' : 'MISSING OR INVALID'} -> ${info.baseUrl}`);
-  console.log(`  agent:  uid ${info.agentUid} (wrapper is uid ${process.getuid()})`);
+  console.log(`  model:  ${MODEL || '(claude default)'}`);
+  console.log(`  uid:    ${process.getuid()} — uses the Claude Code already logged in here`);
+  const issue = await agentAvailable();
+  if (issue) console.error(`  WARNING: ${issue}`);
 });

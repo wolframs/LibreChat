@@ -1,0 +1,29 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>local.librechat.code-agent</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/Users/wolfram/.local/bin/node</string>
+    <string>/Users/wolfram/projects/librechat/mcp-code-agent/index.js</string>
+  </array>
+  <key>WorkingDirectory</key><string>/Users/wolfram/projects/librechat/mcp-code-agent</string>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <!-- launchd gives a process no login shell, so PATH must be spelled out:
+         ~/.local/bin for claude, /usr/local/bin for node, and the Docker CLI
+         paths for deploy.sh. A missing entry here shows up as "claude: not
+         found" only after a job is filed, which is why /healthz probes it. -->
+    <key>PATH</key><string>/Users/wolfram/.local/bin:/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+    <key>HOME</key><string>/Users/wolfram</string>
+    <key>MONGO_URI</key><string>mongodb://127.0.0.1:27017/LibreChat</string>
+    <key>REPO_PATH</key><string>/Users/wolfram/projects/librechat</string>
+    <key>PORT</key><string>3015</string>
+  </dict>
+  <key>RunAtLoad</key><true/>
+  <key>KeepAlive</key><true/>
+  <key>StandardOutPath</key><string>/Users/wolfram/projects/librechat/mcp-code-agent/agent.log</string>
+  <key>StandardErrorPath</key><string>/Users/wolfram/projects/librechat/mcp-code-agent/agent.log</string>
+</dict>
+</plist>

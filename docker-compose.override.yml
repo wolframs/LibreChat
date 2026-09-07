@@ -49,6 +49,12 @@ services:
     profiles: ["admin"]
 
   mongodb:
+    # Loopback only. The code-agent sidecar runs as a host process rather than a
+    # container — it drives the Claude Code that is already installed and
+    # authenticated on this Mac — so it needs a way in that does not exist by
+    # default. 127.0.0.1 keeps it off the LAN and off Tailscale.
+    ports:
+      - "127.0.0.1:27017:27017"
     restart: unless-stopped
 
   meilisearch:
@@ -145,69 +151,6 @@ services:
       - ./uploads:/app/uploads:ro
     expose:
       - "3014"
-    depends_on:
-      - mongodb
-    restart: unless-stopped
-
-  # MCP sidecar that lets a model on this stack file a fault against the stack
-  # itself: it spawns a Claude Code session against this repository, which
-  # investigates, fixes, tests, commits, and then the wrapper deploys.
-  # Internal-only at http://mcp-code-agent:3015/sse. See ~/LibreChatDocs.
-  #
-  # Two mounts here are unlike anything else in this file, and both are load-
-  # bearing rather than convenient:
-  #
-  #   - The repo is bind-mounted READ-WRITE at its own host path. Same path on
-  #     both sides is not cosmetic: deploy.sh runs `docker compose` against the
-  #     host daemon, and the daemon resolves this file's relative bind mounts
-  #     against the *host* filesystem. Mount the repo anywhere else and every
-  #     path in a deploy triggered from in here resolves to somewhere that does
-  #     not exist.
-  #   - The docker socket, which is root-equivalent on the host. It is here
-  #     because the wrapper's entire promise is "when this says done, it is
-  #     deployed and a hard refresh will show it", and there is no way to keep
-  #     that promise without being able to run deploy.sh.
-  #
-  # The safety model is reversibility, not prevention: every change is a commit,
-  # deploy.sh verifies health and 14 feature markers, and a failed verification
-  # auto-reverts and redeploys. The narrow deny-list (secrets, deploy.sh,
-  # agent-test.sh, push) is only for the things `git revert` cannot undo.
-  mcp-code-agent:
-    build: ./mcp-code-agent
-    container_name: mcp-code-agent
-    environment:
-      - PORT=3015
-      - MONGO_URI=mongodb://mongodb:27017/LibreChat
-      # NOT ${ANTHROPIC_API_KEY}: in this stack that variable is the literal
-      # string "user_provided", LibreChat's sentinel for "each user supplies
-      # their own key in the UI". Passing it through gives the agent a 13-byte
-      # key and a 401 three seconds into every job. The agent needs a real
-      # credential of its own, and Surplus speaks the Anthropic protocol, so it
-      # runs on marketplace credit by default rather than needing a new one.
-      - CODE_AGENT_ANTHROPIC_KEY=${CODE_AGENT_ANTHROPIC_KEY:-${SURPLUS_API_KEY:-}}
-      # Must NOT end in /v1 — the Anthropic client appends /v1/messages itself.
-      # Empty means api.anthropic.com.
-      - CODE_AGENT_BASE_URL=${CODE_AGENT_BASE_URL:-https://api.surplusintelligence.ai/anthropic}
-      - REPO_PATH=${CODE_AGENT_REPO_PATH:-/Users/wolfram/projects/librechat}
-      - DEPLOY_BRANCH=${DEPLOY_BRANCH:-local-features}
-      # Dotted id, because that is what the marketplace calls it; the bare
-      # "opus" alias resolves to Anthropic's canonical spelling, which does not
-      # exist there and fails like a nonexistent model.
-      - CODE_AGENT_MODEL=${CODE_AGENT_MODEL:-claude-opus-4.8}
-      # A one-word turn measured at $0.96 — Claude Code's system prompt and tool
-      # definitions are what you pay for on the first request of every session,
-      # so the floor for any job is about a dollar and a real repair is $5-30.
-      # This limit is the only thing bounding that.
-      - CODE_AGENT_DAILY_LIMIT=${CODE_AGENT_DAILY_LIMIT:-3}
-      - CODE_AGENT_MAX_TURNS=${CODE_AGENT_MAX_TURNS:-80}
-      - CODE_AGENT_TIMEOUT_SEC=${CODE_AGENT_TIMEOUT_SEC:-2700}
-    volumes:
-      - ${CODE_AGENT_REPO_PATH:-/Users/wolfram/projects/librechat}:${CODE_AGENT_REPO_PATH:-/Users/wolfram/projects/librechat}
-      - /var/run/docker.sock:/var/run/docker.sock
-    # No working_dir override: the server itself lives at /app, and every command
-    # that must run inside the repo passes cwd explicitly (git.js -> run()).
-    expose:
-      - "3015"
     depends_on:
       - mongodb
     restart: unless-stopped

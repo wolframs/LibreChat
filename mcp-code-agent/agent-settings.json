@@ -1,13 +1,18 @@
 {
   "$comment": [
-    "Claude Code settings for the sandboxed session. Deny rules still apply under",
+    "Claude Code settings for the agent session. Deny rules still apply under",
     "--dangerously-skip-permissions; allow rules are what that flag makes moot.",
     "",
-    "This is a short list on purpose. The design stance here is reversibility over",
+    "This is a short list on purpose. The design stance is reversibility over",
     "prevention: a wrong edit costs a git revert, so the walls are only for the",
-    "things revert cannot undo — a leaked secret is out, a push is published, and a",
+    "things revert cannot undo \u2014 a leaked secret is out, a push is published, and a",
     "weakened supervisor makes every later job less trustworthy without anyone",
-    "noticing."
+    "noticing.",
+    "",
+    "The last group exists because this runs as the operator on their own Mac, so",
+    "Bash can reach the whole home directory. File tools are already confined to",
+    "the repo by the working directory; these cover the shell path to the secrets",
+    "that live outside it."
   ],
   "permissions": {
     "deny": [
@@ -23,7 +28,13 @@
       "Edit(./CHANGELOG-agent.md)",
       "Bash(git push:*)",
       "Bash(docker:*)",
-      "Bash(./scripts/deploy.sh:*)"
+      "Bash(./scripts/deploy.sh:*)",
+      "Read(~/Projects/.forgejo-env)",
+      "Read(~/.ssh/**)",
+      "Read(~/.aws/**)",
+      "Read(~/.config/gh/**)",
+      "Bash(cat ~/Projects/.forgejo-env:*)",
+      "Bash(cat ~/.ssh/*:*)"
     ]
   }
 }

@@ -233,6 +233,24 @@ if compose ps --services 2>/dev/null | grep -qx mcp-audio-ears; then
   esac
 fi
 
+# The code-agent sidecar is a HOST process, not a compose service, so it is
+# probed by hostname from inside api rather than by service name. A stopped
+# LaunchAgent is a warning, not a failure: the stack is fine without it.
+ca_body="$(compose exec -T api node -e '
+  fetch("http://host.docker.internal:3015/healthz")
+    .then((r) => r.json())
+    .then((j) => console.log(JSON.stringify(j)))
+    .catch((e) => { console.log("ERR " + (e.cause ? e.cause.code : e.message)); })
+' 2>/dev/null)" || ca_body="ERR exec failed"
+case "$ca_body" in
+  ERR*)  warn "mcp-code-agent not answering — $ca_body
+      start it with: launchctl load ~/Library/LaunchAgents/local.librechat.code-agent.plist" ;;
+  *'"agentAvailable":false'*)
+         warn "mcp-code-agent up but the claude CLI is not runnable from it — check PATH in the LaunchAgent"
+         echo "      $ca_body" ;;
+  *)     ok "mcp-code-agent $ca_body" ;;
+esac
+
 # Local features must be present in the DEPLOYED image, not just on disk. Each marker
 # corresponds to one local commit; a missing marker means the image predates it or was
 # built from the wrong tree.
