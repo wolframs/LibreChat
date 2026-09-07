@@ -1,4 +1,5 @@
 import { getDb } from './db.js';
+import { describeTokens } from './tokens.js';
 
 /**
  * A live page at /agent, next to /cost.
@@ -39,7 +40,7 @@ function card(job) {
     </header>
     <blockquote>${esc(job.premise)}</blockquote>
     ${job.notes?.length ? job.notes.map((n) => `<p class="note"><b>note</b> ${esc(n.from ?? '')}: ${esc(n.text)}</p>`).join('') : ''}
-    ${p && live ? `<p class="meta">turn ${p.turns}${p.maxTurns ? ` of ~${p.maxTurns}` : ''}</p>` : ''}
+    ${p && live ? `<p class="meta">turn ${p.turns}${p.maxTurns ? ` of ~${p.maxTurns}` : ''}${p.tokens ? ' · ' + esc(describeTokens(p.tokens)) : ''}</p>` : ''}
     ${p && live ? `<div class="progress">turn ${p.turns}${p.tools ? ` · ${p.tools} tool calls` : ''}
         ${p.lastTool ? `<code>${esc(p.lastTool)}</code>` : ''}
         ${p.files?.length ? `<div class="files">${p.files.map((f) => `<code>${esc(f)}</code>`).join(' ')}</div>` : ''}
@@ -49,7 +50,7 @@ function card(job) {
     ${job.commits?.length ? `<ul>${job.commits.map((c) => `<li><code>${esc(c.short)}</code> ${esc(c.subject)}</li>`).join('')}</ul>` : ''}
     ${job.deploy ? `<p class="deploy">deploy: ${esc(job.deploy)}</p>` : ''}
     ${job.revert ? `<p class="undo">undo: <code>${esc(job.revert)}</code></p>` : ''}
-    ${job.cost != null ? `<p class="meta">${job.elapsed ?? '?'}s · $${Number(job.cost).toFixed(4)}</p>` : ''}
+    ${job.usageLine ? `<p class="meta">${job.elapsed ?? '?'}s · ${esc(job.usageLine)}</p>` : ''}
   </article>`;
 }
 

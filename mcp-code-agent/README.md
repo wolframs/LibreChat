@@ -156,6 +156,7 @@ did, permanently, with no list to maintain.
 
 | Var | Default | Notes |
 |---|---|---|
+| `CODE_AGENT_MAX_TURNS` | `250` | A backstop, not a budget — 80 cut a real investigation off mid-thought. |
 | `CODE_AGENT_MODEL` | unset | Empty means whatever the installed Claude Code defaults to, which is usually right. |
 | `CODE_AGENT_DAILY_LIMIT` | `3` | Per user, per day. `0` disables. |
 | `MONGO_URI` | `mongodb://127.0.0.1:27017/LibreChat` | Loopback, via the compose port binding. |
@@ -164,17 +165,31 @@ did, permanently, with no list to maintain.
 | `CODE_AGENT_REPO_PATH` | `/Users/wolfram/projects/librechat` | Must be identical on host and in the container. |
 | `DEPLOY_BRANCH` | `local-features` | Preflight refuses anything else. |
 
-### Cost
+### Usage, not cost
 
-It runs on the operator's own Claude Code session, so this is subscription usage
-rather than a per-token bill against a key. For reference, the same trivial
-one-turn prompt measured $0.17 here against $0.96 through the marketplace.
+It runs on the operator's own Claude Code subscription, so `total_cost_usd` from
+the CLI is **not a bill**. `modelUsage[…].costBasis` says `"list"` — it is what
+the work would have cost at API list price had it gone through a key. Leading
+with that number invites reading money that was never spent.
 
-`CODE_AGENT_DAILY_LIMIT` (3) still exists, because a repair session is many turns
-and the point of a limit is to bound how much of the day's capacity one
+What a subscription actually consumes is tokens, and they are not one number:
+
+| | means |
+|---|---|
+| **out** | generation, the real work |
+| **cache-write** | new context being laid down |
+| **cache-read** | context reused, roughly a tenth the weight |
+| **in** | uncached input, usually tiny |
+
+So a run that looks enormous by cache-read is generally cheap, and one heavy on
+cache-write is not. `check_fix`, `/agent` and the changelog all report the
+breakdown, with the list-price figure last and labelled as notional.
+
+Live totals during a run are summed from each assistant message; the final
+figures come from the stream's `result` event, which is authoritative.
+
+`CODE_AGENT_DAILY_LIMIT` (3) still bounds how much of a day's capacity one
 conversation can spend.
-
-Job records live in `mcp_code_agent_jobs` either way.
 
 ### Health
 
