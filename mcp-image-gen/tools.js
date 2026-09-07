@@ -262,6 +262,13 @@ async function logImageGenerationUsage(userId, prompt, model, usage, meta = {}) 
  * the model confabulating a description to match, or gets it filing a fault
  * against the stack. Both happened. State what is known and hand the model the
  * honest option.
+ *
+ * "You may or may not be able to see it" alone was not enough: a model given
+ * that fork and no boundary resolves it as "the stack is broken" and escalates,
+ * which is how the 2026-09-07 report happened a second time. So the text now
+ * names where LibreChat's responsibility ends. That the image is in the outbound
+ * request is not an assertion any more —
+ * `packages/api/src/mcp/__tests__/delivery.test.ts` holds the whole chain down.
  */
 function buildResultSummary({
   fileId,
@@ -287,11 +294,13 @@ function buildResultSummary({
   } else {
     lines.push(
       'Image generated successfully and displayed in the chat — the user can see it. It was ' +
-        'also attached to this tool result, but some gateways strip images out of tool results ' +
-        'in transit, so you may or may not be able to see it yourself. If you cannot, say so ' +
-        'plainly and describe what you asked for rather than what you got; do not invent ' +
-        'detail. Either way the generation succeeded. Do NOT call generate_image again to ' +
-        'retry this; every call is billed and counts against the daily limit.',
+        'also attached to this tool result, and LibreChat does put it in the request it sends; ' +
+        'some gateways then strip images out of tool results in transit, so you may or may not ' +
+        'be able to see it yourself. If you cannot, that is a property of the endpoint this ' +
+        'conversation is running on rather than a fault in the stack — say so plainly, ' +
+        'describe what you asked for rather than what you got, and do not invent detail. ' +
+        'Either way the generation succeeded. Do NOT call generate_image again to retry this; ' +
+        'every call is billed and counts against the daily limit.',
     );
   }
 

@@ -98,17 +98,22 @@ Measured 2026-09-07 on `Surplus (Claude)` / `claude-fable-5`. The tool returned 
 picture in the chat. The model's next turn was billed **454 new input tokens**, where that
 image alone is ~3.3k on Anthropic's own arithmetic. It never arrived.
 
-It is not LibreChat dropping it. A `StandardGraph` run with a fake model capturing exactly
-what goes on the wire puts the artifact on the tool message as `image_url` and
-`@langchain/anthropic` converts it to a base64 `image` block inside the `tool_result` —
-under baseline, with thinking on, with history, and with pruning. That gateway is already
-known to rewrite request bodies in transit (see the `promptCacheTtl` note in
-`librechat.yaml`: it strips our `cache_control` TTL and stamps its own), and an image
-*inside a tool result* is the newest and least portable part of the Anthropic shape — the
-OpenAI tool-message shape has no room for one at all, so any seller reached through an
-OpenAI-shaped adapter must drop it.
+It is not LibreChat dropping it. This was measured once by hand and then, when a second
+model filed the same report against the stack on 2026-09-07, pinned as a test:
+`packages/api/src/mcp/__tests__/delivery.test.ts` drives a real MCP image result through
+`formatToolContent`, a real `content_and_artifact` tool and the agents package's own
+merge, and requires the base64 image out the far end — inside the `tool_result` on
+Anthropic, as a separate user message on the OpenAI-shaped providers. **Do not
+re-investigate this by reading the path. Run the test.** If it is green the image is in
+the outbound request and the loss is downstream.
 
-Two consequences worth knowing:
+That gateway is already known to rewrite request bodies in transit (see the
+`promptCacheTtl` note in `librechat.yaml`: it strips our `cache_control` TTL and stamps
+its own), and an image *inside a tool result* is the newest and least portable part of the
+Anthropic shape — the OpenAI tool-message shape has no room for one at all, so any seller
+reached through an OpenAI-shaped adapter must drop it.
+
+Three consequences worth knowing:
 
 - The **OpenAI-compatible row is the more robust one for images**. On `provider: openai`
   LibreChat sends tool-result images as a *separate user message*
@@ -116,7 +121,13 @@ Two consequences worth knowing:
   `provider: anthropic` puts them inside the `tool_result`. If an image has to reach the
   model, prefer the plain `Surplus` row over `Surplus (Claude)`.
 - The result text must not assert that the model can see the image, because on this
-  gateway that is false and the model can tell. Item 9 above.
+  gateway that is false and the model can tell. Item 9 above. It must also say where
+  LibreChat's responsibility *ends*, or the model resolves "you may or may not see it" as
+  "the stack is broken" and escalates — which is what produced the second report.
+- Not every provider even gets that far. `formatToolContent` recognizes providers that
+  `StandardGraph` has no merge branch for (DeepSeek, `ollama`), and there the artifact is
+  saved for the user and never shown to the model at all. `parsers.ts` now says so in the
+  result text; that is a LibreChat-side gap, not a gateway one.
 
 ## Route selection
 
