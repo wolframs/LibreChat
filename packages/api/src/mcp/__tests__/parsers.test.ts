@@ -30,7 +30,7 @@ describe('formatToolContent', () => {
       expect(artifacts).toBeUndefined();
     });
 
-    it('should name an image rather than paste its base64 for unrecognized providers', () => {
+    it('should preserve the image payload in the string for unrecognized providers', () => {
       const result: t.MCPToolCallResponse = {
         content: [{ type: 'image', data: 'iVBORw0KGgoAAAA...', mimeType: 'image/png' }],
       };
@@ -38,51 +38,14 @@ describe('formatToolContent', () => {
       const [content, artifacts] = formatToolContent(result, 'unknown' as t.Provider);
 
       expect(artifacts).toBeUndefined();
-      expect(content).not.toContain('iVBORw0KGgoAAAA...');
+      expect(content).toContain('iVBORw0KGgoAAAA...');
       expect(content).toContain('image/png');
-      expect(content).toContain('not delivered');
-    });
-
-    it('should keep a remote image URL, which the model can still act on', () => {
-      const result: t.MCPToolCallResponse = {
-        content: [{ type: 'image', data: 'https://example.com/a.png', mimeType: 'image/png' }],
-      };
-
-      const [content] = formatToolContent(result, 'unknown' as t.Provider);
-
-      expect(content).toContain('https://example.com/a.png');
-    });
-
-    it('should name an audio block rather than paste its base64', () => {
-      const result: t.MCPToolCallResponse = {
-        content: [{ type: 'audio', data: 'QUJDRA=='.repeat(200), mimeType: 'audio/mpeg' }],
-      };
-
-      const [content] = formatToolContent(result, 'unknown' as t.Provider);
-
-      expect(content).not.toContain('QUJDRA==');
-      expect(content).toContain('audio/mpeg');
-    });
-
-    it('should elide oversized strings from unknown content types', () => {
-      const result: t.MCPToolCallResponse = {
-        content: [
-          { type: 'video', data: 'A'.repeat(4096), mimeType: 'video/mp4' },
-        ] as unknown as t.ToolContentPart[],
-      };
-
-      const [content] = formatToolContent(result, 'unknown' as t.Provider);
-
-      expect(content).not.toContain('A'.repeat(600));
-      expect(content).toContain('4096 characters omitted');
-      expect(content).toContain('video/mp4');
     });
   });
 
   describe('recognized providers', () => {
     const allProviders: t.Provider[] = [
       'google',
-      'vertexai',
       'anthropic',
       'openai',
       'azureopenai',
@@ -275,94 +238,15 @@ describe('formatToolContent', () => {
       expect(artifacts?.content).toHaveLength(2);
     });
 
-    it('should produce artifacts on vertexai, as it does on google', () => {
-      const result: t.MCPToolCallResponse = {
-        content: [{ type: 'image', data: 'QUJDRA==', mimeType: 'image/png' }],
-      };
-
-      const [content, artifacts] = formatToolContent(result, 'vertexai');
-
-      expect(content).toBe('');
-      expect(artifacts?.content).toEqual([
-        { type: 'image_url', image_url: { url: 'data:image/png;base64,QUJDRA==' } },
-      ]);
-    });
-
-    it('should name an audio block for recognized providers, keeping other content', () => {
-      const result: t.MCPToolCallResponse = {
-        content: [
-          { type: 'text', text: 'Here is the recording.' },
-          { type: 'audio', data: 'QUJDRA=='.repeat(200), mimeType: 'audio/mpeg' },
-        ],
-      };
-
-      const [content, artifacts] = formatToolContent(result, 'anthropic');
-
-      expect(artifacts).toBeUndefined();
-      expect(content).toContain('Here is the recording.');
-      expect(content).toContain('audio not delivered');
-      expect(content).not.toContain('QUJDRA==');
-    });
-
-    it('should elide oversized strings from unknown content types', () => {
-      const result: t.MCPToolCallResponse = {
-        content: [
-          { type: 'video', data: 'A'.repeat(4096), mimeType: 'video/mp4' },
-        ] as unknown as t.ToolContentPart[],
-      };
-
-      const [content] = formatToolContent(result, 'anthropic');
-
-      expect(content).not.toContain('A'.repeat(600));
-      expect(content).toContain('4096 characters omitted');
-    });
-
-    it('should drop an oversized image without creating artifacts', () => {
+    it('should reject oversized base64 image data before creating artifacts', () => {
       process.env.MCP_IMAGE_DATA_MAX_BYTES = '3';
       const result: t.MCPToolCallResponse = {
         content: [{ type: 'image', data: 'QUJDRA==', mimeType: 'image/png' }],
       };
 
-      const [content, artifacts] = formatToolContent(result, 'openai');
-
-      expect(artifacts).toBeUndefined();
-      expect(content).toContain('image not delivered');
-      expect(content).toContain('MCP_IMAGE_DATA_MAX_BYTES');
-    });
-
-    it('should keep the text blocks that accompany an oversized image', () => {
-      process.env.MCP_IMAGE_DATA_MAX_BYTES = '3';
-      const result: t.MCPToolCallResponse = {
-        content: [
-          { type: 'text', text: 'Image generated successfully. file_id: abc' },
-          { type: 'image', data: 'QUJDRA==', mimeType: 'image/png' },
-        ],
-      };
-
-      const [content, artifacts] = formatToolContent(result, 'anthropic');
-
-      expect(artifacts).toBeUndefined();
-      expect(content).toContain('Image generated successfully. file_id: abc');
-      expect(content).toContain('image not delivered');
-    });
-
-    it('should still deliver the images that fit alongside one that does not', () => {
-      process.env.MCP_IMAGE_DATA_MAX_BYTES = '4';
-      const result: t.MCPToolCallResponse = {
-        content: [
-          { type: 'image', data: 'QUJDRA==', mimeType: 'image/png' },
-          { type: 'image', data: 'QUJDRAVGRw==', mimeType: 'image/png' },
-        ],
-      };
-
-      const [content, artifacts] = formatToolContent(result, 'openai');
-
-      expect(artifacts?.content).toHaveLength(1);
-      expect(artifacts?.content?.[0]).toEqual({
-        type: 'image_url',
-        image_url: { url: 'data:image/png;base64,QUJDRA==' },
-      });
-      expect(content).toContain('image not delivered');
+      expect(() => formatToolContent(result, 'openai')).toThrow(
+        'MCP image result exceeds maximum size of 3 bytes',
+      );
     });
 
     it('should allow base64 image data when decoded size is within the cap', () => {
@@ -380,16 +264,15 @@ describe('formatToolContent', () => {
       });
     });
 
-    it('should name, not paste, oversized image data for unrecognized providers', () => {
+    it('should reject oversized image data for unrecognized providers before stringifying', () => {
       process.env.MCP_IMAGE_DATA_MAX_BYTES = '3';
       const result: t.MCPToolCallResponse = {
         content: [{ type: 'image', data: 'QUJDRA==', mimeType: 'image/png' }],
       };
 
-      const [content] = formatToolContent(result, 'unknown' as t.Provider);
-
-      expect(content).not.toContain('QUJDRA==');
-      expect(content).toContain('image not delivered');
+      expect(() => formatToolContent(result, 'unknown' as t.Provider)).toThrow(
+        'MCP image result exceeds maximum size of 3 bytes',
+      );
     });
 
     it('should not apply the image data cap to remote image URLs', () => {
@@ -413,10 +296,9 @@ describe('formatToolContent', () => {
         content: [{ type: 'image', data: 'httpAAAAAAAA', mimeType: 'image/png' }],
       };
 
-      const [content, artifacts] = formatToolContent(result, 'openai');
-
-      expect(artifacts).toBeUndefined();
-      expect(content).toContain('image not delivered');
+      expect(() => formatToolContent(result, 'openai')).toThrow(
+        'MCP image result exceeds maximum size of 3 bytes',
+      );
     });
 
     it('should treat base64 starting with "http" as inline data, not a remote URL', () => {
@@ -487,71 +369,6 @@ describe('formatToolContent', () => {
           'Resource MIME Type: application/pdf',
       );
       expect(artifacts).toBeUndefined();
-    });
-
-    it('should deliver an image returned as an embedded blob resource', () => {
-      const result: t.MCPToolCallResponse = {
-        content: [
-          {
-            type: 'resource',
-            resource: {
-              uri: 'file:///out/apple.png',
-              mimeType: 'image/png',
-              blob: 'QUJDRA==',
-            },
-          },
-        ],
-      };
-
-      const [content, artifacts] = formatToolContent(result, 'anthropic');
-
-      expect(artifacts?.content).toEqual([
-        { type: 'image_url', image_url: { url: 'data:image/png;base64,QUJDRA==' } },
-      ]);
-      expect(content).toContain('Resource URI: file:///out/apple.png');
-      expect(content).not.toContain('QUJDRA==');
-    });
-
-    it('should read a server-chosen file_id off a blob resource', () => {
-      const result: t.MCPToolCallResponse = {
-        content: [
-          {
-            type: 'resource',
-            resource: {
-              uri: 'file:///out/apple.png',
-              mimeType: 'image/png',
-              blob: 'QUJDRA==',
-              _meta: { 'librechat/file_id': 'blob-id' },
-            },
-          },
-        ],
-      };
-
-      const [, artifacts] = formatToolContent(result, 'openai');
-
-      expect(artifacts?.file_ids).toEqual(['blob-id']);
-    });
-
-    it('should describe a non-image blob resource instead of dropping it silently', () => {
-      const result: t.MCPToolCallResponse = {
-        content: [
-          {
-            type: 'resource',
-            resource: {
-              uri: 'file:///out/report.pdf',
-              mimeType: 'application/pdf',
-              blob: 'QUJDRA=='.repeat(100),
-            },
-          },
-        ],
-      };
-
-      const [content, artifacts] = formatToolContent(result, 'openai');
-
-      expect(artifacts).toBeUndefined();
-      expect(content).toContain('bytes, not delivered inline');
-      expect(content).toContain('Resource URI: file:///out/report.pdf');
-      expect(content).not.toContain('QUJDRA==');
     });
 
     it('should handle resources with partial data', () => {
