@@ -38,6 +38,8 @@ function card(job) {
         · ${age < 90 ? age + 's' : Math.round(age / 60) + 'm'}${job.sender ? ' · ' + esc(job.sender) : ''}</time>
     </header>
     <blockquote>${esc(job.premise)}</blockquote>
+    ${job.notes?.length ? job.notes.map((n) => `<p class="note"><b>note</b> ${esc(n.from ?? '')}: ${esc(n.text)}</p>`).join('') : ''}
+    ${p && live ? `<p class="meta">turn ${p.turns}${p.maxTurns ? ` of ~${p.maxTurns}` : ''}</p>` : ''}
     ${p && live ? `<div class="progress">turn ${p.turns}${p.tools ? ` · ${p.tools} tool calls` : ''}
         ${p.lastTool ? `<code>${esc(p.lastTool)}</code>` : ''}
         ${p.files?.length ? `<div class="files">${p.files.map((f) => `<code>${esc(f)}</code>`).join(' ')}</div>` : ''}
@@ -84,6 +86,8 @@ blockquote{margin:.6rem 0;padding-left:.8rem;border-left:2px solid var(--border)
 .progress code{background:#0d1117;border:1px solid var(--border);border-radius:3px;padding:.05rem .35rem;color:var(--text)}
 .files{margin-top:.35rem;display:flex;gap:.3rem;flex-wrap:wrap}
 .say{color:var(--dim);font-style:italic;margin:.5rem 0}
+.note{background:#1c2128;border-left:2px solid #d29922;padding:.4rem .7rem;margin:.5rem 0;font-size:.9rem}
+.note b{color:#d29922}
 pre{white-space:pre-wrap;background:#0d1117;border:1px solid var(--border);border-radius:4px;padding:.7rem;max-height:22rem;overflow:auto}
 ul{margin:.5rem 0;padding-left:1.1rem}
 .deploy,.undo,.meta{color:var(--dim);font-size:.85rem;margin:.35rem 0 0}
