@@ -4,7 +4,7 @@ import { preflight, startJob, getJob, listJobs, activeJobId, MODEL } from './run
 import { git } from './git.js';
 import { NO_CHANGE_NOTE } from './prompt.js';
 
-const DAILY_LIMIT = parseInt(process.env.CODE_AGENT_DAILY_LIMIT ?? '5', 10);
+const DAILY_LIMIT = parseInt(process.env.CODE_AGENT_DAILY_LIMIT ?? '3', 10);
 
 const text = (t) => ({ content: [{ type: 'text', text: t }] });
 const fail = (t) => ({ isError: true, content: [{ type: 'text', text: t }] });
@@ -24,9 +24,6 @@ async function checkLimit(userId) {
 
 export async function handleRequestFix({ premise }, context) {
   try {
-    if (!process.env.ANTHROPIC_API_KEY) {
-      return fail('ANTHROPIC_API_KEY is not set on the code-agent server.');
-    }
     if (!premise || premise.trim().length < 8) {
       return fail('Say what you noticed — a sentence is enough.');
     }

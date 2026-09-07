@@ -3,12 +3,26 @@ import { execFile } from 'child_process';
 export const REPO = process.env.REPO_PATH || '/Users/wolfram/projects/librechat';
 export const BRANCH = process.env.DEPLOY_BRANCH || 'local-features';
 
-export function run(cmd, args, { cwd = REPO, timeout = 60_000, env } = {}) {
+export function run(cmd, args, { cwd = REPO, timeout = 60_000, env, uid, gid } = {}) {
   return new Promise((resolve) => {
     execFile(
       cmd,
       args,
-      { cwd, timeout, maxBuffer: 64 * 1024 * 1024, env: { ...process.env, ...env } },
+      {
+        cwd,
+        timeout,
+        maxBuffer: 64 * 1024 * 1024,
+        env: { ...process.env, ...env },
+        // Node applies these to the child directly, so no `su`/`setpriv` wrapper
+        // and therefore no shell to escape a multi-thousand-character prompt through.
+        ...(uid != null ? { uid, gid } : {}),
+        // stdin closed, stdout/stderr piped so execFile can still collect them.
+        // Without this the Claude CLI waits on an inherited stdin that nothing
+        // will ever close and burns its first seconds warning about it; with a
+        // long-running agent that is survivable, but it is noise in every log
+        // and a real hang risk for any child that blocks on input.
+        stdio: ['ignore', 'pipe', 'pipe'],
+      },
       (err, stdout, stderr) => resolve({ err, stdout: stdout || '', stderr: stderr || '' }),
     );
   });

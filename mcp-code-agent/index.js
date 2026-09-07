@@ -4,7 +4,7 @@ import { SSEServerTransport } from '@modelcontextprotocol/sdk/server/sse.js';
 import { z } from 'zod';
 import { AsyncLocalStorage } from 'async_hooks';
 import { handleRequestFix, handleCheckFix, handleListFixes } from './tools.js';
-import { activeJobId, MODEL } from './runner.js';
+import { activeJobId, MODEL, agentInfo } from './runner.js';
 import { REPO, BRANCH, currentBranch, porcelain, head } from './git.js';
 
 const app = express();
@@ -77,14 +77,17 @@ app.get('/healthz', async (_req, res) => {
   res.json({
     ok: true,
     model: MODEL,
-    hasKey: Boolean(process.env.ANTHROPIC_API_KEY),
+    ...agentInfo(),
     repo: REPO,
     branch,
     expectedBranch: BRANCH,
     clean: dirty === '',
     head: sha.slice(0, 9),
     activeJob: activeJobId(),
-    dailyLimit: parseInt(process.env.CODE_AGENT_DAILY_LIMIT ?? '5', 10),
+    // Wrapper runs as root for the docker socket; the agent must not, or Claude
+    // Code refuses --dangerously-skip-permissions and every job dies in 3s.
+    wrapperUid: process.getuid(),
+    dailyLimit: parseInt(process.env.CODE_AGENT_DAILY_LIMIT ?? '3', 10),
     sessions: transports.size,
   });
 });
@@ -117,5 +120,7 @@ app.listen(PORT, async () => {
   console.log(`MCP code-agent server on port ${PORT}`);
   console.log(`  model:  ${MODEL}`);
   console.log(`  repo:   ${REPO} (${await currentBranch()} @ ${(await head()).slice(0, 9)})`);
-  console.log(`  key:    ${process.env.ANTHROPIC_API_KEY ? 'present' : 'MISSING'}`);
+  const info = agentInfo();
+  console.log(`  key:    ${info.keyOk ? 'ok' : 'MISSING OR INVALID'} -> ${info.baseUrl}`);
+  console.log(`  agent:  uid ${info.agentUid} (wrapper is uid ${process.getuid()})`);
 });

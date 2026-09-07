@@ -178,11 +178,27 @@ services:
     environment:
       - PORT=3015
       - MONGO_URI=mongodb://mongodb:27017/LibreChat
-      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY:-}
+      # NOT ${ANTHROPIC_API_KEY}: in this stack that variable is the literal
+      # string "user_provided", LibreChat's sentinel for "each user supplies
+      # their own key in the UI". Passing it through gives the agent a 13-byte
+      # key and a 401 three seconds into every job. The agent needs a real
+      # credential of its own, and Surplus speaks the Anthropic protocol, so it
+      # runs on marketplace credit by default rather than needing a new one.
+      - CODE_AGENT_ANTHROPIC_KEY=${CODE_AGENT_ANTHROPIC_KEY:-${SURPLUS_API_KEY:-}}
+      # Must NOT end in /v1 — the Anthropic client appends /v1/messages itself.
+      # Empty means api.anthropic.com.
+      - CODE_AGENT_BASE_URL=${CODE_AGENT_BASE_URL:-https://api.surplusintelligence.ai/anthropic}
       - REPO_PATH=${CODE_AGENT_REPO_PATH:-/Users/wolfram/projects/librechat}
       - DEPLOY_BRANCH=${DEPLOY_BRANCH:-local-features}
-      - CODE_AGENT_MODEL=${CODE_AGENT_MODEL:-opus}
-      - CODE_AGENT_DAILY_LIMIT=${CODE_AGENT_DAILY_LIMIT:-5}
+      # Dotted id, because that is what the marketplace calls it; the bare
+      # "opus" alias resolves to Anthropic's canonical spelling, which does not
+      # exist there and fails like a nonexistent model.
+      - CODE_AGENT_MODEL=${CODE_AGENT_MODEL:-claude-opus-4.8}
+      # A one-word turn measured at $0.96 — Claude Code's system prompt and tool
+      # definitions are what you pay for on the first request of every session,
+      # so the floor for any job is about a dollar and a real repair is $5-30.
+      # This limit is the only thing bounding that.
+      - CODE_AGENT_DAILY_LIMIT=${CODE_AGENT_DAILY_LIMIT:-3}
       - CODE_AGENT_MAX_TURNS=${CODE_AGENT_MAX_TURNS:-80}
       - CODE_AGENT_TIMEOUT_SEC=${CODE_AGENT_TIMEOUT_SEC:-2700}
     volumes:

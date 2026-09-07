@@ -24,6 +24,48 @@ const DEPLOY_TIMEOUT_MS = parseInt(process.env.CODE_AGENT_DEPLOY_TIMEOUT_SEC ?? 
 const CONTEXT_MESSAGES = parseInt(process.env.CODE_AGENT_CONTEXT_MESSAGES ?? '12', 10);
 
 /**
+ * The uid the agent itself runs as, which is not the uid this wrapper runs as.
+ *
+ * Claude Code refuses `--dangerously-skip-permissions` outright when it is root:
+ * `--dangerously-skip-permissions cannot be used with root/sudo privileges for
+ * security reasons`. The container is root because the *wrapper* needs the docker
+ * socket to run deploy.sh — so the two halves need different privileges, and the
+ * agent gets the lesser one.
+ *
+ * The bind-mounted repo is presented as root-owned by OrbStack's virtiofs but is
+ * writable by any uid, which is what makes this work at all; on a stricter mount
+ * this would need the uid to match the owner instead.
+ */
+const AGENT_UID = parseInt(process.env.CODE_AGENT_UID ?? '1000', 10);
+const AGENT_GID = parseInt(process.env.CODE_AGENT_GID ?? '1000', 10);
+const AGENT_HOME = process.env.CODE_AGENT_HOME || '/home/node';
+
+/**
+ * The agent's own credential, deliberately NOT `ANTHROPIC_API_KEY`.
+ *
+ * On this stack that variable holds the literal string "user_provided" —
+ * LibreChat's sentinel meaning each user supplies their own key through the UI.
+ * It is 13 bytes, it is not a key, and passing it through produces a 401 three
+ * seconds into every job with nothing on the wire to suggest the problem is
+ * configuration rather than code. `keyProblem()` states it instead.
+ */
+const AGENT_KEY = process.env.CODE_AGENT_ANTHROPIC_KEY || '';
+const AGENT_BASE_URL = process.env.CODE_AGENT_BASE_URL || '';
+
+export function keyProblem() {
+  if (!AGENT_KEY) return 'CODE_AGENT_ANTHROPIC_KEY is not set on the code-agent server.';
+  if (AGENT_KEY === 'user_provided') {
+    return 'CODE_AGENT_ANTHROPIC_KEY is the literal string "user_provided" — that is ' +
+      "LibreChat's per-user-key sentinel, not a credential. Point it at a real key.";
+  }
+  return null;
+}
+
+export function agentInfo() {
+  return { keyOk: keyProblem() == null, baseUrl: AGENT_BASE_URL || 'api.anthropic.com', agentUid: AGENT_UID };
+}
+
+/**
  * One job at a time, process-wide.
  *
  * The agent edits the real working tree — that is what makes "it is actually
@@ -142,6 +184,21 @@ async function conversationContext(conversationId) {
  * user *what* is in the way, not just that something is.
  */
 export async function preflight() {
+  // Cheap guard for a failure that otherwise only shows up after a job has been
+  // filed, a conversation dropped, and a user has waited: Claude Code exits
+  // immediately when asked to skip permissions as root, and the whole run is
+  // wasted. It costs nothing to know this before spawning anything.
+  if (AGENT_UID === 0) {
+    return {
+      ok: false,
+      reason:
+        'The agent would run as root, and Claude Code refuses ' +
+        '--dangerously-skip-permissions as root. Set CODE_AGENT_UID to a non-root uid ' +
+        '(1000 is the `node` user in this image).',
+    };
+  }
+  const keyIssue = keyProblem();
+  if (keyIssue) return { ok: false, reason: keyIssue };
   if (activeJob) {
     return { ok: false, reason: `A fix is already running (job ${activeJob}). Wait for it.` };
   }
@@ -229,7 +286,17 @@ async function execute(jobId, { premise, userId }) {
   const started = Date.now();
   const { err, stdout, stderr } = await run('claude', claudeArgs(prompt), {
     timeout: AGENT_TIMEOUT_MS,
-    env: { ANTHROPIC_API_KEY: process.env.ANTHROPIC_API_KEY || '' },
+    uid: AGENT_UID,
+    gid: AGENT_GID,
+    // HOME must follow the uid: Claude Code writes its own config and session
+    // state there, and /root is not writable by the dropped user.
+    env: {
+      ANTHROPIC_API_KEY: AGENT_KEY,
+      // Unset means api.anthropic.com. Must not end in /v1: the client appends
+      // /v1/messages itself, the same trap as a `provider: anthropic` yaml row.
+      ...(AGENT_BASE_URL ? { ANTHROPIC_BASE_URL: AGENT_BASE_URL } : {}),
+      HOME: AGENT_HOME,
+    },
   });
   const elapsed = Math.round((Date.now() - started) / 1000);
 

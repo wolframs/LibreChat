@@ -127,17 +127,53 @@ did, permanently, with no list to maintain.
 
 | Var | Default | Notes |
 |---|---|---|
-| `ANTHROPIC_API_KEY` | — | Required. Separate from `OPENROUTER_KEY`; this is real per-token spend. |
-| `CODE_AGENT_MODEL` | `opus` | Passed to `claude --model`. |
-| `CODE_AGENT_DAILY_LIMIT` | `5` | Per user, per day. `0` disables. |
+| `CODE_AGENT_ANTHROPIC_KEY` | `${SURPLUS_API_KEY}` | Required. **Not** `ANTHROPIC_API_KEY` — see below. |
+| `CODE_AGENT_BASE_URL` | Surplus `/anthropic` | Must not end in `/v1`; the client appends `/v1/messages`. Empty = api.anthropic.com. |
+| `CODE_AGENT_MODEL` | `claude-opus-4.8` | Dotted id, because that is the marketplace's spelling. |
+| `CODE_AGENT_UID` / `_GID` | `1000` / `1000` | The uid the agent runs as. Must not be 0. |
+| `CODE_AGENT_DAILY_LIMIT` | `3` | Per user, per day. `0` disables. |
 | `CODE_AGENT_MAX_TURNS` | `80` | `claude --max-turns`. |
 | `CODE_AGENT_TIMEOUT_SEC` | `2700` | Wall clock for one session. |
 | `CODE_AGENT_REPO_PATH` | `/Users/wolfram/projects/librechat` | Must be identical on host and in the container. |
 | `DEPLOY_BRANCH` | `local-features` | Preflight refuses anything else. |
 
-Spend lands in `mcp_code_agent_jobs`, and like the other two sidecars it is
-**invisible to `/cost`**. It is also by far the most expensive of the three: an
-image is $0.01, a listen ~$0.016, a repair session is dollars.
+### Two credentials that are not what they look like
+
+**`ANTHROPIC_API_KEY` on this stack is the literal string `user_provided`** —
+LibreChat's sentinel meaning each user supplies their own key through the UI. It
+is 13 bytes, it is not a key, and passing it to the agent produces a 401 three
+seconds into every job with nothing on the wire to suggest the problem is
+configuration rather than code. Hence the separate `CODE_AGENT_ANTHROPIC_KEY`,
+and `preflight` refusing that exact string by name.
+
+**The wrapper runs as root and the agent must not.** Claude Code exits
+immediately with *"--dangerously-skip-permissions cannot be used with root/sudo
+privileges for security reasons"*. The container is root because the wrapper
+needs the docker socket for `deploy.sh`, so the agent is dropped to uid 1000 via
+`execFile`'s `uid`/`gid` — no `su` wrapper, therefore no shell to escape a
+multi-thousand-character prompt through. `git config` is set for **both** uids in
+the Dockerfile; configure only `/root` and the agent's commits fail with "please
+tell me who you are". `stdio: ['ignore', …]` closes the child's stdin, or the CLI
+waits on an inherited one that nothing will ever close.
+
+`/healthz` reports `keyOk`, `baseUrl`, `agentUid` and `wrapperUid` so all of that
+is visible without filing a job.
+
+### Cost
+
+Measured on Surplus, 2026-09-07: **a single one-word turn cost $0.96.** Claude
+Code sends a large system prompt and full tool definitions on the first request,
+and that is what you are paying for — later turns in the same session are far
+cheaper because of prompt caching, but the floor for *any* job is around a
+dollar. A real repair is plausibly $5–30.
+
+That makes this by far the most expensive thing on the stack: an image is $0.01,
+an audio listen ~$0.016. `CODE_AGENT_DAILY_LIMIT` defaults to **3** for that
+reason, and it is the only thing bounding the spend.
+
+Spend draws down the **Surplus buyer credit**, so it does show up in `/cost`'s
+credit-remaining card — but not as transactions, and not attributed to this
+sidecar. Run out and the gateway answers 402 mid-job.
 
 ## Turning it on
 

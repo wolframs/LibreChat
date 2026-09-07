@@ -28,9 +28,17 @@ COPY . .
 # The identity matters: every commit this container makes is authored by
 # "LibreChat code-agent", so `git log --author` separates what a model changed
 # from what a person did, forever, without anyone having to maintain a list.
+# ...and it has to be set for BOTH uids. The wrapper runs as root (it needs the
+# docker socket for deploy.sh) while the agent itself is dropped to `node`,
+# because Claude Code refuses --dangerously-skip-permissions as root. Configure
+# only /root and the agent's own commits fail with "please tell me who you are".
 RUN git config --global --add safe.directory '*' \
  && git config --global user.name 'LibreChat code-agent' \
- && git config --global user.email 'code-agent@librechat.local'
+ && git config --global user.email 'code-agent@librechat.local' \
+ && su node -s /bin/sh -c "git config --global --add safe.directory '*' \
+      && git config --global user.name 'LibreChat code-agent' \
+      && git config --global user.email 'code-agent@librechat.local'" \
+ && mkdir -p /home/node/.claude && chown -R node:node /home/node
 
 EXPOSE 3015
 CMD ["node", "index.js"]
