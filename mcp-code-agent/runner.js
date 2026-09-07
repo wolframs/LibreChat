@@ -19,6 +19,7 @@ import {
   revertCommand,
 } from './git.js';
 import { renderEntry, writeEntry } from './changelog.js';
+import { addTokens, tokensFrom, describeTokens } from './tokens.js';
 import fs from 'fs/promises';
 import os from 'os';
 
@@ -285,7 +286,16 @@ function runAgent(prompt, onProgress) {
       stdio: ['ignore', 'pipe', 'pipe'],
     });
 
-    const progress = { turns: 0, tools: 0, lastTool: null, files: [], lastText: null, phase: 'starting' };
+    const progress = {
+      turns: 0,
+      maxTurns: MAX_TURNS,
+      tools: 0,
+      lastTool: null,
+      files: [],
+      lastText: null,
+      tokens: null,
+      phase: 'starting',
+    };
     let stderr = '';
     let buffer = '';
     let result = null;
@@ -303,6 +313,7 @@ function runAgent(prompt, onProgress) {
         progress.model = event.model ?? null;
       } else if (event.type === 'assistant') {
         progress.turns += 1;
+        progress.tokens = addTokens(progress.tokens, event.message?.usage);
         for (const part of event.message?.content ?? []) {
           if (part.type === 'text' && part.text?.trim()) {
             progress.lastText = part.text.trim().slice(-400);
@@ -321,7 +332,7 @@ function runAgent(prompt, onProgress) {
         result = event;
         progress.phase = 'finishing';
       }
-      onProgress({ ...progress, files: [...progress.files] });
+      onProgress({ ...progress, files: [...progress.files], tokens: progress.tokens ? { ...progress.tokens } : null });
     };
 
     child.stdout.on('data', (chunk) => {
@@ -411,6 +422,11 @@ async function execute(jobId, { premise, userId }) {
 
   const report = result?.result || '';
   const cost = result?.total_cost_usd ?? null;
+  // The result event's own usage is authoritative; the per-message sum is only
+  // there so a watcher sees movement before the run ends.
+  const tokens = tokensFrom(result?.usage);
+  const modelName = Object.keys(result?.modelUsage ?? {})[0] ?? null;
+  const usageLine = describeTokens(tokens, { cost, model: modelName });
   const err = code !== 0 || result?.is_error ? { code, killed: timedOut } : null;
 
   // The stream's final event says exactly why it stopped; `exit 1` says nothing
@@ -441,6 +457,8 @@ async function execute(jobId, { premise, userId }) {
         ((stderr || '').trim() ? `\n\n${stderr.trim().slice(-1200)}` : ''),
       stoppedBecause: result?.subtype ?? null,
       cost,
+      tokens,
+      usageLine,
       elapsed,
     });
     return;
@@ -461,9 +479,10 @@ async function execute(jobId, { premise, userId }) {
       diffstat: '',
       tests: 'n/a',
       deploy: 'not needed — no change',
+      usageLine,
     });
     await writeEntry(entry, jobId);
-    await finish(jobId, { status: 'no_change', summary: report, cost, elapsed, commits: [] });
+    await finish(jobId, { status: 'no_change', summary: report, cost, tokens, usageLine, elapsed, commits: [] });
     return;
   }
 
@@ -496,6 +515,7 @@ async function execute(jobId, { premise, userId }) {
       diffstat: stat,
       tests: tests.text,
       deploy: 'not attempted — tests failed',
+      usageLine,
     });
     await writeEntry(entry, jobId);
     await finish(jobId, {
@@ -504,6 +524,8 @@ async function execute(jobId, { premise, userId }) {
         `${report}\n\nThe wrapper re-ran the tests before deploying and they failed, so ` +
         `nothing was deployed${reverted.err ? ' AND THE REVERT FAILED — the stack needs a human' : ' and the commits were reverted'}.\n\n${tests.text}`,
       cost,
+      tokens,
+      usageLine,
       elapsed,
       commits,
     });
@@ -553,11 +575,14 @@ async function execute(jobId, { premise, userId }) {
     diffstat: stat,
     tests: 'run by the agent; see its report',
     deploy: deployResult.text,
+    usageLine,
   });
   await writeEntry(entry, jobId);
 
   await finish(jobId, {
     status,
+    tokens,
+    usageLine,
     summary: (cutOff ? `**${cutOff} What follows is the work it had committed before that.**\n\n` : '') + report + rollbackNote,
     deploy: deployResult.text,
     cost,

@@ -21,7 +21,7 @@ function fmt(d) {
   return d.toISOString().replace('T', ' ').slice(0, 16) + ' UTC';
 }
 
-export function renderEntry({ jobId, premise, sender, report, commits, diffstat, tests, deploy }) {
+export function renderEntry({ jobId, premise, sender, report, commits, diffstat, tests, deploy, usageLine }) {
   const undo = revertCommand(commits);
   return [
     `## ${fmt(new Date())} — \`${jobId}\``,
@@ -46,6 +46,7 @@ export function renderEntry({ jobId, premise, sender, report, commits, diffstat,
     '',
     `**Deploy:** ${deploy || 'not attempted'}`,
     '',
+    ...(usageLine ? [`**Usage:** ${usageLine}`, ''] : []),
     undo ? `**Undo:** \`${undo}\`` : '**Undo:** nothing to undo.',
     '',
     '---',

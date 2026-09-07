@@ -3,6 +3,7 @@ import { getDb } from './db.js';
 import { preflight, startJob, getJob, listJobs, activeJobId, appendNote, MODEL } from './runner.js';
 import { git } from './git.js';
 import { NO_CHANGE_NOTE } from './prompt.js';
+import { describeTokens } from './tokens.js';
 
 const DAILY_LIMIT = parseInt(process.env.CODE_AGENT_DAILY_LIMIT ?? '3', 10);
 
@@ -28,9 +29,11 @@ function liveProgress(job) {
   if (!p) return ['No progress reported yet — the session is still starting up.'];
 
   const out = [
-    `**Turn ${p.turns}${p.tools ? `, ${p.tools} tool calls` : ''}**` +
+    `**Turn ${p.turns}${p.maxTurns ? ` of ~${p.maxTurns}` : ''}` +
+      `${p.tools ? `, ${p.tools} tool calls` : ''}**` +
       (p.model ? ` · ${p.model}` : ''),
   ];
+  if (p.tokens) out.push(`- ${describeTokens(p.tokens)} so far`);
   if (p.lastTool) out.push(`- now: \`${p.lastTool}\``);
   if (p.files?.length) {
     out.push(`- files touched so far: ${p.files.map((f) => `\`${f}\``).join(', ')}`);
@@ -202,8 +205,11 @@ export async function handleCheckFix({ job_id, include_diff }, context) {
         'emergency measure.',
       );
     }
-    if (job.cost != null) {
-      lines.push('', `_${job.elapsed ?? '?'}s · $${Number(job.cost).toFixed(4)} · not visible in /cost_`);
+    // Tokens, not dollars. This runs on the operator's Claude Code subscription,
+    // so `total_cost_usd` is what the work would have cost at API list price —
+    // useful as a sense of scale, misleading as a headline.
+    if (job.usageLine) {
+      lines.push('', `_${job.elapsed ?? '?'}s · ${job.usageLine}_`);
     }
 
     return text(lines.join('\n'));
