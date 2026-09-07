@@ -86,36 +86,3 @@ eye on. It goes into the changelog and back to the model that asked, verbatim.`;
 export const NO_CHANGE_NOTE =
   'The agent investigated and deliberately made no change. That is a real ' +
   'finding, not a failure — read its reasoning below and relay it.';
-
-/**
- * The message that restarts a session which ran out of turns.
- *
- * A cut-off run is not a failed run — the session is intact on disk with every
- * file it read and every conclusion it reached, so throwing it away and filing
- * again would pay for the same investigation twice and arrive at the same place.
- * Resuming costs a message.
- *
- * It is deliberately short. The agent already holds the premise, the repository
- * and its own reasoning; what it lacks is the knowledge that it was interrupted
- * rather than finished, and how much room it has now.
- */
-export function buildResumePrompt({ notesPath, maxTurns, previousTurns }) {
-  return `You were cut off mid-run: the previous session used all of its turns after
-about ${previousTurns} exchanges. You were not failing, and nothing you did was
-lost — this is the same session, with everything you had read and worked out
-still in front of you.
-
-You now have roughly ${maxTurns} more turns. Land it:
-
-- Pick up where you stopped rather than re-deriving what you already know.
-- **Re-read \`${notesPath}\` first if it exists.** Corrections may have arrived
-  while you were working, and a correction outranks the original premise.
-- Commit as you go. Committed work survives another cut-off; uncommitted work
-  does not.
-- If you now believe nothing should change, say so and change nothing — that is
-  still a real answer.
-- Do not deploy or push. The wrapper does that once you finish.
-
-Finish with the same report you would have written: what you found, what you
-changed and why, and anything worth watching.`;
-}
