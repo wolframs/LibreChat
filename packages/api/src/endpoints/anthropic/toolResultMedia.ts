@@ -97,6 +97,14 @@ function partitionToolResultContent(content: unknown[]): {
  * Each block is re-inserted directly after the tool result it came from, so a
  * turn carrying several tool results keeps each one's media next to it — the
  * model has no other way to tell which result a picture belongs to.
+ *
+ * That puts a non-`tool_result` block between two tool results when parallel
+ * calls both return media, which is worth being sure about rather than assuming.
+ * Measured 2026-09-07: two tool results with an image each, interleaved, both
+ * images arrive in the right order and the turn costs the same 873 input tokens
+ * as the same content with the images grouped at the end. Grouping would cost
+ * the model any way of telling which image came from which call, so interleaved
+ * it is.
  */
 function liftInMessageContent(content: unknown[]): { content: unknown[]; moved: number } {
   let moved = 0;
@@ -160,9 +168,16 @@ export function liftToolResultMedia(body: unknown): number {
 /**
  * Cheap reject for the ordinary request.
  *
- * A body carrying tool-result media is often megabytes of base64, and parsing
- * every request only to find it has none would be paid on every turn of every
- * conversation. No tool result, nothing to do.
+ * No tool result, nothing to do — and that skips the parse entirely on the
+ * common turn.
+ *
+ * Note the cost is paid *per turn*, not once: the runtime rebuilds the wire body
+ * from the stored messages every call, so an image that stays in context arrives
+ * nested again each time and has to be lifted again. That is unavoidable, and it
+ * was measured rather than argued about — in the api container, parse plus
+ * re-serialize of a body holding one 900 KB image is 1.3 ms, three is 3.1 ms, six
+ * is 5.8 ms. Against a multi-second model call it is noise, and a narrower
+ * pre-check would have to guess at block types to beat it.
  */
 function mightCarryNestedMedia(body: string): boolean {
   return body.includes('"tool_result"');

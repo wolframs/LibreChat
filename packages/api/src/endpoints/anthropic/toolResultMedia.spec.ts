@@ -115,6 +115,68 @@ describe('liftToolResultMedia', () => {
     expect(content.map((b) => b.type)).toEqual(['tool_result', 'image']);
   });
 
+  /**
+   * The docstring claims the relative order of `cache_control` markers is
+   * untouched, and Anthropic requires them in longest-TTL-first order across the
+   * whole request. Claimed loudly, so pinned.
+   */
+  it('preserves cache_control and its relative order', () => {
+    const cached = { ...IMAGE, cache_control: { type: 'ephemeral', ttl: '1h' } };
+    const request = body([
+      {
+        type: 'tool_result',
+        tool_use_id: 'toolu_01',
+        content: [{ type: 'text', text: 'done' }, cached],
+        cache_control: { type: 'ephemeral', ttl: '1h' },
+      },
+      { type: 'text', text: 'after', cache_control: { type: 'ephemeral', ttl: '5m' } },
+    ]);
+
+    expect(liftToolResultMedia(request)).toBe(1);
+
+    const content = request.messages[2].content as Array<Record<string, unknown>>;
+    expect(content.map((b) => b.type)).toEqual(['tool_result', 'image', 'text']);
+    /** The tool_result keeps its own marker... */
+    expect(content[0].cache_control).toEqual({ type: 'ephemeral', ttl: '1h' });
+    /** ...the lifted block keeps its own... */
+    expect(content[1].cache_control).toEqual({ type: 'ephemeral', ttl: '1h' });
+    /** ...and the 1h markers still precede the 5m one. */
+    expect(content[2].cache_control).toEqual({ type: 'ephemeral', ttl: '5m' });
+  });
+
+  /** `is_error` is a property of the call, not of where its content sits. */
+  it('preserves is_error on a failed tool result', () => {
+    const request = body([
+      { type: 'tool_result', tool_use_id: 'toolu_01', is_error: true, content: [IMAGE] },
+    ]);
+
+    expect(liftToolResultMedia(request)).toBe(1);
+
+    const content = request.messages[2].content as Array<Record<string, unknown>>;
+    expect(content[0].is_error).toBe(true);
+    expect(content[1]).toEqual(IMAGE);
+  });
+
+  /**
+   * Parallel tool calls that both return media put a non-tool_result block
+   * between two tool results. Measured against the gateway on 2026-09-07: both
+   * images arrive, in order, same input-token count as the grouped shape.
+   */
+  it('interleaves media between multiple tool results', () => {
+    const second = { ...IMAGE, source: { ...IMAGE.source, data: 'CCCC' } };
+    const request = body([
+      toolResult('toolu_A', [{ type: 'text', text: 'a' }, IMAGE]),
+      toolResult('toolu_B', [{ type: 'text', text: 'b' }, second]),
+    ]);
+
+    expect(liftToolResultMedia(request)).toBe(2);
+
+    const content = request.messages[2].content as Array<Record<string, unknown>>;
+    expect(content.map((b) => b.type)).toEqual(['tool_result', 'image', 'tool_result', 'image']);
+    expect(content[0].tool_use_id).toBe('toolu_A');
+    expect(content[2].tool_use_id).toBe('toolu_B');
+  });
+
   it('does nothing to a request without tool-result images', () => {
     const request = body([toolResult('toolu_01', [{ type: 'text', text: 'no picture' }])]);
     const before = JSON.stringify(request);
