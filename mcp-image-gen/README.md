@@ -139,13 +139,13 @@ one word asked back:
 The ~70-token hole in row 2 is the image, absent. Rows 3 and 4 are the same request with
 the block moved one position.
 
-So LibreChat now moves it. `packages/api/src/endpoints/anthropic/toolResultImages.ts`
-lifts every image out of its `tool_result` and re-inserts it immediately after, as a
+So LibreChat now moves it. `packages/api/src/endpoints/anthropic/toolResultMedia.ts`
+lifts every non-text block out of its `tool_result` and re-inserts it immediately after, as a
 sibling in the same user turn (row 3), in a `fetch` wrapper on the outgoing body — and
 only off `api.anthropic.com`, where the nested shape is correct and delivered. Row 3 over
 row 4 because it adds no message, so role alternation, the tool_use/tool_result adjacency
 rule and `cache_control` ordering are all untouched. `deploy.sh` marker 15 guards it, and
-`toolResultImages.spec.ts` pins the shape.
+`toolResultMedia.spec.ts` pins the shape.
 
 Three consequences still worth knowing:
 
@@ -160,8 +160,9 @@ Three consequences still worth knowing:
   `StandardGraph` has no merge branch for (DeepSeek, `ollama`), and there the artifact is
   saved for the user and never shown to the model at all. `parsers.ts` now says so in the
   result text; that is a LibreChat-side gap, not a gateway one.
-- Video and audio returned from an MCP tool will hit this identically the day something
-  returns them, and the lift only handles `image` blocks. Widen it there, not here.
+- The rule is **text stays, everything else moves** — not a media-type list — so audio and
+  video returned by an MCP tool take the same route without further work. Nothing inspects a
+  MIME type; an endpoint that will not take a block answers with a 400 naming it.
 
 ## Route selection
 
