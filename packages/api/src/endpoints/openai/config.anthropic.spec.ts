@@ -1,6 +1,16 @@
 import { getOpenAIConfig } from './config';
 import { FINE_GRAINED_TOOL_STREAMING_BETA } from '../anthropic/helpers';
 
+/**
+ * `promptCacheTtl: '5m'` in every `modelKwargs` expectation below is this fork's
+ * doing, not upstream's. `getLLMConfig` in `endpoints/anthropic/llm.ts` always
+ * sends an explicit TTL once cache_control is on, defaulting to 5m rather than
+ * letting the agents SDK fall back to 1h and its 2x cache-write premium. These
+ * expectations were left asserting the pre-fork shape and had been failing since
+ * — ten of them, on every run of this workspace. If an upstream merge drops the
+ * key back out of the expectation, the question to answer is whether that
+ * default still holds, not whether to delete the assertion.
+ */
 describe('getOpenAIConfig - Anthropic Compatibility', () => {
   describe('Anthropic via LiteLLM', () => {
     it('should handle basic Anthropic configuration with defaultParamsEndpoint', () => {
@@ -41,6 +51,7 @@ describe('getOpenAIConfig - Anthropic Compatibility', () => {
               budget_tokens: 2000,
             },
             promptCache: true,
+            promptCacheTtl: '5m',
           },
         },
         configOptions: {
@@ -90,6 +101,7 @@ describe('getOpenAIConfig - Anthropic Compatibility', () => {
               budget_tokens: 3000,
             },
             promptCache: true,
+            promptCacheTtl: '5m',
           },
         },
         configOptions: {
@@ -138,6 +150,7 @@ describe('getOpenAIConfig - Anthropic Compatibility', () => {
             },
             topK: 50,
             promptCache: true,
+            promptCacheTtl: '5m',
           },
         },
         configOptions: {
@@ -180,6 +193,7 @@ describe('getOpenAIConfig - Anthropic Compatibility', () => {
               user_id: 'user456',
             },
             promptCache: true,
+            promptCacheTtl: '5m',
           },
         },
         configOptions: {
@@ -224,6 +238,7 @@ describe('getOpenAIConfig - Anthropic Compatibility', () => {
               user_id: undefined,
             },
             promptCache: true,
+            promptCacheTtl: '5m',
           },
         },
         configOptions: {
@@ -339,6 +354,7 @@ describe('getOpenAIConfig - Anthropic Compatibility', () => {
           maxTokens: 2048,
           modelKwargs: {
             promptCache: true,
+            promptCacheTtl: '5m',
           },
           // temperature is dropped
           // modelKwargs.topK is dropped
@@ -426,6 +442,7 @@ describe('getOpenAIConfig - Anthropic Compatibility', () => {
               user_id: 'searchUser',
             },
             promptCache: true,
+            promptCacheTtl: '5m',
           },
         },
         configOptions: {
@@ -476,6 +493,7 @@ describe('getOpenAIConfig - Anthropic Compatibility', () => {
             },
             topK: 40,
             promptCache: true,
+            promptCacheTtl: '5m',
           },
         },
         configOptions: {
@@ -525,6 +543,7 @@ describe('getOpenAIConfig - Anthropic Compatibility', () => {
               user_id: 'addUser',
             },
             promptCache: true,
+            promptCacheTtl: '5m',
             customParam1: 'value1', // Unknown params added to modelKwargs
             customParam2: 42,
           },
@@ -578,6 +597,7 @@ describe('getOpenAIConfig - Anthropic Compatibility', () => {
               user_id: 'bothUser',
             },
             promptCache: true,
+            promptCacheTtl: '5m',
             customParam: 'customValue',
             // topK is dropped
           },
