@@ -29,7 +29,7 @@ function getBase64Padding(data: string): number {
   return 0;
 }
 
-function estimateBase64ImageBytes(data: string): number {
+function estimateBase64Bytes(data: string): number {
   const padding = getBase64Padding(data);
   return Math.max(0, Math.floor((data.length * 3) / 4) - padding);
 }
@@ -38,24 +38,115 @@ function isRemoteImageUrl(data: string): boolean {
   return data.startsWith('http://') || data.startsWith('https://');
 }
 
-function assertImageDataWithinLimit(item: t.ImageContent): void {
-  if (isRemoteImageUrl(item.data)) {
-    return;
+const IMAGE_MIME_PREFIX = 'image/';
+
+/**
+ * An image lifted out of whichever content block carried it, so an `image` block
+ * and an image-typed embedded `resource` take the same path to `artifacts`.
+ */
+interface InlineImage {
+  data: string;
+  mimeType: string;
+  fileId?: string;
+}
+
+/**
+ * Returns a note when an image is too large to inline, or undefined when it fits.
+ *
+ * This used to throw — out of `formatToolContent`, through `MCPManager.callTool`,
+ * and out of the tool as `tool call failed` — which discarded every *text* block
+ * the same result carried. A server that described what it had produced and
+ * attached an oversized image left the model with nothing but a failure, for a
+ * call that had already succeeded and already been billed. The cap exists to keep
+ * an unbounded payload out of the request; dropping the one block that breaches
+ * it does that, and says so, without throwing away everything said alongside it.
+ */
+function oversizedImageNote(image: InlineImage): string | undefined {
+  if (isRemoteImageUrl(image.data)) {
+    return undefined;
   }
 
   const maxBytes = getMCPImageDataMaxBytes();
-  const estimatedBytes = estimateBase64ImageBytes(item.data);
-  if (estimatedBytes <= maxBytes) {
-    return;
+  const bytes = estimateBase64Bytes(image.data);
+  if (bytes <= maxBytes) {
+    return undefined;
   }
 
-  throw new Error(
-    `MCP image result exceeds maximum size of ${maxBytes} bytes: ${estimatedBytes} bytes`,
+  return (
+    `[image not delivered: ${image.mimeType}, ~${bytes} bytes, over the ${maxBytes}-byte ` +
+    'MCP_IMAGE_DATA_MAX_BYTES limit. It is not attached to this result and the model ' +
+    'cannot see it; generating it again will produce the same outcome.]'
   );
 }
 
+/**
+ * Audio has nowhere to go in a tool result: `FormattedContent` has no audio
+ * member, and neither the Anthropic nor the OpenAI tool-result shape accepts one
+ * — audio rides user turns only, and only on some providers. Before this, an
+ * `audio` block fell through to `JSON.stringify` and put its entire base64
+ * payload into the model's context: a two-megabyte recording is ~2.7 million
+ * characters of text no model can decode, billed as input. Name it instead.
+ */
+function describeAudio(item: t.AudioContent): string {
+  return (
+    `[audio not delivered: ${item.mimeType}, ~${estimateBase64Bytes(item.data)} bytes. ` +
+    'A tool result has no audio channel on any provider, so the model cannot hear it.]'
+  );
+}
+
+/**
+ * On the string-only path (unrecognized providers) there is no artifact channel,
+ * so the bytes cannot reach the model however they are formatted — pasting the
+ * base64 into the prompt only buys a token bill. A remote URL is worth keeping:
+ * it is short, and the model can act on it.
+ */
+function describeUndeliverableImage(item: t.ImageContent): string {
+  if (isRemoteImageUrl(item.data)) {
+    return `[image: ${item.mimeType} at ${item.data} — not attached to this result.]`;
+  }
+  return (
+    `[image not delivered: ${item.mimeType}, ~${estimateBase64Bytes(item.data)} bytes. ` +
+    'This provider has no image channel for tool results, so the model cannot see it.]'
+  );
+}
+
+const MAX_STRINGIFIED_STRING_CHARS = 512;
+
+/**
+ * `JSON.stringify` for a content block we have no handler for, with any oversized
+ * string field replaced by its length. The MCP content union grows over time and
+ * every new member arrives here first, so this is the one place a whole base64
+ * payload can still reach the prompt by accident.
+ */
+function stringifyContentPart(item: t.ToolContentPart): string {
+  return JSON.stringify(
+    item,
+    (_key: string, value: unknown) =>
+      typeof value === 'string' && value.length > MAX_STRINGIFIED_STRING_CHARS
+        ? `[${value.length} characters omitted]`
+        : value,
+    2,
+  );
+}
+
+type ResourceContents = t.EmbeddedResource['resource'];
+type BlobResource = Extract<ResourceContents, { blob: string }>;
+
+function isBlobResource(resource: ResourceContents): resource is BlobResource {
+  return 'blob' in resource && typeof resource.blob === 'string' && resource.blob.length > 0;
+}
+
+/**
+ * `vertexai` belongs here for the same reason `google` does: everything
+ * downstream already treats the two as one. `isGoogleLike` in the agents package
+ * merges artifacts for both, and `createToolInstance` sanitizes tool schemas for
+ * both. Its absence meant a Vertex request took `parseAsString`, which put the
+ * image's base64 in the text and produced no artifact — no attachment for the
+ * user, nothing decodable for the model, and the tokens billed anyway.
+ */
 const RECOGNIZED_PROVIDERS = new Set([
   'google',
+  'vertexai',
   'anthropic',
   'openai',
   'azureopenai',
@@ -109,8 +200,8 @@ function isImageContent(item: t.ToolContentPart): item is t.ImageContent {
  * `createToolEndCallback` reads, index-aligned with `artifact.content`. This just
  * connects the two. Anything not a plain non-empty string is ignored.
  */
-function extractMetaFileId(item: t.ImageContent): string | undefined {
-  const value = (item._meta as Record<string, unknown> | undefined)?.['librechat/file_id'];
+function readMetaFileId(meta: Record<string, unknown> | undefined): string | undefined {
+  const value = meta?.['librechat/file_id'];
   return typeof value === 'string' && value.length > 0 ? value : undefined;
 }
 
@@ -129,6 +220,10 @@ function parseAsString(result: t.MCPToolCallResponse): string {
         const resourceText = [];
         if ('text' in item.resource && item.resource.text != null && item.resource.text) {
           resourceText.push(item.resource.text);
+        } else if (isBlobResource(item.resource)) {
+          resourceText.push(
+            `Resource Data: ~${estimateBase64Bytes(item.resource.blob)} bytes, not delivered inline.`,
+          );
         }
         if (item.resource.uri) {
           resourceText.push(`Resource URI: ${item.resource.uri}`);
@@ -139,9 +234,12 @@ function parseAsString(result: t.MCPToolCallResponse): string {
         return resourceText.join('\n');
       }
       if (isImageContent(item)) {
-        assertImageDataWithinLimit(item);
+        return describeUndeliverableImage(item);
       }
-      return JSON.stringify(item, null, 2);
+      if (item.type === 'audio') {
+        return describeAudio(item);
+      }
+      return stringifyContentPart(item);
     })
     .filter(Boolean)
     .join('\n\n');
@@ -177,29 +275,56 @@ export function formatToolContent(
   const uiResources: UIResource[] = [];
   let currentTextBlock = '';
 
+  const appendText = (text: string): void => {
+    currentTextBlock += (currentTextBlock ? '\n\n' : '') + text;
+  };
+
+  const collectImage = (image: InlineImage): void => {
+    const note = oversizedImageNote(image);
+    if (note != null) {
+      appendText(note);
+      return;
+    }
+
+    const formatter = imageFormatters.default as t.ImageFormatter;
+    const formattedImage = formatter({
+      type: 'image',
+      data: image.data,
+      mimeType: image.mimeType,
+    });
+    if (formattedImage.type !== 'image_url') {
+      return;
+    }
+
+    imageUrls.push(formattedImage);
+    imageFileIds.push(image.fileId);
+  };
+
   type ContentHandler = undefined | ((item: t.ToolContentPart) => void);
 
   const contentHandlers: {
     text: (item: Extract<t.ToolContentPart, { type: 'text' }>) => void;
     image: (item: t.ToolContentPart) => void;
+    audio: (item: Extract<t.ToolContentPart, { type: 'audio' }>) => void;
     resource: (item: Extract<t.ToolContentPart, { type: 'resource' }>) => void;
   } = {
     text: (item) => {
-      currentTextBlock += (currentTextBlock ? '\n\n' : '') + item.text;
+      appendText(item.text);
     },
 
     image: (item) => {
       if (!isImageContent(item)) {
         return;
       }
-      assertImageDataWithinLimit(item);
-      const formatter = imageFormatters.default as t.ImageFormatter;
-      const formattedImage = formatter(item);
+      collectImage({
+        data: item.data,
+        mimeType: item.mimeType,
+        fileId: readMetaFileId(item._meta),
+      });
+    },
 
-      if (formattedImage.type === 'image_url') {
-        imageUrls.push(formattedImage);
-        imageFileIds.push(extractMetaFileId(item));
-      }
+    audio: (item) => {
+      appendText(describeAudio(item));
     },
 
     resource: (item) => {
@@ -221,6 +346,26 @@ export function formatToolContent(
         resourceText.push(`UI Resource Marker: \\ui{${resourceId}}`);
       } else if ('text' in item.resource && item.resource.text != null && item.resource.text) {
         resourceText.push(`Resource Text: ${item.resource.text}`);
+      } else if (isBlobResource(item.resource)) {
+        /**
+         * An embedded resource is the MCP-sanctioned way to return an image that
+         * also has a URI, and servers use it. Routing the blob through the same
+         * artifact path as an `image` block is what makes it visible: without
+         * this the model was handed "Resource URI: …" and the bytes were dropped
+         * on the floor — not attached for the user, not sent to the model.
+         */
+        const { mimeType } = item.resource;
+        if (mimeType != null && mimeType.startsWith(IMAGE_MIME_PREFIX)) {
+          collectImage({
+            data: item.resource.blob,
+            mimeType,
+            fileId: readMetaFileId(item._meta) ?? readMetaFileId(item.resource._meta),
+          });
+        } else {
+          resourceText.push(
+            `Resource Data: ~${estimateBase64Bytes(item.resource.blob)} bytes, not delivered inline.`,
+          );
+        }
       }
 
       if (item.resource.uri.length) {
@@ -231,7 +376,7 @@ export function formatToolContent(
       }
 
       if (resourceText.length) {
-        currentTextBlock += (currentTextBlock ? '\n\n' : '') + resourceText.join('\n');
+        appendText(resourceText.join('\n'));
       }
     },
   };
@@ -241,8 +386,7 @@ export function formatToolContent(
     if (handler) {
       handler(item as never);
     } else {
-      const stringified = JSON.stringify(item, null, 2);
-      currentTextBlock += (currentTextBlock ? '\n\n' : '') + stringified;
+      appendText(stringifyContentPart(item));
     }
   }
 
