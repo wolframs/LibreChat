@@ -21,9 +21,11 @@ import {
   supportsAdaptiveThinking,
   checkPromptCacheSupport,
   resolvePromptCacheTtlForURL,
+  isNativeAnthropicURL,
   configureReasoning,
   getClaudeHeaders,
 } from './helpers';
+import { liftToolResultImagesInRequest } from './toolResultImages';
 import {
   createAnthropicVertexClient,
   isAnthropicVertexCredentials,
@@ -446,6 +448,28 @@ function getLLMConfig(
     requestOptions.clientOptions.fetch = observeAnthropicStreamUsage(
       options.streamUsageSink,
       requestOptions.clientOptions.fetch as never,
+    ) as never;
+  }
+
+  /**
+   * An image inside a `tool_result` is the one shape a gateway reliably loses,
+   * and losing it is silent: the request succeeds, the model answers, and it
+   * simply never saw the picture the user is looking at. Measured on Surplus
+   * Intelligence — same image, same prompt, "NOIMAGE" from inside a tool result
+   * and the right answer from a sibling block one position away. So off
+   * Anthropic's own API the images are lifted out to sit beside the tool result
+   * instead of within it. See {@link liftToolResultImages}.
+   */
+  if (!isNativeAnthropicURL(options.reverseProxyUrl) && !shouldDropClientOptions) {
+    if (!requestOptions.clientOptions) {
+      requestOptions.clientOptions = {};
+    }
+    requestOptions.clientOptions.fetch = liftToolResultImagesInRequest(
+      requestOptions.clientOptions.fetch as never,
+      (moved) =>
+        logger.debug(
+          `[AnthropicClient] Lifted ${moved} image block(s) out of tool_result for ${options.reverseProxyUrl} — a gateway cannot be relied on to forward an image nested inside a tool result.`,
+        ),
     ) as never;
   }
 

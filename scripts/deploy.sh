@@ -381,6 +381,11 @@ check_marker "audio input forwarding"       "has no audio input format" "/app/pa
 # so a model that just generated an image needs a second get_user_images call before
 # it can edit it. See fork-customizations.md §12.
 check_marker "MCP image file_id passthrough" "librechat/file_id" "/app/packages/api/dist/index.cjs"
+# Without this, an image an MCP tool produced reaches a gateway nested inside a
+# `tool_result` — the one position a gateway drops it from, silently. The user
+# sees the picture, the model never does, and the reply describes something it
+# was not shown. Measured on Surplus 2026-09-07; see fork-customizations.md §13.
+check_marker "tool_result image lift"       "liftToolResultImages" "/app/packages/api/dist/index.cjs"
 
 echo
 if [[ $MISSING -eq 1 ]]; then
