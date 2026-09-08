@@ -684,6 +684,18 @@ export async function handleGenerateImage(
         : JSON.stringify(err.response.data);
       console.error('Response:', err.response.status, body.substring(0, 500));
       detail = `${err.message} — HTTP ${err.response.status}: ${body.substring(0, 500)}`;
+      // OpenRouter's moderation refusal names no alternative, and a model that
+      // just waited a minute for it tends to soften the prompt and pay again.
+      if (/content management policy|content policy|moderation|safety/i.test(body)) {
+        const lenient = MODELS.filter((m) => m.provider === 'surplus' && !m.features.includes('image_edit'))
+          .map((m) => `'${m.id}'`);
+        detail +=
+          `\n\nThis is the provider's content filter on ${requestedModel || DEFAULT_MODEL}, not a fault. ` +
+          'Nothing was billed. Rewording rarely helps with this model; ' +
+          (lenient.length > 0
+            ? `the Surplus models (${lenient.join(', ')}) accept prompts this one refuses — tell the user and switch.`
+            : 'no lenient model is configured — tell the user.');
+      }
     }
     console.error('Error in generate_image:', detail);
     return {

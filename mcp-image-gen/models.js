@@ -131,6 +131,29 @@ export async function loadCatalogue({ surplusKey, surplusBase, timeoutMs = 8000 
   }
 }
 
+/**
+ * What each model does with a prompt that is suggestive but not explicit —
+ * measured 2026-09-08 with "a woman in a bikini on a sunny beach, fashion photo".
+ * meta/muse-image refused it (`content management policy`, after a 67 s wait);
+ * every Venice model returned an image. Explicit content was not tested; the
+ * `uncensored` catalogue flag is the only evidence for what lies beyond that,
+ * and Surplus stamps `x-si-adapted-params: safe_mode` on Venice calls, whose
+ * effect is unmeasured. A model choosing for a "catgirl in a bikini" request
+ * needs to know this before, not after, a 400.
+ */
+const MODERATION = {
+  'meta/muse-image': 'strict moderation: refuses swimwear-level prompts outright',
+  'venice-sd35': 'lenient moderation: swimwear-level prompts fine',
+  'venice-wan-2.7': 'lenient moderation: swimwear-level prompts fine',
+  'venice-qwen-image': 'lenient moderation: swimwear-level prompts fine',
+  'wan-2-7-pro-edit': 'lenient moderation, untested beyond that',
+};
+
+export function moderationText(m) {
+  if (m.features.includes('uncensored')) return 'uncensored: the model for anything the others refuse';
+  return MODERATION[m.id] || null;
+}
+
 function priceText(m) {
   if (m.price == null) return 'price unknown';
   return `$${m.price}/${m.unit || 'image'} list`;
@@ -147,7 +170,8 @@ export function describeModels() {
   const lines = MODELS.map((m) => {
     const bits = [m.provider === 'surplus' ? 'Surplus' : 'OpenRouter', priceText(m)];
     bits.push(canEdit(m) ? 'text-to-image and image-to-image' : 'text-to-image only (no references)');
-    if (m.features.includes('uncensored')) bits.push('uncensored');
+    const moderation = moderationText(m);
+    if (moderation) bits.push(moderation);
     if (m.features.includes('anime')) bits.push('anime');
     return `'${m.id}' (${bits.join('; ')})${m.id === DEFAULT_MODEL ? ' — default' : ''}`;
   });

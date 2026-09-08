@@ -94,13 +94,23 @@ app.get('/healthz', (_req, res) => {
   });
 });
 
+// A byte every 30 s: LibreChat applies the yaml row's `timeout` as undici's
+// bodyTimeout on the SSE stream, and an idle session sends nothing, so without
+// this the api kills and reopens the stream on that cadence and a tool call in
+// the reconnect window fails with "not found". Same fix as mcp-image-gen.
+const SSE_KEEPALIVE_MS = parseInt(process.env.SSE_KEEPALIVE_MS ?? '30000', 10);
+
 app.get('/sse', async (req, res) => {
   console.log('New SSE connection. Query:', req.query, 'Headers:', req.headers);
   const transport = new SSEServerTransport('/messages', res);
   const server = createMcpServer();
   transports.set(transport.sessionId, transport);
+  const keepalive = setInterval(() => {
+    if (!res.writableEnded) res.write(': keepalive\n\n');
+  }, SSE_KEEPALIVE_MS);
   req.on('close', () => {
     console.log(`SSE closed: ${transport.sessionId}`);
+    clearInterval(keepalive);
     transports.delete(transport.sessionId);
   });
   await server.connect(transport);

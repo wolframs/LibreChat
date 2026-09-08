@@ -126,13 +126,31 @@ app.get('/healthz', async (_req, res) => {
   res.json(await healthReport());
 });
 
+/**
+ * A byte every 30 s, or the session dies every 3 minutes.
+ *
+ * LibreChat applies the yaml row's `timeout` (180000 here) as undici's
+ * `bodyTimeout` on the SSE stream, and an idle MCP session sends nothing — so
+ * the api killed and reopened this stream every 184 s (measured 2026-09-08:
+ * 18:42:19, 18:45:23, 18:48:27, 18:51:31), logging it as a "transient" transport
+ * error. Harmless until a tool call lands in the reconnect window: then the
+ * chat gets `Tool "generate_image_mcp_imager" not found` and a wasted turn,
+ * which happened three times in one edit round. An SSE comment line is valid
+ * stream content every client ignores, and it keeps the timer from firing.
+ */
+const SSE_KEEPALIVE_MS = parseInt(process.env.SSE_KEEPALIVE_MS ?? '30000', 10);
+
 app.get('/sse', async (req, res) => {
   console.log('New SSE connection. Query:', req.query, 'Headers:', req.headers);
   const transport = new SSEServerTransport('/messages', res);
   const server = createMcpServer();
   transports.set(transport.sessionId, transport);
+  const keepalive = setInterval(() => {
+    if (!res.writableEnded) res.write(': keepalive\n\n');
+  }, SSE_KEEPALIVE_MS);
   req.on('close', () => {
     console.log(`SSE closed: ${transport.sessionId}`);
+    clearInterval(keepalive);
     transports.delete(transport.sessionId);
   });
   await server.connect(transport);

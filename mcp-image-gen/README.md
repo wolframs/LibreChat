@@ -139,6 +139,10 @@ Measured 2026-09-08, all of it:
   an `image`/`input_images` on `/generations` is routed into the same check. The cheap
   edit tier ($0.04–0.06) never routed on 2026-09-08; `wan-2-7-pro-edit` ($0.094) did, and
   is the second edit model for when `grok-imagine-edit` is down.
+- **Moderation differs per model and the description says so.** `meta/muse-image` refuses
+  "a woman in a bikini" (`content management policy`, 67 s); every Venice model returns it;
+  lustify is uncensored. `MODERATION` in `models.js` feeds the `model` description, and an
+  OpenRouter filter refusal comes back naming the lenient models and "nothing was billed".
 - **Model-facing text uses the registered tool names** (`generate_image_mcp_imager`,
   `TOOL_SUFFIX` in `tools.js`): LibreChat appends `_mcp_<yaml key>`, and a bare
   `generate_image` in the instructions is a `Tool not found` round-trip.
@@ -162,6 +166,14 @@ Measured 2026-09-08, all of it:
   Settled at ~35% of list on the day: `venice-sd35` $0.0035, `grok-imagine-edit` $0.014.
 - Every Venice-served response carries `x-si-adapted-params: safe_mode`. Recorded on the
   usage row (`adaptedParams`), not interpreted.
+
+## Keepalive
+
+`/sse` writes an SSE comment line every `SSE_KEEPALIVE_MS` (30 s). LibreChat applies the
+yaml row's `timeout` as undici's `bodyTimeout` on the stream, and an idle MCP session is
+silent, so without this the api killed and reopened the session every 184 s and any tool
+call inside the reconnect window came back `Tool … not found`. Measured 2026-09-08; the
+comment above the handler in `index.js` has the timestamps.
 
 ## The trap: attaching an image is not delivering one
 
