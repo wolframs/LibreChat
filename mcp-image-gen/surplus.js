@@ -75,6 +75,33 @@ export function sniffMime(buffer) {
   return 'image/png';
 }
 
+/**
+ * "Not a valid model ID" is Surplus for "no seller is serving this right now".
+ *
+ * It is not a typo check: the same id routes and stops routing within minutes.
+ * On 2026-09-08 `grok-imagine-edit` edited twice at 14:49 UTC and answered this
+ * at 16:46; `venice-sd35` generated at 16:46 and answered this at 18:52 while
+ * `venice-lustify-sdxl` — same seller — still routed. The catalogue entry never
+ * changes. So the message a model reads must say "not right now" and name the
+ * alternatives, or it reads as a bug in the request and gets retried verbatim,
+ * which is exactly what happened.
+ */
+export class SurplusNotRoutingError extends Error {
+  constructor(model, detail) {
+    super(`Surplus is not routing ${model} right now`);
+    this.name = 'SurplusNotRoutingError';
+    this.model = model;
+    this.detail = detail;
+  }
+}
+
+export function isNotRoutingResponse(status, body) {
+  if (status !== 400 && status !== 404) return false;
+  const code = body?.error?.code;
+  const message = String(body?.error?.message || '');
+  return code === 'no_sellers_for_model' || /is not a valid model ID/i.test(message);
+}
+
 export async function generateImageOnSurplus({ prompt, selectedModel, dataUrls, apiKey, aspect_ratio }) {
   const headers = { Authorization: `Bearer ${apiKey}`, 'Content-Type': 'application/json' };
   const editing = dataUrls.length > 0;
@@ -93,13 +120,21 @@ export async function generateImageOnSurplus({ prompt, selectedModel, dataUrls, 
 
   console.log(`Calling Surplus ${path}: ${selectedModel}${editing ? ` with ${dataUrls.length} reference(s)` : ` size=${payload.size}`}...`);
   const started = new Date();
-  const res = await axios.post(`${SURPLUS_BASE}${path}`, payload, {
-    headers,
-    timeout: 180000,
-    // Data-URI references make the request body large; the default cap is 10 MB.
-    maxBodyLength: Infinity,
-    maxContentLength: Infinity,
-  });
+  let res;
+  try {
+    res = await axios.post(`${SURPLUS_BASE}${path}`, payload, {
+      headers,
+      timeout: 180000,
+      // Data-URI references make the request body large; the default cap is 10 MB.
+      maxBodyLength: Infinity,
+      maxContentLength: Infinity,
+    });
+  } catch (err) {
+    if (err.response && isNotRoutingResponse(err.response.status, err.response.data)) {
+      throw new SurplusNotRoutingError(selectedModel, err.response.data?.error?.message);
+    }
+    throw err;
+  }
 
   const item = res.data?.data?.[0];
   if (!item?.b64_json && !item?.url) {

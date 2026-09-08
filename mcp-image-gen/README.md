@@ -125,12 +125,18 @@ Measured 2026-09-08, all of it:
 - **The key cannot cap itself.** `PUT /v1/buyer/keys/{id}/preferences` accepts a `limits`
   object and stores `{}` — 200, no error. `IMAGE_GEN_SURPLUS_WEEKLY_USD` in `tools.js` is
   the cap, summed from `mcp_image_gen_usage` over a rolling week.
-- **A catalogue entry is not a routable model.** `/v1/models` lists 55 image-output models;
-  `venice-z-image-turbo`, `venice-seedream-v5-lite` and `venice-hunyuan-image-v3` are all
-  there and all answer `not a valid model ID`. `/v1/prices` shows `providers: []` for every
-  image model. The only test is a paid request, so `IMAGE_GEN_MODELS` is hand-kept and an
-  entry that stops routing fails loudly with the gateway's message. Verified routable:
-  `venice-sd35`, `venice-lustify-sdxl`, `grok-imagine-edit`.
+- **A catalogue entry is not a routable model, and routability moves by the minute.**
+  `/v1/models` lists 55 image-output models; `venice-z-image-turbo`, `venice-seedream-v5-lite`
+  and `venice-hunyuan-image-v3` are all there and all answer `not a valid model ID`.
+  `/v1/prices` shows `providers: []` for every image model. `grok-imagine-edit` routed at
+  14:49 UTC and not at 16:46; `venice-sd35` at 16:46 and not at 18:52. So `IMAGE_GEN_MODELS`
+  is hand-kept, and `surplus.js` classifies that 400 as `SurplusNotRoutingError`: `tools.js`
+  answers with a "not routing right now, nothing billed, switch to …" message whose
+  alternatives fit the call, remembers the gap for `IMAGE_GEN_NOT_ROUTING_WINDOW_MS`
+  (3 min) and refuses a repeat pre-flight, and `healthz.surplusNotRouting` lists it.
+- **Model-facing text uses the registered tool names** (`generate_image_mcp_imager`,
+  `TOOL_SUFFIX` in `tools.js`): LibreChat appends `_mcp_<yaml key>`, and a bare
+  `generate_image` in the instructions is a `Tool not found` round-trip.
 - **`size` is a closed set** — `1024x1024`, `1536x1024`, `1024x1536`, `1792x1024` accepted;
   `1344x768`, `896x1120`, `1920x1080` are `Invalid request parameters`. So `aspect_ratio`
   maps to the nearest of those, and the gateway honours orientation, not the exact ratio —

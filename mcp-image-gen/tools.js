@@ -3,8 +3,72 @@ import { randomUUID } from 'crypto';
 import { getDb } from './db.js';
 import { fetchImageById, extractFileId } from './files.js';
 import { generateImageOnOpenRouter, referencesToDataUrls } from './openrouter.js';
-import { generateImageOnSurplus } from './surplus.js';
-import { DEFAULT_MODEL, findModel, canEdit } from './models.js';
+import { generateImageOnSurplus, SurplusNotRoutingError } from './surplus.js';
+import { DEFAULT_MODEL, MODELS, findModel, canEdit } from './models.js';
+
+/**
+ * The names LibreChat registers these tools under. It appends `_mcp_<server key>`
+ * — the key of this server in librechat.yaml's `mcpServers`, which is `imager` —
+ * and a model that reads a bare `generate_image` in the instructions and calls
+ * that gets `Tool "generate_image" not found` and burns a turn. Every piece of
+ * text a model reads, here and in the yaml, uses the full name.
+ */
+export const TOOL_SUFFIX = '_mcp_imager';
+export const GENERATE_TOOL = `generate_image${TOOL_SUFFIX}`;
+export const LIST_TOOL = `get_user_images${TOOL_SUFFIX}`;
+
+/**
+ * Models Surplus has answered "not routing" for recently, with when that was.
+ *
+ * A second call inside the window is refused here, before the round-trip, with
+ * the same message — a model that has just been told to switch and tries once
+ * more anyway (the 2026-09-08 duel did) should not wait on the gateway to say
+ * it again. The window is short because liquidity really does come back within
+ * minutes; this is loop protection, not a health model.
+ */
+export const NOT_ROUTING_WINDOW_MS = parseInt(process.env.IMAGE_GEN_NOT_ROUTING_WINDOW_MS ?? String(3 * 60 * 1000), 10);
+const notRouting = new Map();
+
+export function markNotRouting(modelId, now = Date.now()) {
+  notRouting.set(modelId, now);
+}
+
+export function notRoutingSince(modelId, now = Date.now()) {
+  const at = notRouting.get(modelId);
+  if (at == null) return null;
+  if (now - at > NOT_ROUTING_WINDOW_MS) {
+    notRouting.delete(modelId);
+    return null;
+  }
+  return at;
+}
+
+export function routingState(now = Date.now()) {
+  const out = {};
+  for (const [id, at] of notRouting) {
+    if (now - at <= NOT_ROUTING_WINDOW_MS) out[id] = new Date(at).toISOString();
+  }
+  return out;
+}
+
+/** The message a model reads when a Surplus model has no seller: what, why, and what else. */
+export function notRoutingMessage(model, { needsEdit, now = Date.now() }) {
+  const since = notRoutingSince(model.id, now);
+  const alternatives = MODELS.filter(
+    (m) => m.id !== model.id && (!needsEdit || canEdit(m)) && notRoutingSince(m.id, now) == null,
+  ).map((m) => `'${m.id}'${m.provider === 'openrouter' ? ' (OpenRouter, always routable)' : ''}`);
+  const retryIn = since ? Math.max(1, Math.ceil((NOT_ROUTING_WINDOW_MS - (now - since)) / 60000)) : null;
+  return (
+    `Surplus Intelligence is not routing ${model.id} right now: the marketplace lists it but no ` +
+    'seller is serving it at this moment. This is a liquidity gap, not a problem with your request — ' +
+    'the same call works when a seller is back, often within minutes. Nothing was billed. ' +
+    `Do not retry ${model.id}${retryIn ? ` for the next ${retryIn} minute(s)` : ''}; ` +
+    (alternatives.length > 0
+      ? `switching to another model is the right move here — ${alternatives.join(', ')}` +
+        `${needsEdit ? ' can take reference images' : ''}. Tell the user which model actually ran.`
+      : 'no other configured model can do this right now — tell the user and stop.')
+  );
+}
 import {
   imageDimensions,
   nearestRatio,
@@ -120,7 +184,7 @@ export async function handleGetUserImages({ limit }, context) {
       content: [
         {
           type: 'text',
-          text: `Found ${images.length} uploaded image(s):\n${list}\n\nUse EITHER the file_id OR the index number (e.g., '1', '2' or 'INDEX_1', 'INDEX_2') as the reference_image_url/reference_image_urls when calling generate_image.`,
+          text: `Found ${images.length} uploaded image(s):\n${list}\n\nUse EITHER the file_id OR the index number (e.g., '1', '2' or 'INDEX_1', 'INDEX_2') as the reference_image_url/reference_image_urls when calling ${GENERATE_TOOL}.`,
         },
       ],
     };
@@ -375,7 +439,7 @@ function buildResultSummary({
   } else {
     lines.push(
       'Image generated. It is already displayed in the chat, so the user can see it — you ' +
-        'do not need to do anything to show it to them. Do not call generate_image again for ' +
+        `do not need to do anything to show it to them. Do not call ${GENERATE_TOOL} again for ` +
         'this one; every call is billed and counts against the daily limit.',
     );
   }
@@ -384,7 +448,7 @@ function buildResultSummary({
   if (!oversized) {
     lines.push(
       `- file_id: ${fileId} — pass this as \`reference_image_url\` to edit or re-use this image. ` +
-        '(If it does not resolve, call `get_user_images`: this image is the newest entry, INDEX_1.)',
+        `(If it does not resolve, call ${LIST_TOOL}: this image is the newest entry, INDEX_1.)`,
     );
   }
   lines.push(`- model: ${MODEL} (via ${model.provider === 'surplus' ? 'Surplus Intelligence' : 'OpenRouter'})`);
@@ -416,7 +480,7 @@ function buildResultSummary({
         ? `- reference images used: ${referenceUsed}`
         : `- reference images: ${referenceUsed} of ${referenceRequested} used. The rest could ` +
             'not be read and were SKIPPED, so this is closer to a fresh generation than an ' +
-            'edit — tell the user, and re-check the ids with `get_user_images`.',
+            `edit — tell the user, and re-check the ids with ${LIST_TOOL}.`,
     );
   }
 
@@ -481,6 +545,14 @@ export async function handleGenerateImage(
       return {
         isError: true,
         content: [{ type: 'text', text: `Limit Exceeded: ${capCheck.reason}` }],
+      };
+    }
+
+    const wantsEdit = Boolean(reference_image_url || (reference_image_urls && reference_image_urls.length > 0));
+    if (model.provider === 'surplus' && notRoutingSince(model.id) != null) {
+      return {
+        isError: true,
+        content: [{ type: 'text', text: notRoutingMessage(model, { needsEdit: wantsEdit }) }],
       };
     }
 
@@ -578,6 +650,16 @@ export async function handleGenerateImage(
 
     return { content };
   } catch (err) {
+    if (err instanceof SurplusNotRoutingError) {
+      const model = findModel(err.model);
+      markNotRouting(err.model);
+      console.warn(`Surplus not routing ${err.model}: ${err.detail}`);
+      const needsEdit = Boolean(reference_image_url || (reference_image_urls && reference_image_urls.length > 0));
+      return {
+        isError: true,
+        content: [{ type: 'text', text: notRoutingMessage(model ?? { id: err.model }, { needsEdit }) }],
+      };
+    }
     // Both gateways put the actionable part in the response body — an unsupported
     // aspect_ratio, for instance, is a 400 that names the values it will accept,
     // and Surplus's `not a valid model ID` is the only sign a listed model is not

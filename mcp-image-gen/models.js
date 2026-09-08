@@ -150,6 +150,8 @@ export function describeModels() {
   });
   return (
     `Which image model to use. Defaults to '${DEFAULT_MODEL}'. Choose by what the user asked ` +
-    `for; do not switch models to "retry" a result. Options: ${lines.join(', ')}.`
+    'for; do not switch models to "retry" a result you disliked. A Surplus model can be ' +
+    '"not routing right now" (no seller at this moment) — the result says so, nothing is billed, ' +
+    `and switching model is then correct. Options: ${lines.join(', ')}.`
   );
 }

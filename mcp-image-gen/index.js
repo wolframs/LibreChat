@@ -11,6 +11,7 @@ import {
   surplusKey,
   surplusSpendLast7Days,
   SURPLUS_WEEKLY_CAP_USD,
+  routingState,
 } from './tools.js';
 import { MODELS, MODEL_IDS, DEFAULT_MODEL, loadCatalogue, describeModels } from './models.js';
 import { SURPLUS_BASE } from './surplus.js';
@@ -55,13 +56,13 @@ function createMcpServer() {
         .string()
         .optional()
         .describe(
-          "The local database file_id OR index number (e.g. '1', '2' or 'INDEX_1', 'INDEX_2') of a reference image to use. Provider file ids (file-xxxx) are NOT supported. Call get_user_images first to list available images and get their local file_ids or index numbers. Only models whose description says image-to-image accept this.",
+          "The local database file_id OR index number (e.g. '1', '2' or 'INDEX_1', 'INDEX_2') of a reference image to use. Provider file ids (file-xxxx) are NOT supported. Call get_user_images_mcp_imager first to list available images and get their local file_ids or index numbers. Only models whose description says image-to-image accept this.",
         ),
       reference_image_urls: z
         .array(z.string())
         .optional()
         .describe(
-          'A list of local database file_ids OR index numbers of reference images to combine or use. Provider file ids (file-xxxx) are NOT supported. Call get_user_images first. Only models whose description says image-to-image accept this.',
+          'A list of local database file_ids OR index numbers of reference images to combine or use. Provider file ids (file-xxxx) are NOT supported. Call get_user_images_mcp_imager first. Only models whose description says image-to-image accept this.',
         ),
       aspect_ratio: z
         .enum(ASPECT_RATIOS)
@@ -109,6 +110,10 @@ async function healthReport() {
     // Kept for the older deploy.sh probe, which looks for `"hasKey":false`.
     hasKey: keys.openrouter || keys.surplus,
     surplusWeek,
+    // Models Surplus answered "not routing" for in the last few minutes. A
+    // liquidity gap, not a fault; shown so a --check right after a failed chat
+    // has the answer without a log dive.
+    surplusNotRouting: routingState(),
     warnings,
     dailyLimit: parseInt(process.env.IMAGE_GEN_DAILY_LIMIT ?? '3', 10),
     cooldownSec: parseInt(process.env.IMAGE_GEN_COOLDOWN_SEC ?? '30', 10),
