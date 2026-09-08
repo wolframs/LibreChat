@@ -80,7 +80,7 @@ export function sniffMime(buffer) {
  *
  * It is not a typo check: the same id routes and stops routing within minutes.
  * On 2026-09-08 `grok-imagine-edit` edited twice at 14:49 UTC and answered this
- * at 16:46; `venice-sd35` generated at 16:46 and answered this at 18:52 while
+ * at 16:46; `venice-sd35` generated at 16:46 and answered this at 16:52 UTC while
  * `venice-lustify-sdxl` — same seller — still routed. The catalogue entry never
  * changes. So the message a model reads must say "not right now" and name the
  * alternatives, or it reads as a bug in the request and gets retried verbatim,

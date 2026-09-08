@@ -129,7 +129,7 @@ Measured 2026-09-08, all of it:
   `/v1/models` lists 55 image-output models; `venice-z-image-turbo`, `venice-seedream-v5-lite`
   and `venice-hunyuan-image-v3` are all there and all answer `not a valid model ID`.
   `/v1/prices` shows `providers: []` for every image model. `grok-imagine-edit` routed at
-  14:49 UTC and not at 16:46; `venice-sd35` at 16:46 and not at 18:52. So `IMAGE_GEN_MODELS`
+  14:49 UTC and not at 16:46; `venice-sd35` at 16:46 and not at 16:52 UTC. So `IMAGE_GEN_MODELS`
   is hand-kept, and `surplus.js` classifies that 400 as `SurplusNotRoutingError`: `tools.js`
   answers with a "not routing right now, nothing billed, switch to …" message whose
   alternatives fit the call, remembers the gap for `IMAGE_GEN_NOT_ROUTING_WINDOW_MS`
@@ -140,8 +140,11 @@ Measured 2026-09-08, all of it:
 - **`size` is a closed set** — `1024x1024`, `1536x1024`, `1024x1536`, `1792x1024` accepted;
   `1344x768`, `896x1120`, `1920x1080` are `Invalid request parameters`. So `aspect_ratio`
   maps to the nearest of those, and the gateway honours orientation, not the exact ratio —
-  the same as `meta/muse-image`, with different shapes. `aspect_ratio` itself is rejected
-  by the gateway even where the catalogue lists it. An edit keeps the reference's shape.
+  the same as `meta/muse-image`, with different shapes — on `venice-sd35`. `venice-wan-2.7`
+  (always 1024²) and `venice-qwen-image` (always 1024×768) ignore `size` altogether, and
+  the result text says "ignores" rather than "orientation hint" when even that was missed.
+  `aspect_ratio` itself is rejected by the gateway even where the catalogue lists it. An
+  edit keeps the reference's shape.
 - **`/edits` rejects `n`** with the same `Invalid request parameters` it gives an unknown
   size, while `/generations` accepts it. Nothing in the message says which field.
 - A reference sent to a text-only model is `400 model_capability_unsupported` after the

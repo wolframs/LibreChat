@@ -87,6 +87,8 @@ const KNOWN_PRICES = {
   'meta/muse-image': [0.01, 'image'],
   'venice-sd35': [0.01, 'image'],
   'venice-lustify-sdxl': [0.01, 'image'],
+  'venice-wan-2.7': [0.01, 'image'],
+  'venice-qwen-image': [0.01, 'image'],
   'grok-imagine-edit': [0.04, 'image'],
 };
 

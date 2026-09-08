@@ -464,13 +464,24 @@ function buildResultSummary({
   if (aspect_ratio) {
     const requested = ratioValue(aspect_ratio);
     const honoured = dims && ratiosMatch(requested, dims.width / dims.height);
+    // Two ways to miss: the right orientation at a different ratio (muse-image,
+    // venice-sd35), or the model's own fixed shape whatever was asked
+    // (venice-wan-2.7 is always 1024², venice-qwen-image always 1024×768). Say
+    // which, so the model neither promises a crop nor tries another value.
+    const requestedOrientation =
+      requested == null ? null : requested === 1 ? 'square' : requested > 1 ? 'landscape' : 'portrait';
+    const orientationKept = dims && requestedOrientation && orientationOf(dims) === requestedOrientation;
     lines.push(
       aspect_ratio === 'auto' || !dims || honoured
         ? `- aspect_ratio: requested ${aspect_ratio}`
         : `- aspect_ratio: requested ${aspect_ratio}, delivered ` +
-            `${deliveredName ?? `${dims.width}:${dims.height}`}. ${MODEL} treats this argument as ` +
-            'an orientation hint rather than an exact ratio, so a mismatch is expected — it is ' +
-            'not a failure, and re-running with the same value will not change it.',
+            `${deliveredName ?? `${dims.width}:${dims.height}`}. ` +
+            (orientationKept
+              ? `${MODEL} treats this argument as an orientation hint rather than an exact ratio, ` +
+                'so a mismatch is expected — it is not a failure, and re-running with the same value ' +
+                'will not change it.'
+              : `${MODEL} ignores this argument and always returns its own shape, so no value will ` +
+                'change it — pick a different model if the user needs this orientation.'),
     );
   }
 
