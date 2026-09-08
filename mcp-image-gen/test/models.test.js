@@ -1,6 +1,14 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { parseModelList } from '../models.js';
+import { parseModelList, listPriceFor } from '../models.js';
+
+test('a per-megapixel model lists at price × delivered megapixels, flat without dimensions', () => {
+  const flux = { id: 'venice-flux-2-pro', price: 0.045, unit: 'megapixel' };
+  assert.equal(listPriceFor(flux, { width: 1024, height: 768 }), 0.03539);
+  assert.equal(listPriceFor(flux, null), 0.045);
+  assert.equal(listPriceFor({ id: 'venice-sd35', price: 0.01, unit: 'image' }, { width: 1024, height: 1024 }), 0.01);
+  assert.equal(listPriceFor({ id: 'x', price: null }, { width: 1, height: 1 }), null);
+});
 import { sizeForRatio, sniffMime } from '../surplus.js';
 
 test('a slash means OpenRouter, no slash means Surplus, a prefix overrides', () => {
@@ -53,6 +61,8 @@ import { markNotRouting, notRoutingSince, notRoutingMessage, NOT_ROUTING_WINDOW_
 test('"not a valid model ID" and no_sellers_for_model are liquidity, not typos', () => {
   assert.equal(isNotRoutingResponse(400, { error: { code: 'request_rejected', message: 'venice-sd35 is not a valid model ID. Unusual bug?' } }), true);
   assert.equal(isNotRoutingResponse(404, { error: { code: 'no_sellers_for_model', message: 'No available sellers' } }), true);
+  assert.equal(isNotRoutingResponse(503, { error: { type: 'service_unavailable', code: 'no_healthy_sellers', message: "No available sellers for model 'flux.2-klein-4b'." } }), true);
+  assert.equal(isNotRoutingResponse(503, { error: { code: 'overloaded', message: 'try later' } }), false);
   assert.equal(isNotRoutingResponse(400, { error: { code: 'request_rejected', message: 'Invalid request parameters.' } }), false);
   assert.equal(isNotRoutingResponse(403, { error: { code: 'endpoint_not_in_key_scope', message: 'x is not a valid model ID' } }), false);
   assert.equal(new SurplusNotRoutingError('venice-sd35', 'd').model, 'venice-sd35');

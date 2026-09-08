@@ -95,11 +95,20 @@ export class SurplusNotRoutingError extends Error {
   }
 }
 
+// Three shapes mean "no seller right now": a 400 whose message says the id is
+// "not a valid model ID" (the common one — it is a valid id, the catalogue lists
+// it), a 404 `no_sellers_for_model`, and a 503 `no_healthy_sellers` (seen on
+// `flux.2-klein-4b` 2026-09-08 after a 35 s wait). All bill nothing.
 export function isNotRoutingResponse(status, body) {
-  if (status !== 400 && status !== 404) return false;
+  if (status !== 400 && status !== 404 && status !== 503) return false;
   const code = body?.error?.code;
   const message = String(body?.error?.message || '');
-  return code === 'no_sellers_for_model' || /is not a valid model ID/i.test(message);
+  return (
+    code === 'no_sellers_for_model' ||
+    code === 'no_healthy_sellers' ||
+    /is not a valid model ID/i.test(message) ||
+    /No available sellers for model/i.test(message)
+  );
 }
 
 export async function generateImageOnSurplus({ prompt, selectedModel, dataUrls, apiKey, aspect_ratio }) {

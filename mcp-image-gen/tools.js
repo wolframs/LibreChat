@@ -4,7 +4,7 @@ import { getDb } from './db.js';
 import { fetchImageById, extractFileId } from './files.js';
 import { generateImageOnOpenRouter, referencesToDataUrls } from './openrouter.js';
 import { generateImageOnSurplus, SurplusNotRoutingError } from './surplus.js';
-import { DEFAULT_MODEL, MODELS, findModel, canEdit } from './models.js';
+import { DEFAULT_MODEL, MODELS, findModel, canEdit, listPriceFor } from './models.js';
 
 /**
  * The names LibreChat registers these tools under. It appends `_mcp_<server key>`
@@ -362,12 +362,13 @@ async function logImageGenerationUsage(userId, prompt, model, usage, meta = {}) 
       provider: model.provider,
       // OpenRouter settles in the response; Surplus settles in the hourly usage
       // export. `cost` is the settled figure when one exists, else null, and
-      // `listCost` is the catalogue price either way. The reconciler fills
+      // `listCost` is the catalogue price either way (per megapixel × the
+      // delivered size where the catalogue prices that way). The reconciler fills
       // `reconciled.costUSD` on Surplus rows later — match on `model` and
       // `requestedAt`, since the export's request_id is not the response header's.
       cost: usage?.cost ?? null,
       costSource: usage?.cost != null ? 'openrouter' : model.price != null ? 'list' : null,
-      listCost: model.price ?? null,
+      listCost: listPriceFor(model, meta.dims),
       requestId: meta.requestId ?? null,
       requestedAt: meta.requestedAt ?? null,
       adaptedParams: meta.adaptedParams ?? null,
@@ -466,7 +467,8 @@ function buildResultSummary({
     const honoured = dims && ratiosMatch(requested, dims.width / dims.height);
     // Two ways to miss: the right orientation at a different ratio (muse-image,
     // venice-sd35), or the model's own fixed shape whatever was asked
-    // (venice-wan-2.7 is always 1024², venice-qwen-image always 1024×768). Say
+    // (venice-wan-2.7 is always 1024², venice-qwen-image and venice-flux-2-pro
+    // always 1024×768). Say
     // which, so the model neither promises a crop nor tries another value.
     const requestedOrientation =
       requested == null ? null : requested === 1 ? 'square' : requested > 1 ? 'landscape' : 'portrait';
@@ -502,8 +504,9 @@ function buildResultSummary({
   } else if (model.provider === 'surplus') {
     lines.push(
       model.price != null
-        ? `- cost: about $${model.price} list price (server Surplus key; the marketplace usually settles ` +
-            'below list, and the settled figure is recorded later)'
+        ? `- cost: about $${listPriceFor(model, dims)} list price` +
+            `${model.unit === 'megapixel' ? ` ($${model.price}/megapixel)` : ''} (server Surplus key; ` +
+            'the marketplace usually settles below list, and the settled figure is recorded later)'
         : '- cost: not reported per call by Surplus (server Surplus key)',
     );
   } else {
@@ -618,7 +621,7 @@ export async function handleGenerateImage(
     console.log(
       `Image generated (${mimeType}, ${dims ? `${dims.width}x${dims.height}` : 'unknown size'}, ` +
         `${buffer.length} bytes), file_id=${fileId}, refs=${referencesUsed}/${urlsToFetch.length}, ` +
-        `cost=${usage?.cost ?? (model.price != null ? `list ${model.price}` : 'unknown')}` +
+        `cost=${usage?.cost ?? (model.price != null ? `list ${listPriceFor(model, dims)}` : 'unknown')}` +
         `${requestId ? `, request_id=${requestId}` : ''}`,
     );
     await logImageGenerationUsage(userId, prompt, model, usage, {

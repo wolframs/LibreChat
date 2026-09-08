@@ -129,8 +129,10 @@ Measured 2026-09-08, all of it:
   `/v1/models` lists 55 image-output models; `venice-z-image-turbo`, `venice-seedream-v5-lite`
   and `venice-hunyuan-image-v3` are all there and all answer `not a valid model ID`.
   `/v1/prices` shows `providers: []` for every image model. `grok-imagine-edit` routed at
-  14:49 UTC and not at 16:46; `venice-sd35` at 16:46 and not at 16:52 UTC. So `IMAGE_GEN_MODELS`
-  is hand-kept, and `surplus.js` classifies that 400 as `SurplusNotRoutingError`: `tools.js`
+  14:49 UTC and not at 16:46; `venice-sd35` at 16:46 and not at 16:52 UTC. The refusal has
+  three shapes — that 400, a 404 `no_sellers_for_model`, and a 503 `no_healthy_sellers`
+  after a ~35 s wait (`flux.2-klein-4b`, 19:54 UTC). So `IMAGE_GEN_MODELS`
+  is hand-kept, and `surplus.js` classifies all three as `SurplusNotRoutingError`: `tools.js`
   answers with a "not routing right now, nothing billed, switch to …" message whose
   alternatives fit the call, remembers the gap for `IMAGE_GEN_NOT_ROUTING_WINDOW_MS`
   (3 min) and refuses a repeat pre-flight, and `healthz.surplusNotRouting` lists it.
@@ -151,8 +153,9 @@ Measured 2026-09-08, all of it:
   `1344x768`, `896x1120`, `1920x1080` are `Invalid request parameters`. So `aspect_ratio`
   maps to the nearest of those, and the gateway honours orientation, not the exact ratio —
   the same as `meta/muse-image`, with different shapes — on `venice-sd35`. `venice-wan-2.7`
-  (always 1024²) and `venice-qwen-image` (always 1024×768) ignore `size` altogether, and
-  the result text says "ignores" rather than "orientation hint" when even that was missed.
+  (always 1024²), `venice-qwen-image` and `venice-flux-2-pro` (always 1024×768) ignore
+  `size` altogether, and the result text says "ignores" rather than "orientation hint" when
+  even that was missed.
   `aspect_ratio` itself is rejected by the gateway even where the catalogue lists it. An
   edit keeps the reference's shape.
 - **`/edits` rejects `n`** with the same `Invalid request parameters` it gives an unknown
@@ -165,8 +168,17 @@ Measured 2026-09-08, all of it:
   `cost-dashboard/reconcile.py` writes `reconciled.costUSD` onto it — matched by model and
   `requestedAt`, since the export's `request_id` is not the response's `x-request-id`.
   Settled at ~35% of list on the day: `venice-sd35` $0.0035, `grok-imagine-edit` $0.014.
+- **Read `pricing.media_unit`.** `venice-flux-2-pro` is $0.045 per **megapixel**, not per
+  image; `listPriceFor` in `models.js` books price × delivered pixels (1024×768 → $0.0354)
+  once the dimensions are read, and the flat figure pre-flight. Surplus list prices are
+  also not the provider's canonical ones (hunyuan-v3 $0.01 here, $0.12 at Venice).
+- **The `model` description carries quality notes** (`NOTES` in `models.js`): the $0.01
+  models are SDXL/SD3.5-class and mangle a compositional prompt, `venice-flux-2-pro`
+  renders it. Measured 2026-09-08 with one abstract and one plain prompt; the yaml
+  instructions turn that into a ladder (demanding → flux-2-pro, explicit → lustify).
 - Every Venice-served response carries `x-si-adapted-params: safe_mode`. Recorded on the
-  usage row (`adaptedParams`), not interpreted.
+  usage row (`adaptedParams`), not interpreted. No cost header comes with it —
+  `x-si-buyer-cost-micro` is advertised in the CORS expose list and absent.
 
 ## Keepalive
 

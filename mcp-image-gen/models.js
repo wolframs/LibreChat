@@ -89,6 +89,7 @@ const KNOWN_PRICES = {
   'venice-lustify-sdxl': [0.01, 'image'],
   'venice-wan-2.7': [0.01, 'image'],
   'venice-qwen-image': [0.01, 'image'],
+  'venice-flux-2-pro': [0.045, 'megapixel'],
   'grok-imagine-edit': [0.04, 'image'],
   'wan-2-7-pro-edit': [0.094, 'image'],
 };
@@ -146,6 +147,7 @@ const MODERATION = {
   'venice-sd35': 'lenient moderation: swimwear-level prompts fine',
   'venice-wan-2.7': 'lenient moderation: swimwear-level prompts fine',
   'venice-qwen-image': 'lenient moderation: swimwear-level prompts fine',
+  'venice-flux-2-pro': 'lenient moderation: swimwear-level prompts fine',
   'wan-2-7-pro-edit': 'lenient moderation, untested beyond that',
 };
 
@@ -154,9 +156,48 @@ export function moderationText(m) {
   return MODERATION[m.id] || null;
 }
 
+/**
+ * What each model is good or bad at, measured on 2026-09-08 with one demanding
+ * prompt (an art-deco figure whose body is made of luminous calligraphy) and one
+ * simple one (a catgirl pinup). The $0.01 SDXL-class models render the simple
+ * scene and mangle the demanding one; Flux 2 Pro renders both. A model choosing
+ * for a compositional or abstract prompt needs to know that before, not after,
+ * an image the user winces at — and the fixed output shapes belong here too, so
+ * the pick accounts for orientation.
+ */
+const NOTES = {
+  'meta/muse-image': 'agentic, good prompt adherence',
+  'venice-flux-2-pro': 'BEST prompt adherence and composition on the menu — the pick for ' +
+    'demanding, abstract or text-heavy prompts; always 1024x768 whatever ratio is asked; ~50 s',
+  'venice-lustify-sdxl': 'SDXL-class: fine for straightforward pinup or portrait scenes, poor at ' +
+    'abstract or compositional prompts',
+  'venice-sd35': 'SD3.5-class, mid-tier adherence',
+  'venice-wan-2.7': 'always 1024x1024 whatever ratio is asked',
+  'venice-qwen-image': 'always 1024x768 whatever ratio is asked',
+};
+
+export function notesText(m) {
+  return NOTES[m.id] || null;
+}
+
 function priceText(m) {
   if (m.price == null) return 'price unknown';
   return `$${m.price}/${m.unit || 'image'} list`;
+}
+
+/**
+ * The list price of one generation. Most models are priced per image;
+ * `venice-flux-2-pro` is priced per megapixel (`media_unit: megapixel` in the
+ * catalogue), so its 1024×768 output lists at 0.786 × $0.045 ≈ $0.035, not
+ * $0.045. Without dimensions (pre-flight, or an unreadable header) the flat
+ * figure is the upper bound and is what comes back.
+ */
+export function listPriceFor(m, dims) {
+  if (m.price == null) return null;
+  if (m.unit === 'megapixel' && dims?.width > 0 && dims?.height > 0) {
+    return Math.round(m.price * ((dims.width * dims.height) / 1e6) * 1e5) / 1e5;
+  }
+  return m.price;
 }
 
 /**
@@ -173,6 +214,8 @@ export function describeModels() {
     const moderation = moderationText(m);
     if (moderation) bits.push(moderation);
     if (m.features.includes('anime')) bits.push('anime');
+    const notes = notesText(m);
+    if (notes) bits.push(notes);
     return `'${m.id}' (${bits.join('; ')})${m.id === DEFAULT_MODEL ? ' — default' : ''}`;
   });
   return (
