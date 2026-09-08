@@ -3,7 +3,15 @@ import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { SSEServerTransport } from '@modelcontextprotocol/sdk/server/sse.js';
 import { z } from 'zod';
 import { AsyncLocalStorage } from 'async_hooks';
-import { handleGenerateImage, handleGetUserImages, ASPECT_RATIOS, openRouterKey, surplusKey } from './tools.js';
+import {
+  handleGenerateImage,
+  handleGetUserImages,
+  ASPECT_RATIOS,
+  openRouterKey,
+  surplusKey,
+  surplusSpendLast7Days,
+  SURPLUS_WEEKLY_CAP_USD,
+} from './tools.js';
 import { MODELS, MODEL_IDS, DEFAULT_MODEL, loadCatalogue, describeModels } from './models.js';
 import { SURPLUS_BASE } from './surplus.js';
 
@@ -71,7 +79,7 @@ function createMcpServer() {
 const transports = new Map();
 
 /** What `--check` needs to know: which models are configured, and which of them cannot run. */
-function healthReport() {
+async function healthReport() {
   const keys = { openrouter: Boolean(openRouterKey()), surplus: Boolean(surplusKey()) };
   const warnings = [];
   const unusable = MODELS.filter((m) => !keys[m.provider]).map((m) => m.id);
@@ -80,6 +88,19 @@ function healthReport() {
       `no key for ${unusable.join(', ')} — set ${unusable.some((id) => !id.includes('/')) ? 'SURPLUS_IMAGE_KEY' : 'OPENROUTER_KEY'}`,
     );
   }
+  // The weekly cap and where it stands, so `--check` shows a cap about to bite.
+  let surplusWeek = null;
+  if (MODELS.some((m) => m.provider === 'surplus')) {
+    try {
+      const { usd, n } = await surplusSpendLast7Days();
+      surplusWeek = { capUsd: SURPLUS_WEEKLY_CAP_USD, spentUsd: Number(usd.toFixed(4)), images: n };
+      if (SURPLUS_WEEKLY_CAP_USD > 0 && usd >= SURPLUS_WEEKLY_CAP_USD) {
+        warnings.push(`Surplus weekly cap reached ($${usd.toFixed(4)} of $${SURPLUS_WEEKLY_CAP_USD})`);
+      }
+    } catch (err) {
+      warnings.push(`could not read Surplus spend from Mongo: ${err.message}`);
+    }
+  }
   return {
     ok: true,
     defaultModel: DEFAULT_MODEL,
@@ -87,6 +108,7 @@ function healthReport() {
     keys,
     // Kept for the older deploy.sh probe, which looks for `"hasKey":false`.
     hasKey: keys.openrouter || keys.surplus,
+    surplusWeek,
     warnings,
     dailyLimit: parseInt(process.env.IMAGE_GEN_DAILY_LIMIT ?? '3', 10),
     cooldownSec: parseInt(process.env.IMAGE_GEN_COOLDOWN_SEC ?? '30', 10),
@@ -95,8 +117,8 @@ function healthReport() {
 }
 
 // Probed by scripts/deploy.sh, alongside the /cost and /export sidecar checks.
-app.get('/healthz', (_req, res) => {
-  res.json(healthReport());
+app.get('/healthz', async (_req, res) => {
+  res.json(await healthReport());
 });
 
 app.get('/sse', async (req, res) => {
@@ -136,5 +158,8 @@ app.listen(PORT, () => {
   }
   console.log(`  catalogue: ${catalogue.fetched ? `fetched (${catalogue.matched} matched)` : `not fetched${catalogue.error ? ` — ${catalogue.error}` : ''}`}`);
   console.log(`  MONGO_URI: ${MONGO_URI}`);
-  for (const w of healthReport().warnings) console.warn(`  WARNING:   ${w}`);
+  console.log(`  surplus cap: $${SURPLUS_WEEKLY_CAP_USD}/7d`);
+  healthReport().then((h) => {
+    for (const w of h.warnings) console.warn(`  WARNING:   ${w}`);
+  });
 });

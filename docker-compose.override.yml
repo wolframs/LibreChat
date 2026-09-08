@@ -114,6 +114,9 @@ services:
       - SURPLUS_IMAGE_KEY=${SURPLUS_IMAGE_KEY:-}
       - IMAGE_GEN_MODELS=${IMAGE_GEN_MODELS:-meta/muse-image}
       - IMAGE_GEN_MODEL=${IMAGE_GEN_MODEL:-meta/muse-image}
+      # Rolling 7-day dollar cap on Surplus-routed spend, enforced here because
+      # the marketplace's own per-key `limits` field is accepted and discarded.
+      - IMAGE_GEN_SURPLUS_WEEKLY_USD=${IMAGE_GEN_SURPLUS_WEEKLY_USD:-1.5}
       - IMAGE_GEN_API=${IMAGE_GEN_API:-auto}
       - IMAGE_GEN_DAILY_LIMIT=${IMAGE_GEN_DAILY_LIMIT:-3}
       - IMAGE_GEN_COOLDOWN_SEC=${IMAGE_GEN_COOLDOWN_SEC:-30}

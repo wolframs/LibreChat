@@ -37,6 +37,7 @@ the comment above `createMcpServer()` in `index.js`.
 | `SURPLUS_IMAGE_KEY` | — | Needed for Surplus models. Its own key, **not** `SURPLUS_API_KEY`: see *Surplus* below. |
 | `IMAGE_GEN_MODELS` | `meta/muse-image` | Comma-separated menu. `vendor/name` ⇒ OpenRouter, bare name ⇒ Surplus; `openrouter:`/`surplus:` prefix overrides. First entry is the default. |
 | `IMAGE_GEN_MODEL` | first of the list | Which listed model is the default. |
+| `IMAGE_GEN_SURPLUS_WEEKLY_USD` | `1.5` | Rolling 7-day dollar cap on Surplus spend, all users. Enforced here because the key cannot cap itself. `0` disables. |
 | `IMAGE_GEN_API` | `auto` | `images` \| `chat` \| `auto`. OpenRouter route only. See below. |
 | `IMAGE_GEN_DAILY_LIMIT` | `3` | Per user, per container-local day. `0` disables. |
 | `IMAGE_GEN_COOLDOWN_SEC` | `30` | Per user. `0` disables. |
@@ -118,7 +119,11 @@ Measured 2026-09-08, all of it:
 - **A key minted before the images endpoints existed cannot call them.** `SURPLUS_API_KEY`
   (2026-08-03) answers `/v1/images/*` with `403 endpoint_not_in_key_scope`; a key minted
   the same day works. `/v1/buyer/keys` lists no scope field and takes none, so the only fix
-  is a new key. Hence `SURPLUS_IMAGE_KEY`, labelled `librechat-imager` in the dashboard.
+  is a new key. Hence `SURPLUS_IMAGE_KEY`, labelled `librechat-imager` in the dashboard
+  (id `01M20QD32N7M2RADBJ0D44J9AD`, prefix `inf_eb82d5b1`).
+- **The key cannot cap itself.** `PUT /v1/buyer/keys/{id}/preferences` accepts a `limits`
+  object and stores `{}` — 200, no error. `IMAGE_GEN_SURPLUS_WEEKLY_USD` in `tools.js` is
+  the cap, summed from `mcp_image_gen_usage` over a rolling week.
 - **A catalogue entry is not a routable model.** `/v1/models` lists 55 image-output models;
   `venice-z-image-turbo`, `venice-seedream-v5-lite` and `venice-hunyuan-image-v3` are all
   there and all answer `not a valid model ID`. `/v1/prices` shows `providers: []` for every

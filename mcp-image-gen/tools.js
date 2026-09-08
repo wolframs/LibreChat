@@ -233,6 +233,54 @@ async function checkImageGenerationLimit(userId) {
 }
 
 /**
+ * Rolling seven-day dollar cap on Surplus-routed spend, across all users.
+ *
+ * This exists because the marketplace cannot do it: `PUT /v1/buyer/keys/{id}/
+ * preferences` takes a `limits` object the docs call "reserved for future spend
+ * caps; send {}", and on 2026-09-08 it answered `{"weekly_usd":1.5}` with 200 and
+ * stored `{}`. The key spends the whole credit balance until then. So the cap the
+ * operator wanted on the key is enforced here, on the key's only consumer.
+ *
+ * Spend is summed the same way the docs sum it: the settled figure where the
+ * reconciler has written one, the provider's own figure where the response
+ * carried one, list price otherwise. List is ~3× settled on Surplus, so an
+ * unreconciled hour counts conservatively and the cap is never overshot by it.
+ * The check is made against the *list* price of the call about to be made.
+ */
+export const SURPLUS_WEEKLY_CAP_USD = parseFloat(process.env.IMAGE_GEN_SURPLUS_WEEKLY_USD ?? '1.5');
+
+const SPEND_EXPR = { $ifNull: ['$reconciled.costUSD', { $ifNull: ['$cost', { $ifNull: ['$listCost', 0] }] }] };
+
+export async function surplusSpendLast7Days() {
+  const db = await getDb();
+  const since = new Date(Date.now() - 7 * 24 * 3600 * 1000);
+  const [row] = await db
+    .collection('mcp_image_gen_usage')
+    .aggregate([
+      { $match: { provider: 'surplus', createdAt: { $gte: since } } },
+      { $group: { _id: null, usd: { $sum: SPEND_EXPR }, n: { $sum: 1 } } },
+    ])
+    .toArray();
+  return { usd: row?.usd ?? 0, n: row?.n ?? 0, since };
+}
+
+async function checkSurplusWeeklyCap(model) {
+  if (model.provider !== 'surplus' || !(SURPLUS_WEEKLY_CAP_USD > 0)) return { allowed: true };
+  const { usd, n } = await surplusSpendLast7Days();
+  const next = model.price ?? 0;
+  if (usd + next > SURPLUS_WEEKLY_CAP_USD) {
+    return {
+      allowed: false,
+      reason:
+        `Surplus image spend is at $${usd.toFixed(4)} over the last 7 days (${n} images) against a ` +
+        `$${SURPLUS_WEEKLY_CAP_USD} weekly cap, so ${model.id} cannot run right now. ` +
+        'The OpenRouter model(s) are not capped this way — use one of those, or wait.',
+    };
+  }
+  return { allowed: true };
+}
+
+/**
  * One row per generation. `cost` is OpenRouter's own settled figure for the call,
  * kept because this spend never reaches LibreChat's `transactions` collection and
  * is therefore invisible to /cost — this collection is the only record of it.
@@ -425,6 +473,13 @@ export async function handleGenerateImage(
       return {
         isError: true,
         content: [{ type: 'text', text: `Limit Exceeded: ${limitCheck.reason}` }],
+      };
+    }
+    const capCheck = await checkSurplusWeeklyCap(model);
+    if (!capCheck.allowed) {
+      return {
+        isError: true,
+        content: [{ type: 'text', text: `Limit Exceeded: ${capCheck.reason}` }],
       };
     }
 
