@@ -278,6 +278,105 @@ def apply_match(transactions, group, entry, ambiguous, now=None):
     return updates
 
 
+#: How far the export's arrival timestamp may sit from the sidecar's own
+#: `requestedAt`, which it stamps just before sending. Image generations take
+#: 15–80 s, so the request-side stamp is the one to match on, not `createdAt`.
+IMAGE_MATCH_WINDOW = timedelta(seconds=int(os.environ.get("SURPLUS_IMAGE_MATCH_WINDOW", "180")))
+
+
+def reconcile_image_usage(usage, rows, now=None):
+    """Settle `mcp_image_gen_usage` rows served by Surplus against the export.
+
+    Image rows are simpler than transactions — one row per request on both
+    sides, zero tokens on both sides — and harder in one way: the sidecar has
+    no token count to pin a match with, only the model and the moment it sent
+    the request. So a row is paired with the export row of the same model
+    nearest in time within `IMAGE_MATCH_WINDOW`, greedily, and flagged
+    `ambiguous` when more than one candidate was in range. Two generations of
+    the same model inside three minutes settle to the same list-derived price
+    anyway, so an ambiguous match is a mis-attribution between near-identical
+    figures, not a wrong total.
+
+    Returns (matched, ambiguous, unmatched).
+    """
+    now = now or datetime.now(timezone.utc)
+    pending = list(
+        usage.find(
+            {"provider": "surplus", "reconciled": {"$exists": False}},
+            {"_id": 1, "model": 1, "requestedAt": 1, "createdAt": 1},
+        )
+    )
+    if not pending:
+        return 0, 0, 0
+
+    by_model = {}
+    for row in rows:
+        # Token columns are "0" on image rows; anything with tokens is chat.
+        if _as_int(row.get("input_tokens")) or _as_int(row.get("output_tokens")):
+            continue
+        at = _parse_ts(row.get("created_at"))
+        if at is None:
+            continue
+        by_model.setdefault(row.get("model"), []).append(
+            {
+                "request_id": row.get("request_id"),
+                "at": at,
+                "cost": _as_float(row.get("buyer_cost_usd")),
+                "direct": _as_float(row.get("direct_cost_usd")),
+                "status": row.get("settlement_status"),
+                "tx_hash": row.get("tx_hash"),
+            }
+        )
+
+    candidates = []
+    for doc in pending:
+        sent = doc.get("requestedAt") or doc.get("createdAt")
+        if sent is None:
+            continue
+        if sent.tzinfo is None:
+            sent = sent.replace(tzinfo=timezone.utc)
+        for entry in by_model.get(doc.get("model"), []):
+            delta = abs((entry["at"] - sent).total_seconds())
+            if delta <= IMAGE_MATCH_WINDOW.total_seconds():
+                candidates.append((delta, doc, entry))
+    candidates.sort(key=lambda c: c[0])
+
+    contested = {}
+    for _, doc, _entry in candidates:
+        contested[doc["_id"]] = contested.get(doc["_id"], 0) + 1
+
+    claimed = set()
+    used = set()
+    matched = ambiguous = 0
+    for _, doc, entry in candidates:
+        if doc["_id"] in claimed or entry["request_id"] in used:
+            continue
+        claimed.add(doc["_id"])
+        used.add(entry["request_id"])
+        is_ambiguous = contested.get(doc["_id"], 1) > 1
+        usage.update_one(
+            {"_id": doc["_id"]},
+            {
+                "$set": {
+                    "reconciled": {
+                        "source": "surplus",
+                        "requestId": entry["request_id"],
+                        "costUSD": entry["cost"],
+                        "directUSD": entry["direct"],
+                        "settlementStatus": entry["status"],
+                        "txHash": entry["tx_hash"],
+                        "ambiguous": is_ambiguous,
+                        "at": now,
+                    }
+                }
+            },
+        )
+        matched += 1
+        ambiguous += 1 if is_ambiguous else 0
+
+    return matched, ambiguous, len(pending) - matched
+
+
 def run_once(transactions, session=None):
     """One reconciliation pass. Returns a summary dict for logging and /cost.
 
@@ -302,6 +401,11 @@ def run_once(transactions, session=None):
         updated += apply_match(transactions, group, entry, is_ambiguous, now=started)
         ambiguous += 1 if is_ambiguous else 0
 
+    # The image sidecar's own ledger lives beside `transactions`, never in it.
+    images_matched, images_ambiguous, images_unmatched = reconcile_image_usage(
+        transactions.database["mcp_image_gen_usage"], rows, now=started
+    )
+
     return _record(
         {
             "ok": True,
@@ -312,6 +416,9 @@ def run_once(transactions, session=None):
             "ambiguous": ambiguous,
             "transactions_updated": updated,
             "unmatched": len(unmatched),
+            "images_matched": images_matched,
+            "images_ambiguous": images_ambiguous,
+            "images_unmatched": images_unmatched,
         }
     )
 

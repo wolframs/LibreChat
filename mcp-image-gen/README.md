@@ -1,23 +1,28 @@
 # mcp-image-gen
 
-MCP sidecar that gives LibreChat agents image generation and editing through
-OpenRouter. Vendored from
+MCP sidecar (`imager` in `librechat.yaml`) that gives LibreChat agents image
+generation and editing through **OpenRouter** and **Surplus Intelligence** — the
+model picked per call decides the route. Vendored from
 [nguyen1oc/mcp-librechat-image-generation-via-OP](https://github.com/nguyen1oc/mcp-librechat-image-generation-via-OP)
-(copied, not submoduled — same treatment as `cost-dashboard/`).
+(copied, not submoduled — same treatment as `cost-dashboard/`); the Surplus
+provider and the model registry are this fork's.
 
 Reached over SSE at `http://mcp-image-gen:3013/sse`; configured in
-`librechat.yaml` under `mcpServers.openrouter-imager`. Full write-up in
+`librechat.yaml` under `mcpServers.imager`. Full write-up in
 `~/LibreChatDocs/image-generation.md`.
 
 ## Tools
 
 - `get_user_images(limit?)` — lists the caller's uploaded images with index
   aliases (`INDEX_1`, …) and local file_ids.
-- `generate_image(prompt, reference_image_url?, reference_image_urls?, aspect_ratio?)`
-  — text-to-image, or image-to-image when references are given.
+- `generate_image(prompt, model?, reference_image_url?, reference_image_urls?, aspect_ratio?)`
+  — text-to-image, or image-to-image when references are given. `model` is an
+  enum of `IMAGE_GEN_MODELS`, and its description (built at startup from the
+  registry plus the Surplus catalogue) tells the model each option's provider,
+  list price and whether it takes references.
 
 Usage guidance for the model lives **in `librechat.yaml`**, inline under
-`mcpServers.openrouter-imager.serverInstructions`, and is folded into the system
+`mcpServers.imager.serverInstructions`, and is folded into the system
 prompt — so there is nothing to paste into an agent's Instructions box. It is
 deliberately *not* declared by this server: LibreChat only reads a server's own
 declared instructions in `MCPServerInspector`, which skips any server carrying
@@ -28,9 +33,11 @@ the comment above `createMcpServer()` in `index.js`.
 
 | Var | Default | Notes |
 |---|---|---|
-| `OPENROUTER_KEY` | — | Required. **Server-wide** — every user of the stack spends on this one key. |
-| `IMAGE_GEN_MODEL` | `meta/muse-image` | Any OpenRouter image model. |
-| `IMAGE_GEN_API` | `auto` | `images` \| `chat` \| `auto`. See below. |
+| `OPENROUTER_KEY` | — | Needed for OpenRouter models. **Server-wide** — every user of the stack spends on this one key. |
+| `SURPLUS_IMAGE_KEY` | — | Needed for Surplus models. Its own key, **not** `SURPLUS_API_KEY`: see *Surplus* below. |
+| `IMAGE_GEN_MODELS` | `meta/muse-image` | Comma-separated menu. `vendor/name` ⇒ OpenRouter, bare name ⇒ Surplus; `openrouter:`/`surplus:` prefix overrides. First entry is the default. |
+| `IMAGE_GEN_MODEL` | first of the list | Which listed model is the default. |
+| `IMAGE_GEN_API` | `auto` | `images` \| `chat` \| `auto`. OpenRouter route only. See below. |
 | `IMAGE_GEN_DAILY_LIMIT` | `3` | Per user, per container-local day. `0` disables. |
 | `IMAGE_GEN_COOLDOWN_SEC` | `30` | Per user. `0` disables. |
 | `IMAGE_GEN_MAX_INLINE_BYTES` | `10485760` | Above this the image is described but not attached. Keep at or below the api container's `MCP_IMAGE_DATA_MAX_BYTES`. |
@@ -94,6 +101,47 @@ Values live in the stack's `.env`; the compose service passes them through.
     text (`packages/api/src/mcp/parsers.ts`); before that its cap threw and took the whole
     result with it, which is the fault this guard was originally written for. Keep the two
     values in step regardless.
+14. **A second provider, chosen per call.** `models.js` is the registry, `surplus.js` the
+    Surplus route, and `tools.js` picks by the entry's provider. Upstream is OpenRouter-only
+    with one model baked in. Everything measured about the Surplus route is in the next
+    section and in the comment atop `surplus.js`.
+
+## Surplus Intelligence
+
+Surplus reaches its image models through the **OpenAI images shape**, not OpenRouter's:
+`POST /v1/images/generations` `{model, prompt, size, response_format}` and
+`POST /v1/images/edits` with `image` (one data URI) or `input_images` (up to 8, first is the
+base). JSON, not multipart. Both answer `{created, data: [{b64_json}]}` and nothing else —
+no `media_type` (the container is sniffed off the bytes), no `usage`, and no cost header.
+Measured 2026-09-08, all of it:
+
+- **A key minted before the images endpoints existed cannot call them.** `SURPLUS_API_KEY`
+  (2026-08-03) answers `/v1/images/*` with `403 endpoint_not_in_key_scope`; a key minted
+  the same day works. `/v1/buyer/keys` lists no scope field and takes none, so the only fix
+  is a new key. Hence `SURPLUS_IMAGE_KEY`, labelled `librechat-imager` in the dashboard.
+- **A catalogue entry is not a routable model.** `/v1/models` lists 55 image-output models;
+  `venice-z-image-turbo`, `venice-seedream-v5-lite` and `venice-hunyuan-image-v3` are all
+  there and all answer `not a valid model ID`. `/v1/prices` shows `providers: []` for every
+  image model. The only test is a paid request, so `IMAGE_GEN_MODELS` is hand-kept and an
+  entry that stops routing fails loudly with the gateway's message. Verified routable:
+  `venice-sd35`, `venice-lustify-sdxl`, `grok-imagine-edit`.
+- **`size` is a closed set** — `1024x1024`, `1536x1024`, `1024x1536`, `1792x1024` accepted;
+  `1344x768`, `896x1120`, `1920x1080` are `Invalid request parameters`. So `aspect_ratio`
+  maps to the nearest of those, and the gateway honours orientation, not the exact ratio —
+  the same as `meta/muse-image`, with different shapes. `aspect_ratio` itself is rejected
+  by the gateway even where the catalogue lists it. An edit keeps the reference's shape.
+- **`/edits` rejects `n`** with the same `Invalid request parameters` it gives an unknown
+  size, while `/generations` accepts it. Nothing in the message says which field.
+- A reference sent to a text-only model is `400 model_capability_unsupported` after the
+  round-trip; `tools.js` refuses it before the request instead. An edit model on
+  `/generations` works as plain text-to-image.
+- **Cost arrives an hour later.** The settled charge exists only in the buyer usage export,
+  so the usage row records the catalogue list price (`listCost`, `costSource: "list"`) and
+  `cost-dashboard/reconcile.py` writes `reconciled.costUSD` onto it — matched by model and
+  `requestedAt`, since the export's `request_id` is not the response's `x-request-id`.
+  Settled at ~35% of list on the day: `venice-sd35` $0.0035, `grok-imagine-edit` $0.014.
+- Every Venice-served response carries `x-si-adapted-params: safe_mode`. Recorded on the
+  usage row (`adaptedParams`), not interpreted.
 
 ## The trap: attaching an image is not delivering one
 
@@ -164,7 +212,7 @@ Three consequences still worth knowing:
   video returned by an MCP tool take the same route without further work. Nothing inspects a
   MIME type; an endpoint that will not take a block answers with a 400 naming it.
 
-## Route selection
+## Route selection (OpenRouter)
 
 Two OpenRouter routes reach an image model and they are not interchangeable:
 
@@ -178,11 +226,12 @@ Two OpenRouter routes reach an image model and they are not interchangeable:
 `auto` sends anything matching `gemini` down the chat route and everything else to
 `/images`.
 
-## Rebuild
+## Rebuild and test
 
 ```bash
 cd ~/projects/librechat
 docker compose up -d --build mcp-image-gen
+(cd mcp-image-gen && npm test)     # registry parsing, size mapping, MIME sniffing
 ```
 
 It is not part of the api image, so `./scripts/deploy.sh` does **not** rebuild it —

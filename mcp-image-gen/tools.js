@@ -2,7 +2,9 @@ import { ObjectId } from 'mongodb';
 import { randomUUID } from 'crypto';
 import { getDb } from './db.js';
 import { fetchImageById, extractFileId } from './files.js';
-import { generateImageOnOpenRouter } from './openrouter.js';
+import { generateImageOnOpenRouter, referencesToDataUrls } from './openrouter.js';
+import { generateImageOnSurplus } from './surplus.js';
+import { DEFAULT_MODEL, findModel, canEdit } from './models.js';
 import {
   imageDimensions,
   nearestRatio,
@@ -12,7 +14,24 @@ import {
   ratiosMatch,
 } from './imageinfo.js';
 
-export const MODEL = process.env.IMAGE_GEN_MODEL || 'meta/muse-image';
+export const MODEL = DEFAULT_MODEL;
+
+export function openRouterKey() {
+  return process.env.OPENROUTER_KEY || process.env.OPENROUTER_API_KEY || '';
+}
+
+/**
+ * A Surplus key of its own, not `SURPLUS_API_KEY`. That one is the cost
+ * dashboard's and predates the images endpoints: a key minted before
+ * they existed answers `/v1/images/*` with 403 `endpoint_not_in_key_scope`,
+ * and nothing about a key says which endpoints it can call — `/v1/buyer/keys`
+ * lists no scope field. A key minted 2026-09-08 could call them at once. So a
+ * fresh key, labelled `librechat-imager` in the Surplus dashboard, and the
+ * `--check` probe reports when it is missing.
+ */
+export function surplusKey() {
+  return process.env.SURPLUS_IMAGE_KEY || '';
+}
 
 /**
  * OpenRouter validates aspect_ratio against this closed set and rejects anything
@@ -226,8 +245,19 @@ async function logImageGenerationUsage(userId, prompt, model, usage, meta = {}) 
       userId: new ObjectId(userId),
       createdAt: new Date(),
       prompt,
-      model,
+      model: model.id,
+      provider: model.provider,
+      // OpenRouter settles in the response; Surplus settles in the hourly usage
+      // export. `cost` is the settled figure when one exists, else null, and
+      // `listCost` is the catalogue price either way. The reconciler fills
+      // `reconciled.costUSD` on Surplus rows later — match on `model` and
+      // `requestedAt`, since the export's request_id is not the response header's.
       cost: usage?.cost ?? null,
+      costSource: usage?.cost != null ? 'openrouter' : model.price != null ? 'list' : null,
+      listCost: model.price ?? null,
+      requestId: meta.requestId ?? null,
+      requestedAt: meta.requestedAt ?? null,
+      adaptedParams: meta.adaptedParams ?? null,
       usage: usage ?? null,
       // `fileId` is the same id the saved `files` row carries, so a usage row can be
       // joined back to the image it paid for.
@@ -271,6 +301,7 @@ async function logImageGenerationUsage(userId, prompt, model, usage, meta = {}) 
  * `packages/api/src/mcp/__tests__/delivery.test.ts` holds the whole chain down.
  */
 function buildResultSummary({
+  model,
   fileId,
   dims,
   mimeType,
@@ -281,6 +312,7 @@ function buildResultSummary({
   referenceUsed,
   oversized,
 }) {
+  const MODEL = model.id;
   const deliveredName = dims ? nearestRatio(dims, ASPECT_RATIOS) : null;
   const lines = [];
 
@@ -306,7 +338,7 @@ function buildResultSummary({
         '(If it does not resolve, call `get_user_images`: this image is the newest entry, INDEX_1.)',
     );
   }
-  lines.push(`- model: ${MODEL}`);
+  lines.push(`- model: ${MODEL} (via ${model.provider === 'surplus' ? 'Surplus Intelligence' : 'OpenRouter'})`);
   lines.push(`- format: ${mimeType}`);
   lines.push(
     dims
@@ -339,25 +371,49 @@ function buildResultSummary({
     );
   }
 
-  lines.push(
-    usage?.cost != null
-      ? `- cost: $${Number(usage.cost).toFixed(5)} (server OpenRouter key; this spend is not visible in /cost)`
-      : '- cost: not reported by OpenRouter for this call',
-  );
+  if (usage?.cost != null) {
+    lines.push(
+      `- cost: $${Number(usage.cost).toFixed(5)} (server OpenRouter key; this spend is not visible in /cost)`,
+    );
+  } else if (model.provider === 'surplus') {
+    lines.push(
+      model.price != null
+        ? `- cost: about $${model.price} list price (server Surplus key; the marketplace usually settles ` +
+            'below list, and the settled figure is recorded later; this spend is not visible in /cost)'
+        : '- cost: not reported per call by Surplus (server Surplus key; this spend is not visible in /cost)',
+    );
+  } else {
+    lines.push('- cost: not reported by OpenRouter for this call');
+  }
 
   return lines.join('\n');
 }
 
+/** The provider-specific call, chosen by the registry entry. */
+async function generateWith(model, args) {
+  if (model.provider === 'surplus') {
+    return generateImageOnSurplus({ ...args, apiKey: surplusKey() });
+  }
+  return generateImageOnOpenRouter({ ...args, apiKey: openRouterKey() });
+}
+
 export async function handleGenerateImage(
-  { prompt, reference_image_url, reference_image_urls, aspect_ratio },
+  { prompt, model: requestedModel, reference_image_url, reference_image_urls, aspect_ratio },
   context,
 ) {
   try {
-    const apiKey = process.env.OPENROUTER_KEY || process.env.OPENROUTER_API_KEY;
-    if (!apiKey) {
+    const model = findModel(requestedModel || DEFAULT_MODEL);
+    if (!model) {
       return {
         isError: true,
-        content: [{ type: 'text', text: 'OPENROUTER_KEY is not set on the server.' }],
+        content: [{ type: 'text', text: `Unknown model "${requestedModel}". This server is not configured for it.` }],
+      };
+    }
+    const keyName = model.provider === 'surplus' ? 'SURPLUS_IMAGE_KEY' : 'OPENROUTER_KEY';
+    if (!(model.provider === 'surplus' ? surplusKey() : openRouterKey())) {
+      return {
+        isError: true,
+        content: [{ type: 'text', text: `${keyName} is not set on the server, so ${model.id} cannot be used.` }],
       };
     }
 
@@ -381,19 +437,29 @@ export async function handleGenerateImage(
 
     const urlsToFetch = await resolveImageIds(rawUrlsToFetch, userId);
 
+    // Surplus answers a reference sent to a text-only model with a 400 after the
+    // round-trip; saying so here is free and names the alternative.
+    if (urlsToFetch.length > 0 && !canEdit(model)) {
+      return {
+        isError: true,
+        content: [
+          {
+            type: 'text',
+            text:
+              `${model.id} is text-to-image only and cannot take reference images. Either drop the ` +
+              'references, or pick a model whose description says image-to-image.',
+          },
+        ],
+      };
+    }
+
     console.log(
-      `Generating image. Model: ${MODEL}, Aspect Ratio: ${aspect_ratio || 'default'}, References: ${urlsToFetch.length}`,
+      `Generating image. Model: ${model.id} (${model.provider}), Aspect Ratio: ${aspect_ratio || 'default'}, References: ${urlsToFetch.length}`,
     );
 
-    const { base64Image, mimeType, usage, referencesUsed } = await generateImageOnOpenRouter({
-      prompt,
-      selectedModel: MODEL,
-      urlsToFetch,
-      fetchImageById,
-      extractFileId,
-      apiKey,
-      aspect_ratio,
-    });
+    const dataUrls = await referencesToDataUrls({ urlsToFetch, fetchImageById, extractFileId });
+    const { base64Image, mimeType, usage, referencesUsed, requestId, requestedAt, adaptedParams } =
+      await generateWith(model, { prompt, selectedModel: model.id, dataUrls, aspect_ratio });
 
     const buffer = Buffer.from(base64Image, 'base64');
     const dims = imageDimensions(buffer);
@@ -413,10 +479,14 @@ export async function handleGenerateImage(
     console.log(
       `Image generated (${mimeType}, ${dims ? `${dims.width}x${dims.height}` : 'unknown size'}, ` +
         `${buffer.length} bytes), file_id=${fileId}, refs=${referencesUsed}/${urlsToFetch.length}, ` +
-        `cost=${usage?.cost ?? 'unknown'}`,
+        `cost=${usage?.cost ?? (model.price != null ? `list ${model.price}` : 'unknown')}` +
+        `${requestId ? `, request_id=${requestId}` : ''}`,
     );
-    await logImageGenerationUsage(userId, prompt, MODEL, usage, {
+    await logImageGenerationUsage(userId, prompt, model, usage, {
       fileId,
+      requestId,
+      requestedAt,
+      adaptedParams,
       dims,
       bytes: buffer.length,
       referencesRequested: urlsToFetch.length,
@@ -428,6 +498,7 @@ export async function handleGenerateImage(
       {
         type: 'text',
         text: buildResultSummary({
+          model,
           fileId,
           dims,
           mimeType,
@@ -451,8 +522,10 @@ export async function handleGenerateImage(
 
     return { content };
   } catch (err) {
-    // OpenRouter puts the actionable part in the response body — an unsupported
-    // aspect_ratio, for instance, is a 400 that names the values it will accept.
+    // Both gateways put the actionable part in the response body — an unsupported
+    // aspect_ratio, for instance, is a 400 that names the values it will accept,
+    // and Surplus's `not a valid model ID` is the only sign a listed model is not
+    // actually routable.
     // Surfacing only err.message ("Request failed with status code 400") strands
     // the agent, so pass the body through.
     let detail = err.message;

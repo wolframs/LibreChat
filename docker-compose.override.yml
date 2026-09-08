@@ -91,8 +91,9 @@ services:
       - mongodb
     restart: unless-stopped
 
-  # MCP sidecar exposing image generation/editing to agents over SSE, backed by
-  # OpenRouter. Internal-only; the api container reaches it at
+  # MCP sidecar ("imager" in librechat.yaml) exposing image generation/editing to
+  # agents over SSE, backed by OpenRouter and Surplus Intelligence — the model
+  # chosen per call decides which. Internal-only; the api container reaches it at
   # http://mcp-image-gen:3013/sse (allow-listed in librechat.yaml -> mcpSettings).
   #
   # It reads the `files` collection and the image bind mounts directly, so a
@@ -109,6 +110,9 @@ services:
       # Server-wide key: every account on this stack spends on it. The per-user
       # daily limit below, not the key, is what bounds that.
       - OPENROUTER_KEY=${OPENROUTER_KEY:-}
+      # Its own Surplus key, not SURPLUS_API_KEY — see .env for why.
+      - SURPLUS_IMAGE_KEY=${SURPLUS_IMAGE_KEY:-}
+      - IMAGE_GEN_MODELS=${IMAGE_GEN_MODELS:-meta/muse-image}
       - IMAGE_GEN_MODEL=${IMAGE_GEN_MODEL:-meta/muse-image}
       - IMAGE_GEN_API=${IMAGE_GEN_API:-auto}
       - IMAGE_GEN_DAILY_LIMIT=${IMAGE_GEN_DAILY_LIMIT:-3}

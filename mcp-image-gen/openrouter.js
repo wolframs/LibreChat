@@ -37,8 +37,12 @@ async function downloadImage(url) {
   }
 }
 
-/** Resolve reference file_ids to `data:` URLs, skipping any that cannot be read. */
-async function referencesToDataUrls({ urlsToFetch, fetchImageById, extractFileId }) {
+/**
+ * Resolve reference file_ids to `data:` URLs, skipping any that cannot be read.
+ * Shared by both providers: the same data URI is what OpenRouter's
+ * `input_references` and Surplus's `input_images` take.
+ */
+export async function referencesToDataUrls({ urlsToFetch, fetchImageById, extractFileId }) {
   const out = [];
   for (const refUrl of urlsToFetch) {
     const fileId = extractFileId(refUrl);
@@ -53,16 +57,7 @@ async function referencesToDataUrls({ urlsToFetch, fetchImageById, extractFileId
   return out;
 }
 
-export async function generateImageOnOpenRouter({
-  prompt,
-  selectedModel,
-  urlsToFetch,
-  fetchImageById,
-  extractFileId,
-  apiKey,
-  aspect_ratio,
-}) {
-  const dataUrls = await referencesToDataUrls({ urlsToFetch, fetchImageById, extractFileId });
+export async function generateImageOnOpenRouter({ prompt, selectedModel, dataUrls, apiKey, aspect_ratio }) {
   const headers = { Authorization: `Bearer ${apiKey}`, 'Content-Type': 'application/json' };
 
   let base64Image = null;
@@ -199,5 +194,5 @@ export async function generateImageOnOpenRouter({
   // it. That turns "edit this image" into "generate a new one" with nothing in the
   // tool result to say so, which is the same silent-success shape as returning a
   // bare image block. The caller reports the shortfall.
-  return { base64Image, mimeType, usage, referencesUsed: dataUrls.length };
+  return { base64Image, mimeType, usage, requestId: null, referencesUsed: dataUrls.length };
 }

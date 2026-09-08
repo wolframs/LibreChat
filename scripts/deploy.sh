@@ -212,10 +212,11 @@ if compose ps --services 2>/dev/null | grep -qx mcp-image-gen; then
   ' 2>/dev/null)" || mcp_body="ERR exec failed"
   case "$mcp_body" in
     ERR*)  warn "mcp-image-gen unreachable from api — $mcp_body" ;;
-    *'"hasKey":false'*)
-           warn "mcp-image-gen up but OPENROUTER_KEY is unset — generate_image will refuse"
-           echo "      $mcp_body" ;;
-    *)     ok "mcp-image-gen $mcp_body" ;;
+    *'"warnings":[]'*)
+           ok "mcp-image-gen $mcp_body" ;;
+    *)     # A configured model with no key for its provider: the model is offered
+           # in the tool description and refuses on first use.
+           warn "mcp-image-gen up but a configured model has no key — $mcp_body" ;;
   esac
 fi
 

@@ -278,3 +278,101 @@ class TestRunOnce:
         result = reconcile.run_once(FakeTransactions())
         assert result["ok"] is False
         assert "SURPLUS_API_KEY" in result["error"]
+
+
+class FakeUsage:
+    """`mcp_image_gen_usage` stand-in: a list of docs plus recorded writes."""
+
+    def __init__(self, docs):
+        self.docs = docs
+        self.updates = []
+
+    def find(self, _query, _projection=None):
+        return iter([d for d in self.docs if "reconciled" not in d and d.get("provider") == "surplus"])
+
+    def update_one(self, query, update):
+        self.updates.append((query, update))
+
+
+def _image_row(at, model="venice-sd35", request_id="i1", cost="0.003500", direct="0.010000"):
+    return {
+        "request_id": request_id,
+        "created_at": at.isoformat().replace("+00:00", "Z"),
+        "model": model,
+        "input_tokens": "0",
+        "output_tokens": "0",
+        "buyer_cost_usd": cost,
+        "direct_cost_usd": direct,
+        "settlement_status": "accrued",
+        "tx_hash": "",
+    }
+
+
+class TestReconcileImageUsage:
+    """Measured 2026-09-08: export rows for image calls carry 0/0 tokens and a
+    `created_at` within a second of the sidecar's `requestedAt`, while the
+    sidecar's `createdAt` lands 15–80 s later, after generation."""
+
+    def test_matches_on_model_and_request_time(self):
+        sent = datetime(2026, 9, 8, 14, 33, 9, tzinfo=UTC)
+        usage = FakeUsage([
+            {"_id": "u1", "provider": "surplus", "model": "venice-sd35",
+             "requestedAt": sent, "createdAt": sent + timedelta(seconds=28)},
+        ])
+        rows = [_image_row(sent + timedelta(seconds=1))]
+
+        matched, ambiguous, unmatched = reconcile.reconcile_image_usage(usage, rows)
+
+        assert (matched, ambiguous, unmatched) == (1, 0, 0)
+        (query, update), = usage.updates
+        assert query == {"_id": "u1"}
+        rec = update["$set"]["reconciled"]
+        assert rec["requestId"] == "i1"
+        assert rec["costUSD"] == 0.0035
+        assert rec["directUSD"] == 0.01
+        assert rec["ambiguous"] is False
+
+    def test_ignores_chat_rows_for_the_same_model_name(self):
+        sent = datetime(2026, 9, 8, 14, 33, 9, tzinfo=UTC)
+        usage = FakeUsage([
+            {"_id": "u1", "provider": "surplus", "model": "venice-sd35", "requestedAt": sent},
+        ])
+        rows = [_row(sent, model="venice-sd35", out_tokens=12)]
+
+        assert reconcile.reconcile_image_usage(usage, rows) == (0, 0, 1)
+        assert usage.updates == []
+
+    def test_outside_the_window_stays_pending(self):
+        sent = datetime(2026, 9, 8, 14, 33, 9, tzinfo=UTC)
+        usage = FakeUsage([
+            {"_id": "u1", "provider": "surplus", "model": "venice-sd35", "requestedAt": sent},
+        ])
+        rows = [_image_row(sent + timedelta(minutes=10))]
+
+        assert reconcile.reconcile_image_usage(usage, rows) == (0, 0, 1)
+
+    def test_two_in_range_are_paired_nearest_first_and_flagged(self):
+        sent = datetime(2026, 9, 8, 14, 33, 9, tzinfo=UTC)
+        usage = FakeUsage([
+            {"_id": "u1", "provider": "surplus", "model": "venice-sd35", "requestedAt": sent},
+            {"_id": "u2", "provider": "surplus", "model": "venice-sd35",
+             "requestedAt": sent + timedelta(seconds=60)},
+        ])
+        rows = [
+            _image_row(sent + timedelta(seconds=1), request_id="a"),
+            _image_row(sent + timedelta(seconds=61), request_id="b"),
+        ]
+
+        matched, ambiguous, unmatched = reconcile.reconcile_image_usage(usage, rows)
+
+        assert (matched, unmatched) == (2, 0)
+        assert ambiguous == 2
+        pairs = {q["_id"]: u["$set"]["reconciled"]["requestId"] for q, u in usage.updates}
+        assert pairs == {"u1": "a", "u2": "b"}
+
+    def test_openrouter_rows_are_not_touched(self):
+        sent = datetime(2026, 9, 8, 14, 33, 9, tzinfo=UTC)
+        usage = FakeUsage([
+            {"_id": "u1", "provider": "openrouter", "model": "meta/muse-image", "requestedAt": sent},
+        ])
+        assert reconcile.reconcile_image_usage(usage, [_image_row(sent)]) == (0, 0, 0)
