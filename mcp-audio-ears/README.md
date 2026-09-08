@@ -89,6 +89,13 @@ saves wall clock more than money.
 - ~~**`/cost` integration.**~~ Built 2026-09-08 — `cost-dashboard/sidecars.py` reads
   `mcp_audio_ears_usage`; listens show on `/cost` under *Tool sidecars*.
 
+## Keepalive
+
+`/sse` writes an SSE comment line every `SSE_KEEPALIVE_MS` (30 s), for the same reason as
+`mcp-image-gen`: LibreChat applies the yaml row's `timeout` as undici's `bodyTimeout` on the
+stream, and an idle MCP session is silent, so without it the api kills and reopens the
+session on that cadence and a tool call inside the reconnect window fails "not found".
+
 ## Rebuilding
 
 `scripts/deploy.sh` does **not** rebuild this container (same as `cost-dashboard`

@@ -1,7 +1,7 @@
 """Replace nominal gateway costs with what the gateway actually billed.
 
-A transaction carrying `routedVia` was served through a user endpoint profile,
-so its `tokenValue` is nominal: priced from LibreChat's model-name rate table,
+A transaction carrying `routedVia` went through a custom endpoint or reverse proxy
+rather than the provider's own API, so its `tokenValue` is nominal: priced from LibreChat's model-name rate table,
 which describes what the provider would have charged rather than what the
 gateway did. For Surplus Intelligence the real figure is knowable after the
 fact — `/v1/buyer/usage/export` returns one settled row per request with both
@@ -12,6 +12,11 @@ onto the matching transactions. The original `tokenValue` is left untouched: it
 stays the nominal figure, and the dashboard prefers `reconciled.costUSD` when
 present. Nothing here destroys data, so a bad match can be undone by clearing
 the field and re-running.
+
+The same pass also settles the image sidecar's ledger: `reconcile_image_usage()`
+matches `mcp_image_gen_usage` rows served by Surplus (zero tokens, list price at
+request time) against zero-token export rows by model and `requestedAt`, and the
+summary reports `images_matched` / `images_ambiguous` / `images_unmatched`.
 
 Matching is heuristic. The export's `request_id` is a settlement id and does NOT
 equal the `x-request-id` header returned to the caller, so there is no shared

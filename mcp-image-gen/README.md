@@ -137,8 +137,9 @@ Measured 2026-09-08, all of it:
 - **A text-to-image model never takes a reference, whichever field carries it.** The
   gateway checks capability per model: `/edits` answers `model_capability_unsupported`, and
   an `image`/`input_images` on `/generations` is routed into the same check. The cheap
-  edit tier ($0.04–0.06) never routed on 2026-09-08; `wan-2-7-pro-edit` ($0.094) did, and
-  is the second edit model for when `grok-imagine-edit` is down.
+  edit tier ($0.04–0.06) never routed on 2026-09-08 after 14:49 UTC (`grok-imagine-edit`
+  edited twice then had no seller all day and is off the menu); `wan-2-7-pro-edit`
+  ($0.094) did, and is the edit model.
 - **Moderation differs per model and the description says so.** `meta/muse-image` refuses
   "a woman in a bikini" (`content management policy`, 67 s); every Venice model returns it;
   lustify is uncensored. `MODERATION` in `models.js` feeds the `model` description, and an
@@ -234,8 +235,8 @@ Three consequences still worth knowing:
   picture, how to name it later, and not to retry a billed call. It does not need to be asked
   what it can and cannot perceive — that is a QA protocol, and this is a chat. The same goes
   for `serverInstructions` in `librechat.yaml`, which is the same text in a different place.
-  Item 9 above has the three ways the visibility line has been got wrong. It now
-  says the image should be visible and to describe what is actually there.
+  Item 9 above has the three ways the visibility line has been got wrong; the shipped text
+  says nothing about visibility at all.
 - Not every provider even gets that far. `formatToolContent` recognizes providers that
   `StandardGraph` has no merge branch for (DeepSeek, `ollama`), and there the artifact is
   saved for the user and never shown to the model at all. `parsers.ts` now says so in the
