@@ -86,9 +86,8 @@ saves wall clock more than money.
   surface, and inside LibreChat the user can just attach the file. If it's ever
   wanted: resolve the hostname first and refuse private/loopback/link-local
   addresses, then cap the download size.
-- **`/cost` integration.** Same gap as `mcp_image_gen_usage` — the rows are in
-  `mcp_audio_ears_usage` with a settled `cost` per listen, and nothing reads them
-  yet.
+- ~~**`/cost` integration.**~~ Built 2026-09-08 — `cost-dashboard/sidecars.py` reads
+  `mcp_audio_ears_usage`; listens show on `/cost` under *Tool sidecars*.
 
 ## Rebuilding
 

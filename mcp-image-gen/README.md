@@ -61,8 +61,9 @@ Values live in the stack's `.env`; the compose service passes them through.
 6. **Instructions live in `librechat.yaml`** rather than pasted into each agent. (Upstream
    ships them as a markdown block for you to paste into every agent's Instructions box.)
 7. **`usage.cost` is recorded** on each `mcp_image_gen_usage` row. This spend never
-   reaches LibreChat's `transactions` collection, so it is invisible to `/cost`;
-   this collection is the only record.
+   reaches LibreChat's `transactions` collection; this collection is the only record, and
+   `/cost` reads it directly (`cost-dashboard/sidecars.py`) — summary cards and a *Tool
+   sidecars* panel, not the per-conversation tables.
 8. `IMAGE_GEN_API` makes the route explicit. Upstream picks it from
    `model.includes("gemini")`, which is still the `auto` behaviour.
 9. **`generate_image` returns a text block, not just the image.** Upstream returns the

@@ -21,6 +21,7 @@ from pymongo import MongoClient
 import buyer
 import markets
 import reconcile
+import sidecars
 from listprices import list_prices
 from routing import IS_ESTIMATED
 
@@ -570,7 +571,7 @@ a:hover { text-decoration: underline; }
 <body>
 
 <h1>LibreChat cost</h1>
-<div class="subhead">Live from MongoDB <span class="mono">transactions</span>. Costs are USD; numbers reflect what LibreChat itself charged against each conversation using <span class="mono">rate × tokens</span> at message time. Rates come from the model-name table, except where a gateway's own billing records have since replaced them &mdash; see <em>By routing</em>.</div>
+<div class="subhead">Live from MongoDB <span class="mono">transactions</span>. Costs are USD; numbers reflect what LibreChat itself charged against each conversation using <span class="mono">rate × tokens</span> at message time. Rates come from the model-name table, except where a gateway's own billing records have since replaced them &mdash; see <em>By routing</em>. The cards also include what the tool sidecars spent on their own keys &mdash; see <em>Tool sidecars</em>.</div>
 
 <div class="summary{% if account.configured %} five{% endif %}">
   <div class="card"><div class="label">Today</div><div class="value">${{ "%.4f"|format(totals.today) }}</div></div>
@@ -808,6 +809,54 @@ an hour on click.</div>
 </tbody>
 </table>
 
+{% if tools.rows %}
+<h2>Tool sidecars</h2>
+{# These ledgers are the sidecars' own — one row per image or listen, on a
+   server-wide key, never a transaction. Their spend is in the cards above and
+   nowhere else on this page: no conversation, no routing row, no model row.
+   Confidence follows how each row was priced: `reported` is the provider's own
+   figure in the response (OpenRouter), `settled` the marketplace's charge from
+   its hourly export (Surplus, via reconcile.py), `list` the catalogue price of
+   a Surplus call the export has not been matched to yet — about 3x what it will
+   settle at, so a `list` figure is an over-estimate, never an under-estimate. #}
+<div class="subhead">Spend by the MCP sidecars on their own server-wide keys &mdash; ${{ "%.4f"|format(tools.all) }} of the all-time total above, none of it attributable to a conversation. <span class="mono">imager</span> rows are one image each; <span class="mono">audio-ears</span> rows one listen.{% if tools.totals.list_calls > 0 %} {{ tools.totals.list_calls }} call{% if tools.totals.list_calls != 1 %}s{% endif %} still at catalogue list price, awaiting the marketplace's hourly export.{% endif %}</div>
+<table id="table-tools" data-sortable>
+<thead><tr>
+  <th class="left">Tool</th>
+  <th class="left">Model</th>
+  <th class="left">Via</th>
+  <th>Calls</th>
+  <th>Total $</th>
+  <th>Saved vs list</th>
+  <th class="left">Confidence</th>
+</tr></thead>
+<tbody>
+{% for r in tools.rows %}
+<tr>
+  <td class="left mono">{{ r.tool }}</td>
+  <td class="left mono">{{ r.model }}{% if r.extra %} <span class="dim">({{ r.extra }})</span>{% endif %}</td>
+  <td class="left dim">{{ "Surplus" if r.provider == "surplus" else "OpenRouter" }}</td>
+  <td class="num">{{ "{:,}".format(r.calls) }}</td>
+  <td class="num {% if r.has_list %}nominal-cost{% elif r.has_settled %}settled-cost{% else %}cost{% endif %}">${{ "%.4f"|format(r.usd) }}</td>
+  <td class="num {% if r.has_settled %}saved{% else %}dim{% endif %}">{% if r.has_settled %}${{ "%.6f"|format(r.saved) }}{% else %}&mdash;{% endif %}</td>
+  <td class="left">
+    {% if r.has_reported %}<span class="tag ok">reported</span>{% endif %}
+    {% if r.has_settled %}<span class="tag settled">settled{% if r.ambiguous %} ({{ r.ambiguous }} ambiguous){% endif %}</span>{% endif %}
+    {% if r.has_list %}<span class="tag" title="{{ r.list_calls }} call(s) priced at the catalogue list rate until the marketplace's export is matched">list &times;{{ r.list_calls }}</span>{% endif %}
+  </td>
+</tr>
+{% endfor %}
+</tbody>
+<tfoot><tr>
+  <td class="left" colspan="3">Total</td>
+  <td class="num">{{ "{:,}".format(tools.totals.calls) }}</td>
+  <td class="num cost">${{ "%.4f"|format(tools.all) }}</td>
+  <td class="num {% if tools.totals.settled_usd > 0 %}saved{% else %}dim{% endif %}">{% if tools.totals.settled_usd > 0 %}${{ "%.6f"|format(tools.totals.settled_list_usd - tools.totals.settled_usd) }}{% else %}&mdash;{% endif %}</td>
+  <td></td>
+</tr></tfoot>
+</table>
+{% endif %}
+
 <h2>By conversation</h2>
 <div class="subhead">Sorted by total cost. Endpoint and model shown reflect the conversation's last-used pairing.</div>
 <div class="table-tools">
@@ -844,7 +893,7 @@ an hour on click.</div>
 </tbody>
 </table>
 
-<footer>Rendered {{ now }} · {{ tx_count }} transactions across {{ by_conv|length }} conversations</footer>
+<footer>Rendered {{ now }} · {{ tx_count }} transactions across {{ by_conv|length }} conversations{% if tools.totals.calls %} · {{ tools.totals.calls }} sidecar calls{% endif %}</footer>
 
 <script>
 (function () {
@@ -1035,16 +1084,23 @@ an hour on click.</div>
 def index():
     now = datetime.now(timezone.utc)
     today_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
+    # The tool sidecars' ledgers are folded into the cards, because a card that
+    # reads $0 on a day of image generation is a wrong number, not a partial one.
+    # The three tables below still sum to the transactions alone; the sidecar
+    # panel says how much of each card is its own.
+    tools = sidecars.summary(db, now)
     totals = {
-        "today": _cost_since(today_start),
-        "week": _cost_since(now - timedelta(days=7)),
-        "month": _cost_since(now - timedelta(days=30)),
-        "all": _cost_since(None),
+        "today": _cost_since(today_start) + tools["today"],
+        "week": _cost_since(now - timedelta(days=7)) + tools["week"],
+        "month": _cost_since(now - timedelta(days=30)) + tools["month"],
+        "all": _cost_since(None) + tools["all"],
         "nominal": _nominal_since(None),
+        "tools": tools,
     }
     return render_template_string(
         TEMPLATE,
         totals=totals,
+        tools=tools,
         savings=_savings(),
         cache=_cache_stats(),
         account=buyer.summary(),
@@ -1064,11 +1120,15 @@ def _reconcile_status():
     when = state.get("at")
     stamp = when.strftime("%Y-%m-%d %H:%M UTC") if hasattr(when, "strftime") else "never"
     if state.get("ok"):
-        return (
+        line = (
             f"{stamp} — matched {state.get('matched', 0)} of "
             f"{state.get('pending_groups', 0)} pending against "
             f"{state.get('export_rows', 0)} billing records"
         )
+        images = state.get("images_matched", 0) + state.get("images_unmatched", 0)
+        if images:
+            line += f"; {state.get('images_matched', 0)} of {images} sidecar images"
+        return line
     return f"{stamp} — {state.get('error') or state.get('note') or 'not run yet'}"
 
 

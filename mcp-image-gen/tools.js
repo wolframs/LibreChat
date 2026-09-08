@@ -282,8 +282,9 @@ async function checkSurplusWeeklyCap(model) {
 
 /**
  * One row per generation. `cost` is OpenRouter's own settled figure for the call,
- * kept because this spend never reaches LibreChat's `transactions` collection and
- * is therefore invisible to /cost — this collection is the only record of it.
+ * kept because this spend never reaches LibreChat's `transactions` collection —
+ * this collection is the only record of it, and it is what /cost reads
+ * (`cost-dashboard/sidecars.py`) for the summary cards and the sidecar panel.
  */
 async function logImageGenerationUsage(userId, prompt, model, usage, meta = {}) {
   if (!userId) return;
@@ -421,14 +422,14 @@ function buildResultSummary({
 
   if (usage?.cost != null) {
     lines.push(
-      `- cost: $${Number(usage.cost).toFixed(5)} (server OpenRouter key; this spend is not visible in /cost)`,
+      `- cost: $${Number(usage.cost).toFixed(5)} (server OpenRouter key)`,
     );
   } else if (model.provider === 'surplus') {
     lines.push(
       model.price != null
         ? `- cost: about $${model.price} list price (server Surplus key; the marketplace usually settles ` +
-            'below list, and the settled figure is recorded later; this spend is not visible in /cost)'
-        : '- cost: not reported per call by Surplus (server Surplus key; this spend is not visible in /cost)',
+            'below list, and the settled figure is recorded later)'
+        : '- cost: not reported per call by Surplus (server Surplus key)',
     );
   } else {
     lines.push('- cost: not reported by OpenRouter for this call');
