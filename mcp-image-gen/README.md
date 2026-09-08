@@ -134,6 +134,11 @@ Measured 2026-09-08, all of it:
   answers with a "not routing right now, nothing billed, switch to …" message whose
   alternatives fit the call, remembers the gap for `IMAGE_GEN_NOT_ROUTING_WINDOW_MS`
   (3 min) and refuses a repeat pre-flight, and `healthz.surplusNotRouting` lists it.
+- **A text-to-image model never takes a reference, whichever field carries it.** The
+  gateway checks capability per model: `/edits` answers `model_capability_unsupported`, and
+  an `image`/`input_images` on `/generations` is routed into the same check. The cheap
+  edit tier ($0.04–0.06) never routed on 2026-09-08; `wan-2-7-pro-edit` ($0.094) did, and
+  is the second edit model for when `grok-imagine-edit` is down.
 - **Model-facing text uses the registered tool names** (`generate_image_mcp_imager`,
   `TOOL_SUFFIX` in `tools.js`): LibreChat appends `_mcp_<yaml key>`, and a bare
   `generate_image` in the instructions is a `Tool not found` round-trip.

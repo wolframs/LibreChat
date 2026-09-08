@@ -90,13 +90,14 @@ const KNOWN_PRICES = {
   'venice-wan-2.7': [0.01, 'image'],
   'venice-qwen-image': [0.01, 'image'],
   'grok-imagine-edit': [0.04, 'image'],
+  'wan-2-7-pro-edit': [0.094, 'image'],
 };
 
 export async function loadCatalogue({ surplusKey, surplusBase, timeoutMs = 8000 } = {}) {
   for (const m of MODELS) {
     const known = KNOWN_PRICES[m.id];
     if (known) [m.price, m.unit] = known;
-    if (m.id === 'grok-imagine-edit') m.features = ['image_edit'];
+    if (m.id === 'grok-imagine-edit' || m.id === 'wan-2-7-pro-edit') m.features = ['image_edit'];
   }
 
   const wantsSurplus = MODELS.some((m) => m.provider === 'surplus');
