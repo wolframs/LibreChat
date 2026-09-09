@@ -206,6 +206,21 @@ forgiven. Only suites that fail **both** ways revert. Above `ISOLATION_BUDGET`
 (8) failing suites the workspace is taken at face value — a handful is a flaky
 harness, thirty is a change that broke something.
 
+**Isolation is only half of it.** The second way the gate was wrong is
+deterministic, and it is the one that actually failed the datetime job: `api` and
+`client` resolve `@librechat/api` through `packages/api/dist/index.cjs`, not
+`src`. An export added to `packages/api/src` is invisible to their tests until
+the package is rebuilt, and they fail with `createDatetimeFormatter is not a
+function` — 15 tests, none of which say "stale build". Production never sees it,
+because the Dockerfile builds the packages during the image build. So the gate
+now runs `npm run build` in any touched `packages/*` before testing anything that
+consumes it. `dist/` is gitignored, so that leaves the tree clean.
+
+Between the two: isolation handles failures that are real-looking but random,
+the package build handles failures that are repeatable but not about the code.
+Neither of them excuses a failure that is both real and repeatable — that still
+reverts, which is what a gate is for.
+
 What this deliberately does *not* do is compare against the base commit. That
 would be the complete answer to "did this change break it", and it costs a second
 full checkout mid-job — a detached HEAD that a crash would strand. Isolation
