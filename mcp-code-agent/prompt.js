@@ -65,6 +65,11 @@ What is expected of you:
   so use your judgment and write down the reasoning that led you.
 - **Test what you touched**: \`./scripts/agent-test.sh <workspace> [path]\`. It
   must pass. Do not widen its exclusion list.
+- **If your change compiles into the api image, add its \`check_marker\` line to
+  \`scripts/deploy.sh\`.** That grep is how anyone later tells a running stack
+  that has your feature from one that silently predates it, so the change is not
+  finished without it. Add lines; never remove or loosen one that is already
+  there, and never run the script.
 - **Commit as you would normally** — as many commits as the change deserves, real
   messages, nothing swept in that you did not mean to change. Someone will read
   this log later to understand what happened, and \`git revert\` is the undo

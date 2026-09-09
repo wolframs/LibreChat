@@ -165,15 +165,26 @@ deny list is only for the things it cannot undo:
 - `.env`, `.env.*`, `searxng/settings.yml` — a leaked secret is out. (The Brave
   API key and the SearXNG `secret_key` live in that file.)
 - `data-node/**` — chat history.
-- `scripts/deploy.sh`, `scripts/agent-test.sh` — the supervisors. An agent that
-  can weaken its own verification makes every later job less trustworthy with
-  nothing to show for it in any diff anyone reads.
+- `scripts/agent-test.sh` — the gate that decides whether the agent's own work
+  survives. An agent that can weaken its own verification makes every later job
+  less trustworthy with nothing to show for it in any diff anyone reads.
 - `CHANGELOG-agent.md` — the wrapper writes it; an agent editing its own record
   defeats the record.
 - `git push` — publication is a human decision, and the GitHub fork is public.
-- `docker`, `deploy.sh` — not a restriction on capability, a sequencing rule.
-  The wrapper deploys once, after the tests, so the job state and the changelog
-  are true. An ad-hoc deploy mid-session makes both of them lie.
+- `docker`, *running* `deploy.sh` — not a restriction on capability, a sequencing
+  rule. The wrapper deploys once, after the tests, so the job state and the
+  changelog are true. An ad-hoc deploy mid-session makes both of them lie.
+
+**`scripts/deploy.sh` is editable, and was not until 2026-09-09.** A feature that
+compiles into the api image is only half-landed until `deploy.sh` greps the image
+for it — that marker is what tells a later reader whether a running stack has the
+feature or silently predates it. Denying the edit meant no agent could finish one:
+`fork-customizations.md` §14 shipped without its marker and a human has to add it.
+So the edit is allowed and the run is not, which is the half the sequencing rule
+was ever about. The prompt tells the agent to add marker lines and never remove or
+loosen one. That is a briefing, not a wall — the residual risk is a deleted marker,
+and the thing that catches it is reading the diff, since the wrapper's post-job
+deploy runs whatever version of the script the session just left in the tree.
 
 Every commit is authored `LibreChat code-agent <code-agent@librechat.local>`, so
 `git log --author=code-agent` separates what a model changed from what a person
