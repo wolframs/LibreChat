@@ -98,6 +98,50 @@ export function activeJobId() {
   return activeJob;
 }
 
+/**
+ * The lock dies with the process; the Mongo row does not.
+ *
+ * A restart mid-run — `launchctl kickstart` to pick up an edit, a crash, a
+ * reboot — kills the child `claude` and leaves the job's row saying `running`
+ * forever. Nothing else ever corrects it, and every instrument then lies in the
+ * same direction: /agent shows a pulsing live card and refreshes every 5s for a
+ * job with no process, `check_fix` reports it as still working, and `resume_fix`
+ * refuses it as "still running" — so the one session that *is* recoverable is the
+ * one you cannot reach. Job 6aa10a5663687a981bbfb6a3 sat like that for 6½ hours
+ * on 2026-09-09.
+ *
+ * Because the lock is in-process, any row still in a live state at boot is by
+ * definition orphaned: there is no process it could belong to. So this is safe
+ * to run unconditionally at startup, and it is the only place that knows.
+ */
+export async function reapOrphanedJobs() {
+  const db = await getDb();
+  const orphans = await db
+    .collection('mcp_code_agent_jobs')
+    .find({ status: { $in: ['running', 'testing', 'deploying'] } })
+    .project({ status: 1, progress: 1 })
+    .toArray();
+
+  for (const job of orphans) {
+    const id = String(job._id);
+    const session = job.progress?.sessionId;
+    await setJob(id, {
+      status: 'error',
+      stoppedBecause: 'process_restarted_mid_run',
+      summary:
+        `Cut off at status \`${job.status}\` by a restart of this server, not by anything ` +
+        'it did. The child `claude` process died with it.\n\n' +
+        (session
+          ? `Its Claude Code session \`${session}\` is intact on disk, so ` +
+            `\`resume_fix("${id}")\` picks it up where it stopped.`
+          : 'It recorded no session id, so there is nothing to resume — file it again.') +
+        '\n\nCheck the tree before resuming: a job killed mid-edit can leave uncommitted work.',
+    });
+    console.log(`[${id}] was ${job.status} at boot with no process — marked error`);
+  }
+  return orphans.length;
+}
+
 async function setJob(id, patch) {
   const db = await getDb();
   await db

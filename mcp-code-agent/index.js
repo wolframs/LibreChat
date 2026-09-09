@@ -7,7 +7,7 @@ import { SSEServerTransport } from '@modelcontextprotocol/sdk/server/sse.js';
 import { z } from 'zod';
 import { AsyncLocalStorage } from 'async_hooks';
 import { handleRequestFix, handleCheckFix, handleListFixes, handleAddNote, handleResumeFix } from './tools.js';
-import { activeJobId, MODEL, agentAvailable } from './runner.js';
+import { activeJobId, MODEL, agentAvailable, reapOrphanedJobs } from './runner.js';
 import { REPO, BRANCH, currentBranch, porcelain, head } from './git.js';
 import { mountView } from './view.js';
 
@@ -193,4 +193,12 @@ app.listen(PORT, async () => {
   console.log(`  uid:    ${process.getuid()} — uses the Claude Code already logged in here`);
   const issue = await agentAvailable();
   if (issue) console.error(`  WARNING: ${issue}`);
+  // A job that was live when this process last died has no process now. Say so
+  // in the record, or /agent shows a corpse as working and resume_fix refuses it.
+  try {
+    const reaped = await reapOrphanedJobs();
+    if (reaped) console.log(`  reaped: ${reaped} job(s) left live by the last shutdown`);
+  } catch (err) {
+    console.error(`  WARNING: could not reap orphaned jobs: ${err.message}`);
+  }
 });
