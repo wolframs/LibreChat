@@ -677,7 +677,7 @@ async function execute(jobId, { premise, userId, resumeSessionId, baseSha: exist
   }
 
   const tests = await runTests(files);
-  await setJob(jobId, { tests: tests.text });
+  await setJob(jobId, { tests: tests.text, flakySuites: tests.flaky ?? [] });
 
   if (!tests.ok) {
     // Nothing was deployed, so there is nothing to roll back — but the commits
@@ -751,7 +751,7 @@ async function execute(jobId, { premise, userId, resumeSessionId, baseSha: exist
     report: (cutOff ? `**${cutOff} What follows is the work it had committed before that.**\n\n` : '') + report + rollbackNote,
     commits,
     diffstat: stat,
-    tests: 'run by the agent; see its report',
+    tests: tests.text,
     deploy: deployResult.text,
     usageLine,
   });
@@ -776,6 +776,63 @@ async function execute(jobId, { premise, userId, resumeSessionId, baseSha: exist
  */
 const WORKSPACES = ['packages/api', 'packages/data-provider', 'packages/data-schemas', 'api', 'client'];
 
+/**
+ * How many flaky-looking suites are worth isolating before giving up.
+ *
+ * A handful is a flaky harness. Thirty is a workspace the change actually broke,
+ * and re-running thirty suites one at a time to prove it would take longer than
+ * the run that found them.
+ */
+const ISOLATION_BUDGET = 8;
+
+/** The suite paths from `agent-test.sh`'s `FAIL <path>` lines — not its `FAIL <workspace>` heading. */
+function failingSuites(out) {
+  const paths = out
+    .split('\n')
+    .map((line) => line.match(/^FAIL\s+(\S+\.(?:spec|test)\.[cm]?[jt]sx?)\s*$/))
+    .filter(Boolean)
+    .map((m) => m[1]);
+  return [...new Set(paths)];
+}
+
+async function testWorkspace(ws, filter) {
+  const { err, stdout, stderr } = await run(
+    './scripts/agent-test.sh',
+    filter ? [ws, filter] : [ws],
+    { timeout: 900_000 },
+  );
+  return { ok: !err, out: `${stdout}\n${stderr}`.trim() };
+}
+
+/**
+ * Map the touched files onto workspaces and test those. Running everything would
+ * take long enough that the job would look hung; running nothing would make the
+ * gate above decorative.
+ *
+ * A red workspace run is not evidence the change broke anything.
+ *
+ * Measured on this repo on 2026-09-09, on an unmodified tree: the `api`
+ * workspace failed 2 runs in 4, with a *different* set of suites failing each
+ * time — AuthService, skills, optionalShareFileAuth — and every one of them
+ * passing when run on its own. The suite is order- and parallelism-dependent
+ * (`maxWorkers: '50%'`, and `test/jestSetup.js` points MONGO_URI at
+ * 127.0.0.1:27017, which upstream is dead and on this host is the live stack's
+ * mongod, published for this very sidecar). So roughly half of all runs go red
+ * for reasons no diff can explain.
+ *
+ * The old gate read that as "your commits failed the tests" and reverted every
+ * commit in range. It did exactly that to two jobs — 8 commits and 2 commits —
+ * both times on `AuthService.spec.js`, which neither diff came near. A gate that
+ * destroys half of all work independently of its quality is not a strict gate,
+ * it is a coin flip, and the agent has no way to tell it is being judged by one.
+ *
+ * So a failure now has to survive isolation before it counts. Each suite that
+ * failed in the parallel run is re-run on its own; a suite that passes alone was
+ * failing for a reason the change does not own. Only suites that fail *both*
+ * ways revert anything — and the flaky ones are named in the record rather than
+ * quietly forgiven, because a gate that hides what it waved through is how you
+ * get back to trusting nothing.
+ */
 async function runTests(files) {
   const touched = WORKSPACES.filter((ws) => files.some((f) => f.startsWith(`${ws}/`)));
   if (!touched.length) {
@@ -783,17 +840,62 @@ async function runTests(files) {
   }
 
   const results = [];
+  const flaky = [];
   for (const ws of touched) {
-    const { err, stdout, stderr } = await run('./scripts/agent-test.sh', [ws], {
-      timeout: 900_000,
-    });
-    const out = `${stdout}\n${stderr}`.trim();
-    if (err) {
-      return { ok: false, text: `\`agent-test.sh ${ws}\` failed:\n\n${out.slice(-3000)}` };
+    const first = await testWorkspace(ws);
+    if (first.ok) {
+      results.push(first.out.split('\n').filter(Boolean).slice(-5).join(' · '));
+      continue;
     }
-    results.push(out.split('\n').filter(Boolean).slice(-5).join(' · '));
+
+    const suites = failingSuites(first.out);
+    if (!suites.length || suites.length > ISOLATION_BUDGET) {
+      return {
+        ok: false,
+        text:
+          `\`agent-test.sh ${ws}\` failed` +
+          (suites.length
+            ? ` in ${suites.length} suites — too many to isolate, so this is being taken at face value`
+            : ', and no suite could be named from its output') +
+          `:\n\n${first.out.slice(-3000)}`,
+      };
+    }
+
+    console.log(`[tests] ${ws} red in ${suites.length} suite(s); re-running each alone`);
+    const stillFailing = [];
+    for (const suite of suites) {
+      const solo = await testWorkspace(ws, suite);
+      if (!solo.ok) stillFailing.push({ suite, out: solo.out });
+      console.log(`[tests] ${ws} ${suite} alone: ${solo.ok ? 'passes — flaky in parallel' : 'fails'}`);
+    }
+
+    if (stillFailing.length) {
+      return {
+        ok: false,
+        text:
+          `\`agent-test.sh ${ws}\` failed, and ${stillFailing.length} of ${suites.length} ` +
+          `suite(s) failed again when run on their own — so this is the change, not the harness:\n\n` +
+          stillFailing.map((f) => `### ${f.suite}\n\n${f.out.slice(-1800)}`).join('\n\n'),
+      };
+    }
+
+    flaky.push(...suites.map((s) => `${ws}/${s}`));
+    results.push(
+      `PASS ${ws} — after ${suites.length} suite(s) failed in parallel and passed alone: ${suites.join(', ')}`,
+    );
   }
-  return { ok: true, text: results.join('\n') };
+
+  return {
+    ok: true,
+    text:
+      results.join('\n') +
+      (flaky.length
+        ? `\n\n**Flaky, not caused by this change:** ${flaky.join(', ')} failed in the ` +
+          'full parallel run and passed when run alone. Not a reason to hold the deploy, ' +
+          'but the suite is unreliable and that is worth someone fixing.'
+        : ''),
+    flaky,
+  };
 }
 
 async function deploy() {
