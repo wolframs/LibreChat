@@ -895,6 +895,44 @@ function failingSuites(out) {
   return [...new Set(paths)];
 }
 
+/**
+ * Build any touched `packages/*` before testing anything that consumes it.
+ *
+ * `api` and `client` resolve `@librechat/api` through its package `main`, which
+ * is `packages/api/dist/index.cjs` — not `src`. So a change that adds an export
+ * to `packages/api/src` is invisible to the `api` workspace's tests until that
+ * package is rebuilt, and they fail with `X is not a function` in whatever file
+ * uses it. The Dockerfile builds the packages during the image build, so the
+ * same change deploys and runs correctly; only the gate sees the stale copy.
+ *
+ * That is not a flake to be isolated away — it is deterministic, and it fails
+ * the change that is most obviously correct. It reverted the datetime work on
+ * 2026-09-09: `createDatetimeFormatter is not a function`, 15 tests, from a dist
+ * built before the function existed.
+ */
+async function buildTouchedPackages(files) {
+  const pkgs = [...new Set(
+    files
+      .map((f) => f.match(/^(packages\/[^/]+)\//))
+      .filter(Boolean)
+      .map((m) => m[1]),
+  )];
+
+  const built = [];
+  for (const pkg of pkgs) {
+    const { err, stderr } = await run('npm', ['run', 'build'], {
+      cwd: `${REPO}/${pkg}`,
+      timeout: 600_000,
+    });
+    if (err) {
+      return { ok: false, pkg, text: `\`npm run build\` failed in ${pkg}:\n\n${stderr.trim().slice(-2000)}` };
+    }
+    built.push(pkg);
+    console.log(`[tests] rebuilt ${pkg} so its consumers see this change`);
+  }
+  return { ok: true, built };
+}
+
 async function testWorkspace(ws, filter) {
   const { err, stdout, stderr } = await run(
     './scripts/agent-test.sh',
@@ -939,8 +977,16 @@ async function runTests(files) {
     return { ok: true, text: 'no workspace with tests was touched — nothing to run' };
   }
 
+  const build = await buildTouchedPackages(files);
+  if (!build.ok) {
+    return { ok: false, text: build.text };
+  }
+
   const results = [];
   const flaky = [];
+  if (build.built.length) {
+    results.push(`rebuilt before testing: ${build.built.join(', ')}`);
+  }
   for (const ws of touched) {
     const first = await testWorkspace(ws);
     if (first.ok) {
