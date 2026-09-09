@@ -299,17 +299,112 @@ export async function preflight() {
         'human checks out the right branch.',
     };
   }
-  const dirty = await porcelain();
-  if (dirty) {
+  if (await porcelain()) {
+    const parked = await parkWorkingTree();
+    if (!parked.ok) return parked;
+    return { ok: true, parked: parked.parked };
+  }
+  return { ok: true };
+}
+
+/**
+ * Files that must never be swept into an automatic commit.
+ *
+ * All three are ignored, so `porcelain()` cannot list them and this can only
+ * fire if somebody force-added one. That is exactly the case worth refusing:
+ * `searxng/settings.yml` holds a live Brave key, `.env` holds both Surplus keys.
+ */
+const NEVER_COMMIT = [/(^|\/)\.env($|\.)/, /^librechat\.yaml$/, /^searxng\/settings\.yml$/];
+
+/**
+ * Commit whatever is in the tree, as the operator, before the agent starts.
+ *
+ * This used to be a refusal: "the working tree has uncommitted changes, ask the
+ * user to commit or stash them first." The reasoning was that the image builds
+ * from the working tree, so uncommitted work would ship without anyone deciding
+ * to ship it — and that half is true. The conclusion was not. Git is the undo
+ * button; a commit is how you make something revertible, not how you make it
+ * dangerous. Refusing left the work in exactly the state that has no record.
+ *
+ * It cost a run on 2026-09-09: the operator had a preset-import feature in the
+ * tree — already built and deployed by another agent, and therefore already live
+ * in the stack while existing nowhere in git — and the sidecar refused to start
+ * because of it. The refusal protected nothing. The code was running.
+ *
+ * So: `git add -A` and commit it under the operator's own identity. Three things
+ * make that safe rather than reckless, and all three already existed —
+ *
+ *   - The commit is authored by the operator, and `ownCommitsSince` only ever
+ *     collects commits authored by `LibreChat code-agent`. The revert path
+ *     cannot touch it, however badly the job goes.
+ *   - `baseSha` is read after this, so the agent's diff starts above it. The
+ *     parked work is never part of what the job claims to have done.
+ *   - It is one commit with one subject, so undoing it is one `git revert`.
+ *
+ * What it does not do is decide whether that work is *ready*. It ships in the
+ * deploy at the end of the job, same as everything else in the tree — which is
+ * what would have happened anyway, minus the record.
+ */
+async function parkWorkingTree() {
+  const { stdout: name } = await git(['config', 'user.name']);
+  const { stdout: email } = await git(['config', 'user.email']);
+  const author = `${name.trim() || 'operator'} <${email.trim() || 'operator@localhost'}>`;
+
+  const { err: addErr, stderr: addOut } = await git(['add', '-A']);
+  if (addErr) {
+    return { ok: false, reason: `Could not stage the working tree: ${addOut.trim()}` };
+  }
+
+  // The staged list, from git, rather than a parse of `git status --porcelain`.
+  // The first version sliced three characters off each porcelain line to strip
+  // the status code — and `porcelain()` trims its output, so the leading space
+  // of the *first* line was already gone and that line lost its first character.
+  // Cosmetic in the log; not cosmetic in the check below, where ` M .env` would
+  // have arrived as `nv` and matched nothing.
+  const { stdout: staged } = await git(['diff', '--cached', '--name-only']);
+  const paths = staged.split('\n').map((p) => p.trim()).filter(Boolean);
+
+  const forbidden = paths.filter((p) => NEVER_COMMIT.some((re) => re.test(p)));
+  if (forbidden.length) {
+    await git(['reset']);
     return {
       ok: false,
       reason:
-        'The working tree has uncommitted changes, so a fix would sweep them into its own ' +
-        'commit and they would ship without anyone deciding to ship them. Ask the user to ' +
-        `commit or stash these first:\n\n${dirty}`,
+        `The working tree has changes to ${forbidden.join(', ')}, which carry live ` +
+        'credentials and are supposed to be ignored. Something has force-added them. ' +
+        'Sort that out by hand — this will not commit them.',
     };
   }
-  return { ok: true };
+
+  if (!paths.length) {
+    return { ok: true, parked: null };
+  }
+
+  const subject = 'WIP: tree as found when a code-agent job started';
+  const body =
+    `${paths.length} path(s) were uncommitted when a code-agent job began, so they are ` +
+    'committed here to keep them separate from the agent\'s own work and revertible on ' +
+    `their own.\n\n${paths.map((p) => `  ${p}`).join('\n')}\n`;
+
+  // GIT_AUTHOR_* is set process-wide once a job has run (see the env block in
+  // execute()), which would stamp this with the agent's name and make the revert
+  // path treat the operator's work as the job's own. --author wins over that.
+  const { err, stderr } = await git([
+    'commit',
+    '--author',
+    author,
+    '-m',
+    subject,
+    '-m',
+    body,
+  ]);
+  if (err) {
+    return { ok: false, reason: `Could not commit the working tree: ${stderr.trim().slice(-800)}` };
+  }
+
+  const sha = (await head()).slice(0, 9);
+  console.log(`[preflight] parked ${paths.length} uncommitted path(s) as ${sha}`);
+  return { ok: true, parked: { sha, paths, author, subject } };
 }
 
 // Resolved from this module, not hardcoded. It was '/app/agent-settings.json',
@@ -467,7 +562,12 @@ export async function resumeJob(jobId) {
   if (!pre.ok) return pre;
 
   activeJob = jobId;
-  await setJob(jobId, { status: 'running', resumedAt: new Date(), resumeCount: (job.resumeCount ?? 0) + 1 });
+  await setJob(jobId, {
+    status: 'running',
+    resumedAt: new Date(),
+    resumeCount: (job.resumeCount ?? 0) + 1,
+    ...(pre.parked ? { parked: pre.parked } : {}),
+  });
 
   execute(jobId, {
     premise: job.premise,
@@ -481,7 +581,7 @@ export async function resumeJob(jobId) {
     activeJob = null;
   });
 
-  return { ok: true, sessionId };
+  return { ok: true, sessionId, parked: pre.parked ?? null };
 }
 
 export async function startJob({ premise, userId }) {

@@ -94,6 +94,17 @@ export async function handleRequestFix({ premise }, context) {
     return text(
       [
         `Filed. Job \`${jobId}\` is running${MODEL ? ` on ${MODEL}` : ''}.`,
+        ...(pre.parked
+          ? [
+              '',
+              `**The tree was not clean, so ${pre.parked.paths.length} uncommitted path(s) were ` +
+                `committed first as \`${pre.parked.sha}\`** ("${pre.parked.subject}"), under the ` +
+                'operator\'s own name. That keeps them separate from the agent\'s work and out ' +
+                'of anything the wrapper might revert — but they will ship in the deploy at the ' +
+                `end of this job. Undo with \`git revert ${pre.parked.sha}\`. Files:`,
+              ...pre.parked.paths.map((p) => `  - \`${p}\``),
+            ]
+          : []),
         '',
         'What happens now: the agent reads the repository, works out what is actually wrong,',
         'fixes it, runs the tests, commits, and deploys. That takes minutes, not seconds.',
@@ -298,6 +309,15 @@ export async function handleResumeFix({ job_id }, context) {
     return text(
       [
         `Resuming job \`${job_id}\` in its original session.`,
+        ...(outcome.parked
+          ? [
+              '',
+              `The tree was not clean, so ${outcome.parked.paths.length} uncommitted path(s) ` +
+                `were committed first as \`${outcome.parked.sha}\` under the operator's own ` +
+                `name — separate from the agent's work, and undone with \`git revert ` +
+                `${outcome.parked.sha}\`.`,
+            ]
+          : []),
         '',
         'It keeps everything it had already read and worked out, so it is picking up',
         'rather than starting over. Notes added since it was cut off are the first thing',
