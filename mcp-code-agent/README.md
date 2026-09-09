@@ -114,16 +114,15 @@ aftermath legible — it does not make the restart free.
    from `agent-settings.json`, in the real working tree.
 4. **Tests.** The wrapper runs `./scripts/agent-test.sh` itself over the touched
    workspaces. Not distrust — "tests were green at deploy time" is a fact about
-   the tree as it stands *now*, and only a run now establishes it. Failure
-   reverts the commits, because otherwise the human's next deploy ships code
-   that failed its tests.
+   the tree as it stands *now*, and only a run now establishes it. A suite that
+   fails is re-run **on its own** before it is allowed to revert anything; see
+   below, because this is where the whole thing was going wrong.
 5. **Set aside leftovers.** Anything the agent left uncommitted is `git stash`ed
    first. The gate tests the working tree but the remedy only undoes commits, so
    a half-finished edit left by a cut-off agent would otherwise fail the tests
-   and provoke a revert that could not possibly fix it — which is exactly what
-   happened once, costing eight commits. It is also what would have shipped,
-   since the image builds from the working tree. Stashed rather than discarded:
-   `git stash pop` brings it back.
+   and provoke a revert that could not possibly fix it. It is also what would
+   have shipped, since the image builds from the working tree. Stashed rather
+   than discarded: `git stash pop` brings it back.
 6. **Deploy.** `./scripts/deploy.sh --yes`, which is the real validation chain:
    branch check, health wait, both sidecar probes, 14 feature markers.
 7. **Auto-revert on failure.** A stack that fails verification is a stack the
@@ -131,6 +130,45 @@ aftermath legible — it does not make the restart free.
    to be undone. So it undoes itself and redeploys.
 8. **Changelog.** `CHANGELOG-agent.md`, prepended and committed separately, so
    reverting a change does not also revert the record that it happened.
+
+## The gate, and what it is allowed to conclude
+
+For its first three real runs this gate was a coin flip, and it did not know it.
+
+Measured on 2026-09-09 on an **unmodified** tree, `./scripts/agent-test.sh api`
+failed 2 runs in 4. A different set of suites failed each time —
+`AuthService.spec.js`, `skills.test.js`, `optionalShareFileAuth.spec.js` — and
+every one of them passed when run alone. The errors are `Topology is closed`,
+`Client must be connected before running operations`, `interrupted at shutdown`:
+connection races, not logic. `api/jest.config.js` runs `maxWorkers: '50%'`, and
+`api/test/jestSetup.js` hardcodes `MONGO_URI = 'mongodb://127.0.0.1:27017/…'`,
+which is dead upstream and on this host is the live stack's mongod — published
+on loopback by `docker-compose.override.yml` *for this sidecar*. The thing that
+let the agent exist is a good candidate for what makes its gate unreliable.
+
+The old gate read red as "your commits failed the tests" and reverted every
+commit in range. It spent both of its reverts that way:
+
+| job | work | reverted on |
+|---|---|---|
+| `6a9ed6c8` | 8 commits | `AuthService.spec.js` — diff was in `packages/api/src/mcp/` |
+| `6aa10a56` | 2 commits | `AuthService.spec.js` — diff was a datetime prepend |
+
+Neither diff came near auth. The failure output was byte-identical across two
+unrelated changes, which is the tell.
+
+So a failure now has to survive isolation. Each suite that failed in the parallel
+run is re-run on its own; passing alone means the change does not own it, and
+those are named as flaky in the job record and the changelog rather than quietly
+forgiven. Only suites that fail **both** ways revert. Above `ISOLATION_BUDGET`
+(8) failing suites the workspace is taken at face value — a handful is a flaky
+harness, thirty is a change that broke something.
+
+What this deliberately does *not* do is compare against the base commit. That
+would be the complete answer to "did this change break it", and it costs a second
+full checkout mid-job — a detached HEAD that a crash would strand. Isolation
+catches the failure mode actually observed here. If a genuinely pre-existing
+failure ever reverts a job, that is when to pay for the baseline.
 
 ## Why there is no conversation header
 
