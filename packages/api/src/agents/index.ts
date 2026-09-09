@@ -6,6 +6,7 @@ export * from './config';
 export * from './checkpointer';
 export * from './contact';
 export * from './context';
+export * from './datetime';
 export * from './discovery';
 export * from './edges';
 export * from './handlers';
