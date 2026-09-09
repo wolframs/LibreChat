@@ -49,8 +49,6 @@ const {
   countFormattedMessageTokens,
   prependFileContext,
   prependQuotes,
-  prependDatetimeContext,
-  createDatetimeFormatter,
   hydrateMissingIndexTokenCounts,
   injectSkillPrimes,
   collectFreshSkillPrimeNames,
@@ -372,7 +370,6 @@ class AgentClient extends BaseClient {
     let hasFileContext = false;
     let promptTokenTotal = 0;
     const encoding = this.getEncoding();
-    const datetimeFormatter = createDatetimeFormatter();
     const formattedMessages = orderedMessages.map((message, i) => {
       const formattedMessage = formatMessage({
         message,
@@ -408,18 +405,6 @@ class AgentClient extends BaseClient {
 
       memoryPayload.push(memoryFormattedMessage);
 
-      /**
-       * Date/time orientation, on the LLM copy only: the opening user turn and any
-       * user turn that follows a gap of more than ten minutes. Decided from persisted
-       * timestamps so historical turns render the same on every request.
-       */
-      const hasDatetimeContext = prependDatetimeContext({
-        formattedMessage,
-        message,
-        previous: i > 0 ? orderedMessages[i - 1] : undefined,
-        formatter: datetimeFormatter,
-      });
-
       const dbTokenCount = Number(orderedMessages[i].tokenCount);
       const hasDbTokenCount = Number.isFinite(dbTokenCount) && dbTokenCount > 0;
       /**
@@ -439,10 +424,9 @@ class AgentClient extends BaseClient {
         canonicalTokenCount = countFormattedMessageTokens(memoryFormattedMessage, encoding);
       }
 
-      const promptMessageTokenCount =
-        message.fileContext || hasDatetimeContext
-          ? countFormattedMessageTokens(formattedMessage, encoding)
-          : canonicalTokenCount;
+      const promptMessageTokenCount = message.fileContext
+        ? countFormattedMessageTokens(formattedMessage, encoding)
+        : canonicalTokenCount;
 
       /* If message has files, calculate image token cost */
       if (this.message_file_map && this.message_file_map[message.messageId]) {
