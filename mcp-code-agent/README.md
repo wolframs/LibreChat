@@ -90,8 +90,8 @@ row still in a live state at boot is orphaned by definition, so it needs no
 liveness check: each one is marked `error` with `stoppedBecause:
 process_restarted_mid_run` and a summary naming the restart, saying whether the
 session survived, and warning to check the tree first. A killed job can leave
-uncommitted edits, and preflight will refuse the resume until they are dealt
-with.
+uncommitted edits; preflight now commits those as their own labelled commit
+rather than refusing (below), so check what they are before resuming.
 
 The rule this leaves standing: **do not kickstart this server while a job is
 running.** `/healthz` → `activeJob` is the check, and the reaper only makes the
@@ -99,11 +99,16 @@ aftermath legible — it does not make the restart free.
 
 ## What a job actually does
 
-1. **Preflight.** Refuses if another job is running, if the repo is on the wrong
-   branch, or if the working tree is dirty — and returns the actual
-   `git status --porcelain` so the model can tell its user *what* is in the way.
-   A dirty tree matters because the agent's commit would otherwise sweep up
-   somebody's unrelated work and ship it without anyone deciding to.
+1. **Preflight.** Refuses if another job is running or if the repo is on the
+   wrong branch. A **dirty tree is not a refusal** — everything in it is staged
+   and committed first, under the operator's own name, as
+   `WIP: tree as found when a code-agent job started`. See *Why a dirty tree
+   stopped being a blocker* below; the short version is that the agent's commits
+   are identified by author, so parked work is invisible to the revert path, and
+   `baseSha` is read afterwards so the job never claims it. `.env`,
+   `librechat.yaml` and `searxng/settings.yml` are the exception — all three are
+   ignored, so if one ever turns up staged it means a live credential was
+   force-added, and preflight refuses instead.
 2. **Context.** Finds the caller's most recently touched conversation, pulls its
    last dozen messages out of Mongo, and hands them to the agent as raw evidence.
    The sender never has to curate a bug report; the transcript showing the empty
@@ -130,6 +135,43 @@ aftermath legible — it does not make the restart free.
    to be undone. So it undoes itself and redeploys.
 8. **Changelog.** `CHANGELOG-agent.md`, prepended and committed separately, so
    reverting a change does not also revert the record that it happened.
+
+## Why a dirty tree stopped being a blocker
+
+The old refusal read: *the working tree has uncommitted changes, so a fix would
+sweep them into its own commit and they would ship without anyone deciding to.*
+
+The premise is true — the image builds from the working tree. The conclusion was
+wrong, and the operator put it plainly: git is what tracking and reverting are
+*for*. Committing is how work becomes recoverable, not how it becomes dangerous.
+The refusal left the changes in the only state that has no record at all, and
+handed the operator a chore in exchange for nothing.
+
+What made it concrete: on 2026-09-09 the blocker was a preset-import feature that
+another agent had already built **and deployed**. It was live in the running
+stack while existing nowhere in git. Refusing to start protected nothing; the
+code was already serving requests. One `git commit` would have been strictly
+safer than the state being defended.
+
+So preflight parks the tree instead. Three properties that already existed are
+what make that safe rather than reckless:
+
+- `ownCommitsSince()` collects only commits authored `LibreChat code-agent`. The
+  parked commit is authored by the operator, so **the revert path cannot see
+  it** — no matter how the job ends.
+- `baseSha` is read *after* parking, so the agent's diff starts above it and the
+  job never counts the work as its own.
+- It is one commit with one subject: `git revert <sha>` undoes exactly it.
+
+`--author` is passed explicitly because `execute()` sets `GIT_AUTHOR_NAME`
+process-wide for the agent's own commits. Without it, a park performed after any
+earlier job in the same process would be stamped with the agent's name and handed
+straight to the revert path — the precise failure this is meant to prevent.
+
+The one thing parking does **not** decide is whether that work is ready. It ships
+in the deploy at the end of the job, the same as everything else in the tree —
+which is what would have happened anyway, minus the record. The tool result says
+so, names the sha, and gives the revert command.
 
 ## The gate, and what it is allowed to conclude
 
