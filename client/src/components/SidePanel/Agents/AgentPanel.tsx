@@ -12,7 +12,7 @@ import {
   isAssistantsEndpoint,
 } from 'librechat-data-provider';
 import type { FieldNamesMarkedBoolean } from 'react-hook-form';
-import type { Agent } from 'librechat-data-provider';
+import type { Agent, TPreset } from 'librechat-data-provider';
 import type { TranslationKeys } from '~/hooks/useLocalize';
 import type { AgentForm, StringOption } from '~/common';
 import {
@@ -28,6 +28,7 @@ import { useSelectAgent, useLocalize, useAuthContext } from '~/hooks';
 import { useAgentPanelContext } from '~/Providers/AgentPanelContext';
 import AgentPanelSkeleton from './AgentPanelSkeleton';
 import AdvancedPanel from './Advanced/AdvancedPanel';
+import PresetImport, { presetToAgentForm } from './PresetImport';
 import { Panel, isEphemeralAgent } from '~/common';
 import AgentConfig from './AgentConfig';
 import AgentSelect from './AgentSelect';
@@ -473,6 +474,21 @@ export default function AgentPanel() {
     }
   }, [agent_id, onSelectAgent]);
 
+  const handleImportPreset = useCallback(
+    (preset: TPreset) => {
+      reset(presetToAgentForm(preset, localize('com_ui_agent')));
+      setCurrentAgentId(undefined);
+      create.reset();
+      showToast({
+        message: localize('com_agents_import_preset_success', {
+          name: preset.title || preset.model || localize('com_endpoint_preset_title'),
+        }),
+        status: 'info',
+      });
+    },
+    [create, localize, reset, setCurrentAgentId, showToast],
+  );
+
   const canEditAgent = useMemo(() => {
     if (!agentQuery.data?.id) {
       return true;
@@ -502,6 +518,9 @@ export default function AgentPanel() {
                 selectedAgentId={agentQuery.isInitialLoading ? null : (current_agent_id ?? null)}
               />
             </div>
+            {!agent_id && activePanel === Panel.builder && (
+              <PresetImport providers={providers} onImport={handleImportPreset} />
+            )}
             {agent_id && (
               <div className="flex w-full gap-2">
                 <Button

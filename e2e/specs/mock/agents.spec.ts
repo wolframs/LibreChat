@@ -8,7 +8,7 @@ import {
   uniqueAgentName,
   waitForPersistedAgent,
 } from './agents.helpers';
-import { MOCK_ENDPOINTS, mockReply, sendMessage } from './helpers';
+import { MOCK_ENDPOINTS, getAccessToken, mockReply, requestJson, sendMessage } from './helpers';
 
 const DESCRIPTION = 'Use this agent to verify LibreChat agent creation in mock end-to-end tests.';
 const INSTRUCTIONS =
@@ -192,6 +192,108 @@ test.describe('agent builder', () => {
       await expect(mockReply(page)).toBeVisible({ timeout: 30000 });
     } finally {
       await cleanupAgent(page, createdAgentId);
+    }
+  });
+
+  test('imports a preset into a memory-enabled Agent and persists the mapped settings', async ({
+    page,
+  }) => {
+    test.setTimeout(120000);
+
+    const presetTitle = uniqueAgentName('E2E Imported Preset');
+    const presetInstructions =
+      'Use the imported preset instructions and remember explicit requests.';
+    let presetId: string | undefined;
+    let createdAgentId: string | undefined;
+
+    try {
+      await page.goto('/c/new');
+      const token = await getAccessToken(page);
+      const preset = await requestJson<{ presetId: string }>(page, {
+        path: '/api/presets',
+        token,
+        method: 'POST',
+        body: {
+          title: presetTitle,
+          endpoint: MOCK_ENDPOINTS[0].label,
+          model: MOCK_ENDPOINTS[0].model,
+          promptPrefix: presetInstructions,
+          temperature: MODEL_PARAMETERS.temperature,
+          maxContextTokens: MODEL_PARAMETERS.maxContextTokens,
+          maxOutputTokens: MODEL_PARAMETERS.maxOutputTokens,
+          topP: MODEL_PARAMETERS.topP,
+          topK: MODEL_PARAMETERS.topK,
+        },
+      });
+      presetId = preset.presetId;
+
+      let form = await openAgentBuilder(page);
+      await form.getByRole('combobox', { name: 'Import preset' }).click();
+      await page.getByRole('option', { name: new RegExp(`^${presetTitle}`) }).click();
+
+      await expect(form.getByLabel('Agent name')).toHaveValue(presetTitle);
+      await expect(form.getByLabel('Instructions')).toHaveValue(presetInstructions);
+      await expect(form.getByText('Memory', { exact: true })).toBeVisible();
+
+      await form.locator('label[for="provider"] + button').click();
+      await expect(form.getByRole('combobox', { name: 'Provider' })).toContainText(
+        MOCK_ENDPOINTS[0].label,
+      );
+      await expect(form.getByRole('combobox', { name: 'Model' })).toContainText(
+        MOCK_ENDPOINTS[0].model,
+      );
+      await expect(form.locator('#maxContextTokens-dynamic-input')).toHaveValue(
+        `${MODEL_PARAMETERS.maxContextTokens}`,
+      );
+      await expect(form.locator('#maxOutputTokens-dynamic-input')).toHaveValue(
+        `${MODEL_PARAMETERS.maxOutputTokens}`,
+      );
+      await expect(form.locator('#temperature-dynamic-setting-input-number')).toHaveValue(
+        `${MODEL_PARAMETERS.temperature}`,
+      );
+      await form.getByRole('button', { name: 'Back to builder' }).click();
+      form = page.getByRole('form', { name: 'Agent configuration form' });
+
+      const [createResponse] = await Promise.all([
+        page.waitForResponse(
+          (response) =>
+            response.request().method() === 'POST' &&
+            new URL(response.url()).pathname === '/api/agents' &&
+            response.status() === 201,
+          { timeout: 30000 },
+        ),
+        form.getByRole('button', { name: 'Create' }).click(),
+      ]);
+      const createdAgent = (await createResponse.json()) as AgentDetail;
+      createdAgentId = createdAgent.id;
+
+      const persistedAgent = await waitForPersistedAgent(page, presetTitle, '');
+      expect(persistedAgent).toMatchObject({
+        id: createdAgentId,
+        name: presetTitle,
+        instructions: presetInstructions,
+        provider: MOCK_ENDPOINTS[0].label,
+        model: MOCK_ENDPOINTS[0].model,
+      });
+      expect(persistedAgent.model_parameters).toMatchObject({
+        temperature: MODEL_PARAMETERS.temperature,
+        maxContextTokens: MODEL_PARAMETERS.maxContextTokens,
+        maxOutputTokens: MODEL_PARAMETERS.maxOutputTokens,
+        topP: MODEL_PARAMETERS.topP,
+        topK: MODEL_PARAMETERS.topK,
+      });
+      expect(persistedAgent.tools).toContain('memory');
+    } finally {
+      await cleanupAgent(page, createdAgentId);
+      if (presetId) {
+        const token = await getAccessToken(page);
+        await requestJson(page, {
+          path: '/api/presets/delete',
+          token,
+          method: 'POST',
+          body: { presetId },
+        });
+      }
     }
   });
 });
