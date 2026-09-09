@@ -28,10 +28,6 @@ services:
       context: .
       dockerfile: Dockerfile
     ports: !reset []
-    environment:
-      # Zone for the "[Current date and time: …]" line prepended to user turns
-      # (packages/api/src/agents/datetime.ts). Falls back to TZ, then UTC.
-      - DATETIME_CONTEXT_TIMEZONE=Europe/Berlin
     volumes:
       - type: bind
         source: ./librechat.yaml
