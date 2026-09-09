@@ -75,6 +75,28 @@ It is also the moment a late correction lands. `add_note` writes outside the
 repo; the resume message tells the agent to read that file first, so a premise
 corrected after filing reaches the session that is about to act on it.
 
+**Restarting this server kills the job it is running, and until 2026-09-09
+nothing said so.** The one-job lock is a module-level variable, so it dies with
+the process — the Mongo row does not. A `launchctl kickstart` to pick up an edit
+(or a crash, or a reboot) killed the child `claude` and left the row on
+`running` forever, and every instrument then lied in the same direction: `/agent`
+pulsed a live card and re-polled every 5 s for a job with no process, `check_fix`
+reported it as still working, and `resume_fix` refused it as *still running* — so
+the one session that was actually recoverable was the one you could not reach.
+Job `6aa10a5663687a981bbfb6a3` sat like that for 6½ hours.
+
+`reapOrphanedJobs()` now runs at every startup. Because the lock is in-process, a
+row still in a live state at boot is orphaned by definition, so it needs no
+liveness check: each one is marked `error` with `stoppedBecause:
+process_restarted_mid_run` and a summary naming the restart, saying whether the
+session survived, and warning to check the tree first. A killed job can leave
+uncommitted edits, and preflight will refuse the resume until they are dealt
+with.
+
+The rule this leaves standing: **do not kickstart this server while a job is
+running.** `/healthz` → `activeJob` is the check, and the reaper only makes the
+aftermath legible — it does not make the restart free.
+
 ## What a job actually does
 
 1. **Preflight.** Refuses if another job is running, if the repo is on the wrong
