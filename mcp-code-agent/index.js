@@ -2,108 +2,24 @@ import express from 'express';
 import fs from 'fs/promises';
 import path from 'path';
 import { fileURLToPath } from 'url';
-import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { SSEServerTransport } from '@modelcontextprotocol/sdk/server/sse.js';
-import { z } from 'zod';
 import { AsyncLocalStorage } from 'async_hooks';
-import { handleRequestFix, handleCheckFix, handleListFixes, handleAddNote, handleResumeFix } from './tools.js';
-import { activeJobId, MODEL, agentAvailable, reapOrphanedJobs } from './runner.js';
+import {
+  activeJobId,
+  MODEL,
+  agentAvailable,
+  initialize,
+  shutdown,
+  isReady,
+  inventory,
+} from './runner.js';
+import { createMcpServer } from './server.js';
+import { closeDb } from './db.js';
 import { REPO, BRANCH, currentBranch, porcelain, head } from './git.js';
 import { mountView } from './view.js';
 
 const app = express();
 const mcpContext = new AsyncLocalStorage();
-
-/**
- * No `instructions` declared here, same as the other two sidecars: LibreChat only
- * reads a server's own declared instructions in MCPServerInspector, which skips
- * any server carrying runtime placeholders, and `x-user-id: {{LIBRECHAT_USER_ID}}`
- * is one. The usage guidance lives inline in librechat.yaml.
- */
-function createMcpServer() {
-  const server = new McpServer({ name: 'code-agent', version: '1.0.0' });
-
-  /**
-   * One field, and its description is doing real work.
-   *
-   * Every additional parameter here is a question the sending model will feel
-   * obliged to answer precisely, and precision is exactly what this tool must not
-   * demand — the moment filing a premise feels like filling in a form, the sender
-   * starts writing specifications instead of observations, and the thing that made
-   * this worth building is gone. So: no severity, no scope, no component, no
-   * suggested fix. Say what you noticed. The agent works out the rest.
-   */
-  server.tool(
-    'request_fix',
-    {
-      premise: z
-        .string()
-        .describe(
-          'What you noticed, in your own words. A sentence or two is plenty — "the imager ' +
-            'returns an empty result" is a complete and useful filing. Do NOT write a ' +
-            'specification, do not diagnose the cause unless you actually know it, and do not ' +
-            'suggest an implementation. A Claude Code session reads the whole repository, ' +
-            'investigates, and decides what is really wrong; over-specifying makes it worse ' +
-            'at that, not better. If your guess about the cause is wrong, saying it confidently ' +
-            'sends the agent down your wrong path.',
-        ),
-    },
-    (args) => handleRequestFix(args, mcpContext),
-  );
-
-  server.tool(
-    'check_fix',
-    {
-      job_id: z.string().describe('The job id returned by request_fix.'),
-      include_diff: z
-        .boolean()
-        .optional()
-        .describe('Return the full diff as well as the summary. Large — ask only if you need it.'),
-    },
-    (args) => handleCheckFix(args, mcpContext),
-  );
-
-  server.tool(
-    'resume_fix',
-    {
-      job_id: z
-        .string()
-        .describe(
-          'A job that stopped at the turn limit. Its Claude Code session is still on disk, ' +
-            'so this continues it with everything it had already read and concluded, instead ' +
-            'of re-running the same investigation from nothing.',
-        ),
-    },
-    (args) => handleResumeFix(args, mcpContext),
-  );
-
-  server.tool(
-    'add_note',
-    {
-      job_id: z.string().describe('The job to add to.'),
-      note: z
-        .string()
-        .describe(
-          'Something you realised after filing — a correction, a detail you left out, or ' +
-            '"actually the cause is X". If the job is still running the agent is told to ' +
-            're-read its notes before committing, so this can still change the outcome. ' +
-            'Use it especially when part of your premise turns out to be wrong: it is much ' +
-            'cheaper than letting the agent chase it.',
-        ),
-    },
-    (args) => handleAddNote(args, mcpContext),
-  );
-
-  server.tool(
-    'list_fixes',
-    {
-      limit: z.number().optional().describe('How many recent jobs to list. Defaults to 10.'),
-    },
-    (args) => handleListFixes(args, mcpContext),
-  );
-
-  return server;
-}
 
 const transports = new Map();
 
@@ -123,11 +39,16 @@ const SRC_DIR = path.dirname(fileURLToPath(import.meta.url));
  */
 async function staleSources() {
   try {
-    const names = (await fs.readdir(SRC_DIR)).filter((n) => n.endsWith('.js') || n.endsWith('.json'));
+    const names = (await fs.readdir(SRC_DIR)).filter(
+      (n) => n.endsWith('.js') || n.endsWith('.json'),
+    );
     const stats = await Promise.all(
       names.map(async (n) => [n, (await fs.stat(path.join(SRC_DIR, n))).mtimeMs]),
     );
-    return stats.filter(([, mtime]) => mtime > BOOTED_AT).map(([n]) => n).sort();
+    return stats
+      .filter(([, mtime]) => mtime > BOOTED_AT)
+      .map(([n]) => n)
+      .sort();
   } catch {
     return [];
   }
@@ -141,7 +62,7 @@ async function healthPayload() {
     staleSources(),
   ]);
   return {
-    ok: true,
+    ok: isReady(),
     model: MODEL || '(claude default)',
     agentAvailable: (await agentAvailable()) == null,
     repo: REPO,
@@ -154,6 +75,8 @@ async function healthPayload() {
     dailyLimit: parseInt(process.env.CODE_AGENT_DAILY_LIMIT ?? '0', 10) || 'none',
     sessions: transports.size,
     startedAt: new Date(BOOTED_AT).toISOString(),
+    worktrees: await inventory(),
+    workflow: 'isolated-v2',
     ...(stale.length ? { stale } : {}),
   };
 }
@@ -164,7 +87,7 @@ mountView(app, healthPayload);
 
 app.get('/sse', async (req, res) => {
   const transport = new SSEServerTransport('/messages', res);
-  const server = createMcpServer();
+  const server = createMcpServer(mcpContext);
   transports.set(transport.sessionId, transport);
   req.on('close', () => transports.delete(transport.sessionId));
   await server.connect(transport);
@@ -186,19 +109,23 @@ app.post('/messages', async (req, res) => {
 });
 
 const PORT = process.env.PORT || 3015;
-app.listen(PORT, async () => {
+await initialize();
+const httpServer = app.listen(PORT, async () => {
   console.log(`MCP code-agent server on port ${PORT}`);
   console.log(`  repo:   ${REPO} (${await currentBranch()} @ ${(await head()).slice(0, 9)})`);
   console.log(`  model:  ${MODEL || '(claude default)'}`);
   console.log(`  uid:    ${process.getuid()} — uses the Claude Code already logged in here`);
   const issue = await agentAvailable();
   if (issue) console.error(`  WARNING: ${issue}`);
-  // A job that was live when this process last died has no process now. Say so
-  // in the record, or /agent shows a corpse as working and resume_fix refuses it.
-  try {
-    const reaped = await reapOrphanedJobs();
-    if (reaped) console.log(`  reaped: ${reaped} job(s) left live by the last shutdown`);
-  } catch (err) {
-    console.error(`  WARNING: could not reap orphaned jobs: ${err.message}`);
-  }
 });
+
+let stopping = false;
+for (const signal of ['SIGTERM', 'SIGINT'])
+  process.on(signal, async () => {
+    if (stopping) return;
+    stopping = true;
+    httpServer.close();
+    await shutdown();
+    await closeDb();
+    process.exit(0);
+  });

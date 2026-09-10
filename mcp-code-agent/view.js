@@ -11,24 +11,46 @@ import { describeTokens } from './tokens.js';
  * data and nginx already fronts this host.
  */
 const STATUS = {
+  preparing: ['#d29922', 'preparing isolated worktree'],
+  building: ['#d29922', 'building tested image'],
+  integrating: ['#d29922', 'integrating'],
+  integrated: ['#d29922', 'integrated, application pending'],
+  paused: ['#d29922', 'paused — work retained'],
+  needs_input: ['#d29922', 'needs an answer'],
+  awaiting_integration: ['#d29922', 'waiting to integrate'],
+  integrated_only: ['#3fb950', 'integrated — no runtime change'],
+  applied_pending_restart: ['#d29922', 'integrated — application pending'],
+  recovery_required: ['#f85149', 'recovery needs inspection'],
+  archived: ['#8b949e', 'archived — recovery ref retained'],
   running: ['#d29922', 'working'],
   testing: ['#d29922', 'testing'],
   deploying: ['#d29922', 'deploying'],
   done: ['#3fb950', 'done & deployed'],
   no_change: ['#8b949e', 'no change (deliberate)'],
-  tests_failed: ['#f85149', 'tests failed, reverted'],
+  tests_failed: ['#f85149', 'tests failed — work retained'],
   rolled_back: ['#f85149', 'deploy failed, reverted'],
   broken: ['#f85149', 'BROKEN — needs a human'],
   error: ['#f85149', 'error'],
 };
 
 const esc = (v) =>
-  String(v ?? '').replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' })[c]);
+  String(v ?? '').replace(
+    /[&<>"]/g,
+    (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' })[c],
+  );
 
 function card(job) {
   const [colour, label] = STATUS[job.status] ?? ['#8b949e', job.status];
   const p = job.progress;
-  const live = ['running', 'testing', 'deploying'].includes(job.status);
+  const live = [
+    'preparing',
+    'running',
+    'testing',
+    'building',
+    'integrating',
+    'integrated',
+    'deploying',
+  ].includes(job.status);
   const age = Math.round((Date.now() - new Date(job.createdAt).getTime()) / 1000);
 
   return `<article>
@@ -39,19 +61,28 @@ function card(job) {
         · ${age < 90 ? age + 's' : Math.round(age / 60) + 'm'}${job.sender ? ' · ' + esc(job.sender) : ''}</time>
     </header>
     <blockquote>${esc(job.premise)}</blockquote>
+    <p class="meta">job <code>${esc(job._id)}</code></p>
+    ${job.worktree ? `<p class="meta">${esc(job.branch)} · ${job.cleanedAt ? 'cleaned' : 'retained'}<br><code>${esc(job.worktree)}</code></p>` : ''}
+    ${job.recoveryRef ? `<p class="meta">recovery <code>${esc(job.recoveryRef)}</code></p>` : ''}
+    ${job.cleanupWarning ? `<p class="note">${esc(job.cleanupWarning)}</p>` : ''}
+    ${job.integrationReason ? `<p class="note">${esc(job.integrationReason)}</p>` : ''}
     ${job.notes?.length ? job.notes.map((n) => `<p class="note"><b>note</b> ${esc(n.from ?? '')}: ${esc(n.text)}</p>`).join('') : ''}
-    ${p && live ? `<p class="meta">turn ${p.turns}${p.maxTurns ? ` of ~${p.maxTurns}` : ''}${p.tokens ? ' · ' + esc(describeTokens(p.tokens)) : ''}</p>` : ''}
-    ${p && live ? `<div class="progress">turn ${p.turns}${p.tools ? ` · ${p.tools} tool calls` : ''}
+    ${p && live ? `<p class="meta">segment ${job.segment || 1} · ${p.messages ?? '?'} assistant messages${p.tokens ? ' · ' + esc(describeTokens(p.tokens)) : ''}</p>` : ''}
+    ${
+      p && live
+        ? `<div class="progress">CLI turn limit ${p.maxTurns || '?'}${p.tools ? ` · ${p.tools} tool calls` : ''}
         ${p.lastTool ? `<code>${esc(p.lastTool)}</code>` : ''}
         ${p.files?.length ? `<div class="files">${p.files.map((f) => `<code>${esc(f)}</code>`).join(' ')}</div>` : ''}
-      </div>` : ''}
+      </div>`
+        : ''
+    }
     ${p?.lastText && live ? `<p class="say">${esc(p.lastText)}</p>` : ''}
     ${job.summary && !live ? `<pre>${esc(job.summary.slice(0, 4000))}</pre>` : ''}
     ${job.commits?.length ? `<ul>${job.commits.map((c) => `<li><code>${esc(c.short)}</code> ${esc(c.subject)}</li>`).join('')}</ul>` : ''}
     ${job.deploy ? `<p class="deploy">deploy: ${esc(job.deploy)}</p>` : ''}
     ${job.stashed ? `<p class="note"><b>stashed</b> uncommitted leftovers set aside: <code>git stash pop</code></p>` : ''}
     ${job.revert ? `<p class="undo">undo: <code>${esc(job.revert)}</code></p>` : ''}
-    ${job.status === 'error' && job.progress?.sessionId ? `<p class="meta">session <code>${esc(job.progress.sessionId.slice(0, 8))}</code> is intact — resumable</p>` : ''}
+    ${job.sessionId ? `<p class="meta">session <code>${esc(job.sessionId)}</code></p>` : ''}
     ${job.resumeCount ? `<p class="meta">resumed ${job.resumeCount}×</p>` : ''}
     ${job.usageLine ? `<p class="meta">${job.elapsed ?? '?'}s · ${esc(job.usageLine)}</p>` : ''}
   </article>`;
@@ -61,13 +92,24 @@ export function mountView(app, health) {
   app.get('/agent', async (_req, res) => {
     let jobs = [];
     try {
-      jobs = await getDb()
-        .then((db) => db.collection('mcp_code_agent_jobs').find().sort({ createdAt: -1 }).limit(25).toArray());
+      jobs = await getDb().then((db) =>
+        db.collection('mcp_code_agent_jobs').find().sort({ createdAt: -1 }).limit(25).toArray(),
+      );
     } catch (err) {
       return res.status(500).send(`<pre>database unreachable: ${esc(err.message)}</pre>`);
     }
     const h = await health();
-    const live = jobs.some((j) => ['running', 'testing', 'deploying'].includes(j.status));
+    const live = jobs.some((j) =>
+      [
+        'preparing',
+        'running',
+        'testing',
+        'building',
+        'integrating',
+        'integrated',
+        'deploying',
+      ].includes(j.status),
+    );
 
     res.type('html').send(`<!doctype html><meta charset="utf-8">
 <title>code-agent</title>
@@ -106,6 +148,7 @@ ul{margin:.5rem 0;padding-left:1.1rem}
   · claude ${h.agentAvailable ? 'ok' : '<span style="color:#f85149">unavailable</span>'}
   · ${h.activeJob ? 'job running' : 'idle'}
   · limit ${h.dailyLimit}/day
+  · ${(h.worktrees || []).filter((j) => j.retained).length} retained worktrees
 </div>
 ${
   /* A stale server answers every probe healthily and behaves like the version
@@ -115,7 +158,7 @@ ${
     ? `<article class="stale"><b>Running pre-edit code.</b> ${h.stale.map(esc).join(', ')}
        ${h.stale.length === 1 ? 'was' : 'were'} changed after this process started
        (${esc(h.startedAt)}). Node does not reload; restart to pick it up:
-       <pre>launchctl kickstart -k gui/${process.getuid()}/local.librechat.code-agent</pre></article>`
+       ${h.activeJob ? '<p>Wait until the active job finishes before restarting.</p>' : `<pre>launchctl kickstart -k gui/${process.getuid()}/local.librechat.code-agent</pre>`}</article>`
     : ''
 }
 ${jobs.length ? jobs.map(card).join('') : '<article>No jobs filed yet.</article>'}`);

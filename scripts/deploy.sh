@@ -15,13 +15,14 @@
 #                                    running code has drifted from the working tree
 #   ./scripts/deploy.sh --no-cache   full deploy with a from-scratch image build
 #   ./scripts/deploy.sh --yes        don't prompt (for unattended runs)
+#   ./scripts/deploy.sh --image sha256:...  apply a prebuilt, tested API image only
 #
 # Env overrides:
 #   DEPLOY_BRANCH=<name>   expected branch (default: local-features)
 #
 set -euo pipefail
 
-REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
 cd "$REPO"
 
 EXPECT_BRANCH="${DEPLOY_BRANCH:-local-features}"
@@ -30,6 +31,7 @@ BASE_URL="http://localhost:13080"
 MODE=full
 ASSUME_YES=0
 BUILD_ARGS=()
+PREBUILT_IMAGE=""
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -38,6 +40,7 @@ while [[ $# -gt 0 ]]; do
     --sidecars) MODE=sidecars ;;
     --no-cache) BUILD_ARGS+=(--no-cache) ;;
     --yes|-y)   ASSUME_YES=1 ;;
+    --image)    [[ $# -ge 2 ]] || { echo '--image requires an image ID' >&2; exit 2; }; PREBUILT_IMAGE="$2"; shift ;;
     -h|--help)  sed -n '2,20p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
     *) echo "unknown option: $1 (try --help)" >&2; exit 2 ;;
   esac
@@ -70,8 +73,17 @@ docker info >/dev/null 2>&1 || die "Docker isn't running (start OrbStack first).
 ok "docker reachable"
 
 BRANCH="$(git rev-parse --abbrev-ref HEAD)"
+if [[ -n "$PREBUILT_IMAGE" ]]; then
+  [[ "$MODE" == "full" ]] || die '--image cannot be combined with --check/--config/--sidecars'
+  [[ "$PREBUILT_IMAGE" =~ ^sha256:[a-f0-9]{64}$ ]] || die '--image requires an immutable sha256 image ID'
+  [[ -n "${DEPLOY_EXPECTED_HEAD:-}" ]] || die '--image requires DEPLOY_EXPECTED_HEAD'
+  if [[ "${CODE_AGENT_ROLLBACK:-0}" != "1" ]]; then
+    [[ "$(git rev-parse HEAD)" == "$DEPLOY_EXPECTED_HEAD" ]] || die 'Target branch changed before image application'
+    [[ -z "$(git status --porcelain)" ]] || die 'Operator checkout changed before image application'
+  fi
+fi
 if [[ "$BRANCH" != "$EXPECT_BRANCH" ]]; then
-  if [[ "$MODE" == "check" || "$MODE" == "sidecars" ]]; then
+  if [[ "$MODE" == "check" || "$MODE" == "sidecars" || ( -n "$PREBUILT_IMAGE" && "${CODE_AGENT_ROLLBACK:-0}" == "1" ) ]]; then
     warn "on '$BRANCH', expected '$EXPECT_BRANCH'"
   else
     die "On branch '$BRANCH', expected '$EXPECT_BRANCH'.
@@ -86,7 +98,9 @@ fi
 
 if [[ "$MODE" != "check" && "$MODE" != "sidecars" ]]; then
   DIRTY="$(git status --porcelain)"
-  if [[ -n "$DIRTY" ]]; then
+  if [[ -n "$DIRTY" && "${CODE_AGENT_ROLLBACK:-0}" == "1" && -n "$PREBUILT_IMAGE" ]]; then
+    warn 'Restoring a previous API image; operator edits are not built or reverted'
+  elif [[ -n "$DIRTY" ]]; then
     warn "working tree is dirty — these uncommitted changes WILL ship in the image:"
     printf '      %s\n' $(git status --porcelain | awk '{print $2}')
     confirm "Continue anyway?" || die "aborted"
@@ -118,7 +132,13 @@ else
   # the new yaml, while the dashboard silently loses its copy and
   # /cost/markets/endpoints starts returning [] — i.e. the market-price button just
   # stops appearing. Recreating both is what keeps them looking at the same file.
-  if [[ "$MODE" == "config" ]]; then
+  if [[ -n "$PREBUILT_IMAGE" ]]; then
+    bold "Applying tested API image $PREBUILT_IMAGE"
+    # Keep the standard tag current for later operator compose commands. No build
+    # context, other service rebuild, or source checkout is used for this image.
+    docker image tag "$PREBUILT_IMAGE" librechat-fork:local
+    compose up -d --no-build --no-deps --force-recreate api
+  elif [[ "$MODE" == "config" ]]; then
     bold "Recreating api + cost-dashboard (config-only, no rebuild)"
     compose up -d --force-recreate api cost-dashboard
   else

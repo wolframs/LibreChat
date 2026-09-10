@@ -1,9 +1,13 @@
 import { execFile } from 'child_process';
+import { realpathSync } from 'node:fs';
+import { commandScope, managedRun } from './commands.js';
 
-export const REPO = process.env.REPO_PATH || '/Users/wolfram/projects/librechat';
+export const REPO = realpathSync(process.env.REPO_PATH || '/Users/wolfram/projects/librechat');
 export const BRANCH = process.env.DEPLOY_BRANCH || 'local-features';
 
 export function run(cmd, args, { cwd = REPO, timeout = 60_000, env } = {}) {
+  const scope = commandScope.getStore();
+  if (scope) return managedRun(cmd, args, { cwd, timeout, env }, scope);
   return new Promise((resolve) => {
     execFile(
       cmd,

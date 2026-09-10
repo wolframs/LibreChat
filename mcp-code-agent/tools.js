@@ -1,364 +1,258 @@
-import { ObjectId } from 'mongodb';
 import { getDb } from './db.js';
-import { preflight, startJob, getJob, listJobs, activeJobId, appendNote, resumeJob, MODEL } from './runner.js';
+import {
+  preflight,
+  startJob,
+  getJob,
+  listJobs,
+  activeJobId,
+  appendNote,
+  resumeJob,
+  pauseJob,
+  archiveJob,
+} from './runner.js';
 import { git } from './git.js';
-import { NO_CHANGE_NOTE } from './prompt.js';
-import { describeTokens } from './tokens.js';
+import { LIVE, RESUMABLE } from './engine.js';
 
-/**
- * No daily limit by default.
- *
- * It was there to bound spend when this ran against a paid key. It runs on the
- * operator's own Claude Code now, and filing only happens from a chat the
- * operator is sitting in — so the limit was rationing something nobody could
- * spend behind their back, while getting in the way of the one case that
- * actually needs several filings in a row: a bad afternoon. Set
- * CODE_AGENT_DAILY_LIMIT to a number to bring it back.
- */
-const DAILY_LIMIT = parseInt(process.env.CODE_AGENT_DAILY_LIMIT ?? '0', 10);
+const text = (value) => ({ content: [{ type: 'text', text: value }] });
+const fail = (value) => ({ ...text(value), isError: true });
 
-const text = (t) => ({ content: [{ type: 'text', text: t }] });
-
-function elapsedOf(job) {
-  const secs = Math.round((Date.now() - new Date(job.createdAt).getTime()) / 1000);
-  return secs < 90 ? `${secs}s` : `${Math.round(secs / 60)}m`;
+async function jobFor(id, context) {
+  const job = await getJob(id);
+  const userId = context.getStore()?.userId;
+  if (!job || (userId && job.userId && userId !== job.userId))
+    throw new Error('No accessible job with that full ID. Use list_fixes to find it.');
+  return job;
 }
 
-/**
- * What the session is doing right now, not merely that it is alive.
- *
- * The first version of this could say "still working" and nothing else, because
- * the agent's output only arrived when the process exited. A model watching its
- * own repair had no more insight into it than `ps` would give. The runner now
- * parses the session's event stream as it happens, so this can report the turn
- * count, the tool in flight and the files touched so far — and, when it has been
- * quiet for a while, say so plainly rather than implying healthy progress.
- */
-function liveProgress(job) {
-  const p = job.progress;
-  if (!p) return ['No progress reported yet — the session is still starting up.'];
-
-  const out = [
-    `**Turn ${p.turns}${p.maxTurns ? ` of ~${p.maxTurns}` : ''}` +
-      `${p.tools ? `, ${p.tools} tool calls` : ''}**` +
-      (p.model ? ` · ${p.model}` : ''),
-  ];
-  if (p.tokens) out.push(`- ${describeTokens(p.tokens)} so far`);
-  if (p.lastTool) out.push(`- now: \`${p.lastTool}\``);
-  if (p.files?.length) {
-    out.push(`- files touched so far: ${p.files.map((f) => `\`${f}\``).join(', ')}`);
-  }
-  if (p.lastText) out.push('', '> ' + p.lastText.split('\n').join('\n> '));
-
-  const quiet = Math.round((Date.now() - new Date(p.at).getTime()) / 1000);
-  if (quiet > 120) {
-    out.push(
-      '',
-      `_No activity for ${Math.round(quiet / 60)} minutes. It may be on a long tool call, ` +
-        'or it may be stuck; the job times out on its own._',
+export function describeJob(job) {
+  const id = String(job._id || job.id);
+  const status =
+    {
+      preparing:
+        'Preparing the isolated worktree and private dependencies. No model has to wait in this chat.',
+      running: 'Claude Code is working in the job worktree.',
+      testing: 'The wrapper is testing the committed revision in the job worktree.',
+      building:
+        'Building an API image from the exact tested commit. The running stack is unchanged.',
+      integrating:
+        'Integrating tested work into the target branch. Further notes are recorded for follow-up.',
+      integrated: 'Source integrated; application has not yet been confirmed.',
+      deploying:
+        'Applying the tested API image. The chat may disconnect; check this same ID after reconnecting.',
+      paused:
+        'Paused. Session, commits, and unfinished edits are retained; no partial work was deployed.',
+      needs_input:
+        'The coding agent needs an answer. Relay its question, add the answer with add_note, then resume_fix.',
+      tests_failed:
+        'Validation failed. The branch and edits are retained for repair; nothing was integrated or deployed.',
+      awaiting_integration:
+        'Editing is complete. Integration is waiting; the fix is not live. resume_fix retries this stage.',
+      done: 'Done: API image deployed and verified.',
+      integrated_only: 'Integrated. No runtime image change was required.',
+      applied_pending_restart:
+        'Source integrated; runtime/sidecar application remains. This is not a claim that the change is live.',
+      no_change: 'Investigation complete; no source change was needed.',
+      rolled_back:
+        'Deployment failed. The previous API image was restored and the source integration reverted.',
+      recovery_required:
+        'Automatic recovery is unsafe or incomplete. Inspect the recorded process, source and deployment state before proceeding.',
+      archived: 'Closed. Work was preserved under a recovery ref before cleanup.',
+      error: 'Supervisor error. Inspect the details; retained isolated jobs can be resumed.',
+    }[job.status] || job.status;
+  const lines = [`Job \`${id}\` — **${job.status}**. ${status}`];
+  if (!job.worktree)
+    lines.push(
+      'Legacy shared-checkout job: old reports remain readable; its session cannot be resumed under the isolated workflow.',
+    );
+  if (LIVE.includes(job.status)) {
+    const p = job.progress;
+    if (p) {
+      lines.push(
+        `Segment ${job.segment || 1}: ${p.messages ?? '?'} assistant messages, ${p.tools || 0} tool calls. CLI turn limit: ${p.maxTurns || '?'}.`,
+      );
+      if (p.lastTool) lines.push(`Last tool: ${p.lastTool}`);
+      if (p.lastText) lines.push(`Last update: ${p.lastText}`);
+    }
+    lines.push(
+      'Check again in 30–60 seconds or on the next chat turn. Do not file this work again.',
     );
   }
-  return out;
-}
-const fail = (t) => ({ isError: true, content: [{ type: 'text', text: t }] });
-
-async function checkLimit(userId) {
-  if (!userId || DAILY_LIMIT <= 0) return { allowed: true };
-  const db = await getDb();
-  const startOfDay = new Date();
-  startOfDay.setHours(0, 0, 0, 0);
-  const count = await db
-    .collection('mcp_code_agent_jobs')
-    .countDocuments({ userId, createdAt: { $gte: startOfDay } });
-  return count >= DAILY_LIMIT
-    ? { allowed: false, reason: `Daily limit of ${DAILY_LIMIT} fixes reached.` }
-    : { allowed: true };
+  if (job.summary) lines.push('', job.summary);
+  if (job.integrationReason) lines.push('', `Integration: ${job.integrationReason}`);
+  if (job.stoppedBecause) lines.push(`Stopped because: ${job.stoppedBecause}`);
+  if (job.worktree)
+    lines.push(
+      '',
+      `Branch: \`${job.branch}\``,
+      `Worktree: \`${job.worktree}\`${job.cleanedAt ? ' (cleaned)' : ' (retained)'}`,
+    );
+  if (job.recoveryRef)
+    lines.push(
+      `Recovery ref: \`${job.recoveryRef}\`. Inspect with \`git show ${job.recoveryRef}\`.`,
+    );
+  if (job.sessionId) lines.push(`Claude session: \`${job.sessionId}\``);
+  if (job.cleanedAt && job.recoveryRef)
+    lines.push(
+      `Manual recovery in a NEW directory: \`git worktree add --detach <new-directory> ${job.recoveryRef}\`.`,
+    );
+  if (job.worktree && RESUMABLE.includes(job.status))
+    lines.push(`Continue this job with \`resume_fix("${id}")\`.`);
+  if (job.commits?.length)
+    lines.push('', 'Commits:', ...job.commits.map((c) => `- \`${c.short}\` ${c.subject}`));
+  if (job.diffstat) lines.push('', '```', job.diffstat, '```');
+  if (job.tests) lines.push('', `Tests: ${job.tests}`);
+  if (job.deploy) lines.push('', `Application: ${job.deploy}`);
+  if (job.rollback) lines.push('', `Rollback: ${job.rollback}`);
+  if (job.recoveryReason) lines.push('', `Recovery detail: ${job.recoveryReason}`);
+  if (job.cleanupWarning) lines.push('', `Cleanup deferred: ${job.cleanupWarning}`);
+  if (job.buildDirectory) lines.push(`Retained build snapshot: \`${job.buildDirectory}\`.`);
+  if (job.imageId) lines.push(`Candidate API image: \`${job.imageId}\`.`);
+  if (job.previousImage) lines.push(`Previous API image for recovery: \`${job.previousImage}\`.`);
+  if (job.revert)
+    lines.push(
+      '',
+      `Undo source integration: \`${job.revert}\`. Runtime application may also be needed.`,
+    );
+  if (job.notes?.length)
+    lines.push(
+      '',
+      'Notes:',
+      ...job.notes.map(
+        (n) =>
+          `- ${n.from}: ${n.text}${n.late ? ' [recorded after integration began; not applied to this revision]' : ''}`,
+      ),
+    );
+  if (job.usageLine)
+    lines.push(
+      '',
+      `${job.elapsed || 0}s across ${job.usage?.length || 1} segment(s) · ${job.usageLine}`,
+    );
+  return lines.join('\n');
 }
 
 export async function handleRequestFix({ premise }, context) {
   try {
-    if (!premise || premise.trim().length < 8) {
-      return fail('Say what you noticed — a sentence is enough.');
+    if (!premise || premise.trim().length < 8)
+      return fail('Describe the requested work or observation in a sentence.');
+    const userId = context.getStore()?.userId;
+    const limit = Number(process.env.CODE_AGENT_DAILY_LIMIT || 0);
+    if (limit > 0 && userId) {
+      const day = new Date();
+      day.setHours(0, 0, 0, 0);
+      const db = await getDb();
+      const count = await db
+        .collection('mcp_code_agent_jobs')
+        .countDocuments({ userId, createdAt: { $gte: day } });
+      if (count >= limit)
+        return fail(
+          `Daily limit of ${limit} new jobs reached. Existing jobs can still be inspected or resumed.`,
+        );
     }
-
-    const { userId } = context.getStore() || {};
-
-    const limit = await checkLimit(userId);
-    if (!limit.allowed) return fail(limit.reason);
-
     const pre = await preflight();
-    if (!pre.ok) return fail(`Cannot start a fix right now.\n\n${pre.reason}`);
-
-    const jobId = await startJob({ premise: premise.trim(), userId });
-
+    if (!pre.ok) return fail(pre.reason);
+    const id = await startJob({ premise: premise.trim(), userId });
     return text(
-      [
-        `Filed. Job \`${jobId}\` is running${MODEL ? ` on ${MODEL}` : ''}.`,
-        ...(pre.parked
-          ? [
-              '',
-              `**The tree was not clean, so ${pre.parked.paths.length} uncommitted path(s) were ` +
-                `committed first as \`${pre.parked.sha}\`** ("${pre.parked.subject}"), under the ` +
-                'operator\'s own name. That keeps them separate from the agent\'s work and out ' +
-                'of anything the wrapper might revert — but they will ship in the deploy at the ' +
-                `end of this job. Undo with \`git revert ${pre.parked.sha}\`. Files:`,
-              ...pre.parked.paths.map((p) => `  - \`${p}\``),
-            ]
-          : []),
-        '',
-        'What happens now: the agent reads the repository, works out what is actually wrong,',
-        'fixes it, runs the tests, commits, and deploys. That takes minutes, not seconds.',
-        '',
-        '**The deploy restarts the api — this conversation will drop when it does.** That is',
-        'expected and nothing is lost. Tell the user to hard-refresh the page once, then',
-        `call \`check_fix("${jobId}")\` to read what the agent found and did.`,
-        '',
-        'Do not file this again while it runs.',
-      ].join('\n'),
+      `Job \`${id}\` accepted. Its isolated branch/worktree is being prepared from committed source; the operator's uncommitted edits are excluded.\n\nThe work continues after this tool call and chat turn end. Use check_fix("${id}") in 30–60 seconds or on the next turn; keep this full ID. Do not file it again. Automatic continuation is bounded; paused work is retained for resume_fix.\n\nIf deployment later restarts the API and disconnects the chat, hard-refresh once and check the same job. A started or committed job is not yet a deployed fix.`,
     );
   } catch (err) {
-    console.error('request_fix failed:', err);
-    return fail(`Could not start a fix: ${err.message}`);
+    return fail(`Could not start: ${err.message}`);
   }
 }
 
 export async function handleCheckFix({ job_id, include_diff }, context) {
   try {
-    const job = await getJob(job_id);
-    if (!job) return fail(`No job \`${job_id}\`. Use list_fixes to find the right id.`);
-
-    const lines = [];
-    const commits = job.commits || [];
-
-    switch (job.status) {
-      case 'running':
-        lines.push(
-          `Job \`${job_id}\` is still working — ${elapsedOf(job)} in.`,
-          'Nothing has been deployed yet.',
-          '',
-          ...liveProgress(job),
-        );
-        break;
-      case 'testing':
-        lines.push(
-          `Job \`${job_id}\` has finished editing and the wrapper is re-running the tests`,
-          'before it will deploy anything.',
-          '',
-          ...liveProgress(job),
-        );
-        break;
-      case 'deploying':
-        lines.push(
-          `Job \`${job_id}\` has committed its work and is deploying now.`,
-          'The api is restarting; if this call succeeded, it is already back.',
-          '',
-          ...(job.tests ? [`Tests: ${job.tests}`] : []),
-        );
-        break;
-      case 'tests_failed':
-        lines.push(
-          `Job \`${job_id}\`: **the wrapper re-ran the tests before deploying and they failed.**`,
-          'Nothing was deployed and the commits were reverted. The stack is untouched.',
-        );
-        break;
-      case 'no_change':
-        lines.push(`Job \`${job_id}\`: no change made.`, '', NO_CHANGE_NOTE);
-        break;
-      case 'done':
-        lines.push(`Job \`${job_id}\`: **done and deployed.**`, '', 'The fix is live. If the user');
-        lines.push('has not reloaded since, one hard refresh will pick it up.');
-        break;
-      case 'rolled_back':
-        lines.push(
-          `Job \`${job_id}\`: **the change was made, failed to deploy, and was automatically reverted.**`,
-          'The stack is back where it started. Relay this as a real failure — do not retry',
-          'the same premise without new information.',
-        );
-        break;
-      case 'broken':
-        lines.push(
-          `Job \`${job_id}\`: **the deploy failed AND the rollback failed. The stack needs a human.**`,
-          'Tell the user this plainly and immediately.',
-        );
-        break;
-      default:
-        lines.push(`Job \`${job_id}\`: ${job.status}.`);
+    const job = await jobFor(job_id, context);
+    let result = describeJob(job);
+    if (
+      include_diff &&
+      (job.integrationBase || job.baseSha) &&
+      (job.headSha || job.commits?.[0]?.hash)
+    ) {
+      const { err, stdout, stderr } = await git([
+        'diff',
+        job.integrationBase || job.baseSha,
+        job.headSha || job.commits[0].hash,
+      ]);
+      result += err
+        ? `\n\nDiff unavailable: ${stderr.trim()}`
+        : `\n\n\`\`\`diff\n${stdout.slice(0, 60000)}${stdout.length > 60000 ? '\n[diff truncated]' : ''}\n\`\`\``;
     }
-
-    lines.push('', '**The premise you filed:**', `> ${job.premise.split('\n').join('\n> ')}`);
-    if (job.notes?.length) {
-      lines.push('', '**Notes added after filing:**');
-      for (const n of job.notes) {
-        lines.push(`- _${n.from ?? 'someone'}:_ ${n.text.split('\n').join(' ')}`);
-      }
-    }
-    if (job.stoppedBecause && job.stoppedBecause !== 'success') {
-      lines.push('', `_Stopped because: \`${job.stoppedBecause}\`._`);
-      if (job.progress?.sessionId && job.status === 'error') {
-        lines.push(
-          `Its session is intact, so \`resume_fix("${job_id}")\` picks it up where it stopped ` +
-            'rather than paying for the same investigation twice.',
-        );
-      }
-    }
-    if (job.resumeCount) {
-      lines.push('', `_Resumed ${job.resumeCount}×._`);
-    }
-
-    if (job.summary) {
-      lines.push('', "**The agent's own report:**", '', job.summary.trim());
-    }
-    if (commits.length) {
-      lines.push('', '**Commits:**', ...commits.map((c) => `- \`${c.short}\` ${c.subject}`));
-    }
-    if (job.diffstat) {
-      lines.push('', '```', job.diffstat, '```');
-    }
-    // Summary by default, detail on request — the same shape as agent-test.sh,
-    // and for the same reason: a full diff is thousands of tokens and is only
-    // wanted when the summary has raised a question.
-    if (include_diff && job.baseSha && commits.length) {
-      const { stdout } = await git(['diff', `${job.baseSha}..${commits[0].hash}`]);
-      const body = stdout.length > 60000 ? `${stdout.slice(0, 60000)}\n[…diff truncated]` : stdout;
-      lines.push('', '**Full diff:**', '', '```diff', body.trim(), '```');
-    } else if (job.diffstat) {
-      lines.push('', '_Call check_fix again with include_diff: true to read the whole change._');
-    }
-    if (job.deploy) {
-      lines.push('', `**Deploy:** ${job.deploy}`);
-    }
-    if (job.stashed) {
-      lines.push(
-        '',
-        `**The agent left uncommitted changes behind**, so they were set aside before the`,
-        `tests ran rather than tested and shipped: \`git stash list\` shows them as`,
-        `_"${job.stashed}"_, and \`git stash pop\` brings them back. Tell the user — it`,
-        'usually means the agent was cut off mid-edit.',
-      );
-    }
-    if (job.revert) {
-      lines.push(
-        '',
-        `**To undo this**, the user runs: \`${job.revert}\``,
-        'Offer that if they are unhappy with the result. It is a normal thing to do, not an',
-        'emergency measure.',
-      );
-    }
-    // Tokens, not dollars. This runs on the operator's Claude Code subscription,
-    // so `total_cost_usd` is what the work would have cost at API list price —
-    // useful as a sense of scale, misleading as a headline.
-    if (job.usageLine) {
-      lines.push('', `_${job.elapsed ?? '?'}s · ${job.usageLine}_`);
-    }
-
-    return text(lines.join('\n'));
+    return text(result);
   } catch (err) {
-    console.error('check_fix failed:', err);
-    return fail(`Could not read that job: ${err.message}`);
+    return fail(err.message);
   }
 }
 
-/**
- * Correct a filing that is already running.
- *
- * A headless session has no input channel once started, so the note goes to a
- * file the briefing tells the agent to re-read before it commits. That makes the
- * correction land if the agent has not finished yet, and land in the record
- * either way — which matters, because the premise is stored verbatim and a
- * premise that was wrong should not sit there uncontested.
- */
 export async function handleAddNote({ job_id, note }, context) {
   try {
-    const job = await getJob(job_id);
-    if (!job) return fail(`No job \`${job_id}\`.`);
-    if (!note || note.trim().length < 4) return fail('Say what you want to add.');
-
-    const path = await appendNote(job_id, note, job.sender || 'the filing model');
-    const live = ['running', 'testing'].includes(job.status);
-
+    await jobFor(job_id, context);
+    if (!note?.trim()) return fail('Provide the correction or answer to record.');
+    const receipt = await appendNote(job_id, note.trim(), 'filing agent/user');
     return text(
-      live
-        ? `Noted on job \`${job_id}\`. The agent is still working and is told to re-read ` +
-            `its notes before committing, so this should reach it — but it may already be ` +
-            `past that point, so treat it as likely rather than certain.\n\n${path}`
-        : `Noted on job \`${job_id}\`, but it is already **${job.status}** — the agent will ` +
-            'not see this. It is recorded against the job and in the changelog, so the ' +
-            'correction is on the record even though it did not change the outcome.',
+      receipt.late
+        ? `Recorded on ${job_id}. Integration has begun or the job is closed; this note cannot change the revision already in flight. Check its outcome and file follow-up work if needed.`
+        : `Recorded as notes version ${receipt.version} on ${job_id}. The coding agent is asked to read it; the wrapper will not integrate a completion report acknowledging an older version. Delivery is deferred until the agent reads the file or resumes. If the job is paused/needs_input/tests_failed/awaiting_integration, use resume_fix on this same ID when ready.`,
     );
   } catch (err) {
-    console.error('add_note failed:', err);
-    return fail(`Could not add that note: ${err.message}`);
+    return fail(err.message);
   }
 }
 
-/**
- * Pick a cut-off job back up in its own session.
- *
- * The turn limit ends a run without ending the session: the transcript is intact
- * on disk with every file read and every conclusion reached. Filing again would
- * pay for that investigation a second time and arrive in the same place.
- */
 export async function handleResumeFix({ job_id }, context) {
   try {
-    const job = await getJob(job_id);
-    if (!job) return fail(`No job \`${job_id}\`. Use list_fixes to find the right id.`);
-
+    const job = await jobFor(job_id, context);
+    if (!job.worktree)
+      return fail(
+        'Legacy job: its old session edited the shared checkout and cannot safely resume in a new worktree. Preserve/inspect its existing work before filing a new job.',
+      );
     const outcome = await resumeJob(job_id);
-    if (!outcome.ok) return fail(`Cannot resume that job.\n\n${outcome.reason}`);
+    return outcome.ok
+      ? text(
+          `Resuming ${job_id} in its recorded worktree. ${job.sessionComplete ? 'Retrying validation/integration; the completed investigation is retained.' : 'Continuing the same Claude Code session with its edits and latest notes.'} Check this same ID; deployment is conditional on completion and successful validation.`,
+        )
+      : fail(outcome.reason);
+  } catch (err) {
+    return fail(err.message);
+  }
+}
 
+export async function handlePauseFix({ job_id }, context) {
+  try {
+    await jobFor(job_id, context);
+    return text(await pauseJob(job_id));
+  } catch (err) {
+    return fail(err.message);
+  }
+}
+
+export async function handleArchiveFix({ job_id }, context) {
+  try {
+    await jobFor(job_id, context);
+    const job = await archiveJob(job_id);
     return text(
-      [
-        `Resuming job \`${job_id}\` in its original session.`,
-        ...(outcome.parked
-          ? [
-              '',
-              `The tree was not clean, so ${outcome.parked.paths.length} uncommitted path(s) ` +
-                `were committed first as \`${outcome.parked.sha}\` under the operator's own ` +
-                `name — separate from the agent's work, and undone with \`git revert ` +
-                `${outcome.parked.sha}\`.`,
-            ]
-          : []),
-        '',
-        'It keeps everything it had already read and worked out, so it is picking up',
-        'rather than starting over. Notes added since it was cut off are the first thing',
-        'it is told to re-read.',
-        '',
-        '**The deploy will restart the api and drop this conversation again.** Hard-refresh,',
-        `then \`check_fix("${job_id}")\`.`,
-      ].join('\n'),
+      `Archived ${job_id}. Recovery ref: ${job.recoveryRef}. ${job.cleanedAt ? 'Worktree removed; source work remains recoverable from that ref.' : `Worktree retained: ${job.cleanupWarning}`}`,
     );
   } catch (err) {
-    console.error('resume_fix failed:', err);
-    return fail(`Could not resume: ${err.message}`);
+    return fail(err.message);
   }
 }
 
 export async function handleListFixes({ limit }, context) {
   try {
-    const userId = context.getStore()?.userId;
-    const jobs = await listJobs(userId, limit);
-    if (!jobs.length) return text('No fixes have been filed from this account yet.');
-
-    const running = activeJobId();
-    const rows = jobs.map((j) => {
-      const when = j.createdAt.toISOString().slice(0, 16).replace('T', ' ');
-      const first = j.premise.split('\n')[0];
-      const head = first.length > 90 ? `${first.slice(0, 90)}…` : first;
-      return `- \`${j._id}\` ${when} — **${j.status}** — ${head}`;
-    });
-
+    const jobs = await listJobs(context.getStore()?.userId, limit);
+    const rows = jobs.map(
+      (j) =>
+        `- \`${j._id}\` ${new Date(j.createdAt).toISOString().slice(0, 16)} UTC — **${j.status}**${j.worktree && !j.cleanedAt ? ' [worktree retained]' : ''} — ${j.premise?.split('\n')[0]?.slice(0, 120) || ''}`,
+    );
     return text(
       [
-        `${jobs.length} most recent:`,
-        '',
         ...rows,
         '',
-        running ? `Job \`${running}\` is running right now.` : 'Nothing is running.',
-        'Call `check_fix(job_id)` for the full report on any of these.',
+        activeJobId() ? `Active job: ${activeJobId()}.` : 'No active job.',
+        'Use the full ID with check_fix. Retained jobs can be resumed or explicitly archived; do not file duplicates.',
       ].join('\n'),
     );
   } catch (err) {
-    console.error('list_fixes failed:', err);
-    return fail(`Could not list fixes: ${err.message}`);
+    return fail(err.message);
   }
 }

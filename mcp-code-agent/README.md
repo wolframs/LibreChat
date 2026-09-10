@@ -1,404 +1,185 @@
-# mcp-code-agent
+# code-agent
 
-Lets a model on this stack file a fault **against this stack**, and have it fixed
-and deployed. It spawns a Claude Code session against this repository; that
-session investigates, decides, fixes, tests and commits, and then this wrapper
-deploys and verifies.
+A host MCP server drives the operator's installed, authenticated Claude Code. LibreChat
+files a request and immediately receives a job ID. The job continues independently of
+the originating tool call, chat turn, SSE connection, and any API restart.
 
-**This is a host process, not a container.** It runs as the operator and drives
-the Claude Code already installed and logged in on this Mac — so there is no
-image, no API key, no uid to drop to and no base URL to aim at. Every one of
-those existed in the first version only because the agent had been put somewhere
-it did not need to be.
+## Work belongs to a job
 
-Started by `~/Library/LaunchAgents/local.librechat.code-agent.plist`
-(`RunAtLoad`, `KeepAlive`), logging to `mcp-code-agent/agent.log`. LibreChat
-reaches it at `http://host.docker.internal:3015/sse`.
+Every new job starts from the committed `local-features` tip in its own Git worktree,
+on `code-agent/<full-job-id>`. The operator checkout's staged, unstaged and untracked
+changes are neither copied nor committed nor stashed. No deployment builds from that WIP.
 
-```bash
-launchctl load   ~/Library/LaunchAgents/local.librechat.code-agent.plist   # start
-launchctl unload ~/Library/LaunchAgents/local.librechat.code-agent.plist   # stop
-tail -f ~/projects/librechat/mcp-code-agent/agent.log
+The root defaults to `~/.local/state/librechat-code-agent/<hash-of-repo-path>/`. Under
+`jobs/<id>/`, `job.json` is the durable lifecycle record, `notes.md` is the versioned
+communication channel, and `worktree/` is the checkout. Mongo mirrors the record for
+`check_fix` and `/agent`. The filesystem record is written first and reconciled to Mongo
+at startup. It records the base/tested/integrated SHAs, branch, path, Claude session ID,
+subprocess groups, notes, usage per segment, validation, image IDs and cleanup outcome.
+
+Git worktrees share the object database and refs. This is ordinary working-directory
+isolation, **not a security sandbox** for hostile code. The coding agent is instructed
+to use only its own checkout. No node_modules or workspace-build symlinks point into
+the operator checkout: each job runs its own `npm ci` and `npm run build:packages`.
+That preparation can take several minutes and is reported as `preparing`; it happens
+outside the Claude turn budget. The install is reused on resume when the lockfile matches.
+
+One job runs at a time. Admission is reserved before asynchronous preflight can race
+another caller. A filesystem supervisor lock also excludes a second server instance.
+Model and build/test/git process groups are recorded before their input is released;
+timeouts terminate the group, including descendant processes. Starting another job is
+refused while a recorded group is still alive after a supervisor crash. A PID that may
+have been reused is treated conservatively and requires inspection.
+
+## Completion and interruption
+
+Claude returns a structured result: `outcome` (`complete` or `needs_input`), `report`,
+and the `notesVersion` it read. Exit zero or a reassuring final sentence alone is not
+completion. Uncommitted source also prevents publication. Nothing is automatically
+stashed to make the gate appear clean.
+
+A turn-limit exit preserves **both commits and unfinished edits**, and never deploys
+partial work. By default the wrapper can continue the same session twice, within a
+45-minute model-running budget per start/resume request. Exhausting either bound leaves
+the job `paused`. `resume_fix` grants a fresh bounded attempt in the same directory and
+session. It does not manufacture a new job or lose its context. Progress counts assistant
+messages separately from CLI turns; those are not interchangeable measurements.
+
+`needs_input` is an intentional handoff: the LibreChat agent relays the question, records
+the user's answer with `add_note`, then resumes the job. A user-requested `pause_fix`
+terminates the current coding/preparation/test/build process before publication; source
+edits remain. Once integration begins, the supervisor finishes that transaction rather
+than killing it halfway through.
+
+## Notes and the two agents
+
+The coding agent reads versioned notes before decisions and before its completion report.
+The supervisor checks its acknowledgement. A newer note received before integration
+invalidates an older report, including notes arriving during testing or image build.
+A continuation can read it automatically within the bounded budget; otherwise the job
+pauses for `resume_fix`. An `add_note` receipt explicitly distinguishes this from a late
+note: once integration begins, the note is retained as follow-up, not advertised as
+changing the revision in flight. Notes do not themselves restart a paused job.
+
+Both prompts preserve explicit user requirements while treating uncertain diagnoses as
+hypotheses. The coding agent can ask for an essential choice through `needs_input`;
+it is no longer told that nobody can answer. It does not recursively call this MCP
+server: its CLI invocation uses a strict empty MCP configuration. The operator's normal
+CLI model/auth choices remain in effect.
+
+The most recently updated conversation belonging to the caller remains a bounded
+context heuristic (30 minutes by default), not proof of which conversation filed the
+job. It is labelled as potentially unrelated evidence. Do not add a
+`LIBRECHAT_BODY_CONVERSATIONID` header: enabling the server from LibreChat's MCP dropdown
+has no request body and that placeholder prevents initialization.
+
+## Tests, integration, and deployment
+
+The gate runs in the private worktree, builds packages before consumers, and tests
+affected workspaces. Package changes also test consumers. A failed Jest suite is retried
+in isolation (up to eight suites); the record names what passed only on retry. Passing
+alone indicates a non-repeatable failure, not proof that the change cannot cause it.
+`mcp-code-agent` and `mcp-image-gen` changes run their own npm tests. Unsupported runtime
+components are explicitly left for operator application, not silently reported deployed.
+
+Before testing, target-branch advances are merged into the job worktree. Conflicts stay
+there for the coding agent to resolve on resume. Tests run against the resulting commit.
+Integration requires the operator checkout to be on the expected branch, clean, and at
+the target commit used in that test. If it is dirty or has moved again, the completed
+job waits in `awaiting_integration`; `resume_fix` retries without repeating investigation
+(unless new notes require the model). No auto-stash or auto-commit is performed there.
+Integration is a merge commit, checked against its expected two parents.
+
+API-only source changes are built from `git archive <tested-sha>` in a temporary build
+directory, excluding all ignored files, dependencies and unrelated WIP. The resulting
+immutable image ID is recorded. Runtime compose configuration must match the running
+API's configuration hash before automatic application. A pending operator config change
+therefore waits for reconciliation rather than being included in this deployment.
+
+`DEPLOY_EXPECTED_HEAD=<integration-sha> ./scripts/deploy.sh --yes --image sha256:...`
+applies that image without a source build or rebuilding other services. The normal
+`librechat-fork:local` tag is updated too, so later compose operations use the same image.
+The script refuses changed source before application, restarts the API and nginx, then
+runs the normal health and feature checks. The previous image ID is recorded first.
+On failure, the wrapper restores that image and reverts only its own integration merge,
+provided the source is still at the expected clean HEAD. Concurrent operator edits are
+left intact; an incomplete source/runtime rollback is `recovery_required`.
+
+Runtime configuration, sidecar, or mixed runtime/API changes integrate with status
+`applied_pending_restart` and explicit application advice. In particular code-agent is
+a **host process**, not a Docker service: after `/healthz` reports `activeJob: null`,
+apply its source with `launchctl kickstart -k gui/$(id -u)/local.librechat.code-agent`.
+Do not restart it during a job. Documentation-only work is `integrated_only`. Only
+`done` means the API candidate was deployed and verified.
+
+## Recovery and cleanup
+
+The worktree is locked against incidental Git worktree pruning. Paused, conflicted,
+failed and waiting jobs retain it. Successful clean jobs are removed automatically,
+after `refs/code-agent/jobs/<id>` makes their committed work permanently reachable.
+The branch is then removed; the small job/notes record, session and recovery ref remain.
+
+Use `archive_fix` only when the user wants to close a retained job. It commits unfinished
+tracked/untracked source **in that job's checkout**, creates the recovery ref, then
+removes the worktree. It refuses credential-bearing files. Unknown ignored files also
+defer cleanup; only recognised dependency/build/cache outputs can be discarded. The
+receipt and health inventory name any deferred cleanup. Archived sessions are closed,
+not automatically resumable. To recover source manually:
+
+```sh
+git show refs/code-agent/jobs/<id>
+git worktree add --detach <new-directory> refs/code-agent/jobs/<id>
 ```
 
-## The design stance
-
-**Reversibility over prevention.** This is a single-operator home lab. A wrong
-deploy costs a hard refresh and a `git revert`; a wrapper that cannot deploy
-costs the entire premise. So the safety budget goes into undo, not walls.
-
-**The wrapper does logistics, not epistemics.** It guarantees the clean-tree
-precondition, that the tests actually pass before anything ships, that the deploy
-happens and is verified, that a failed verification auto-reverts, and that the
-changelog records what happened with the exact command to undo it. It does **not**
-judge the fix. Judging the fix is the receiving Claude's job — that is why a
-frontier model is in the loop at all.
-
-**Vibes in, judgment inside.** `request_fix` takes one string. No severity, no
-scope, no component, no suggested implementation. Every extra field is a question
-the sending model would feel obliged to answer precisely, and the moment filing
-feels like filling in a form, the sender starts writing specifications instead of
-observations. A design that punishes an underspecified premise — by literal
-execution or by clarification deadlock — is a failed design, because it taxes the
-sender into 5,000-character prompts and kills the reason the tool exists.
-
-`prompt.js` is where that contract is actually enforced, and it is the most
-important file here. It tells the receiving session that what it has is a premise
-that may be wrong, that it should investigate first, fix the class rather than the
-instance, disagree out loud when the diagnosis is off, and decide rather than ask.
-
-## Tools
-
-| Tool | Does |
-|---|---|
-| `request_fix(premise)` | Files it. Returns a job id immediately and starts working. |
-| `check_fix(job_id, include_diff?)` | Status, the agent's own report, commits, diffstat, deploy result, and the undo command. Full diff on request. |
-| `resume_fix(job_id)` | Continues a job that hit the turn limit, **in its original session**. |
-| `add_note(job_id, note)` | Corrects a premise after filing; reaches a still-running agent. |
-| `list_fixes(limit?)` | Recent jobs for this account. |
-
-### Resuming, and why it matters
-
-The turn limit ends a *run*, not a *session*. The transcript stays on disk under
-`~/.claude/projects/…` with every file the agent read and every conclusion it
-reached, and `--resume <session_id>` continues it headlessly with that context
-intact — verified: a fact stated before the cut-off is still recalled after.
-
-So a job that ran out of turns is worth a message, not a whole new run. Filing
-again would pay for the same investigation twice and arrive in the same place.
-`resume_fix` reuses the job document — same premise, same notes, same base
-commit — because it is the same piece of work, and two changelog entries would
-claim otherwise. The resume prompt is deliberately short: the agent already holds
-everything except the knowledge that it was interrupted rather than finished.
-
-It is also the moment a late correction lands. `add_note` writes outside the
-repo; the resume message tells the agent to read that file first, so a premise
-corrected after filing reaches the session that is about to act on it.
-
-**Restarting this server kills the job it is running, and until 2026-09-09
-nothing said so.** The one-job lock is a module-level variable, so it dies with
-the process — the Mongo row does not. A `launchctl kickstart` to pick up an edit
-(or a crash, or a reboot) killed the child `claude` and left the row on
-`running` forever, and every instrument then lied in the same direction: `/agent`
-pulsed a live card and re-polled every 5 s for a job with no process, `check_fix`
-reported it as still working, and `resume_fix` refused it as *still running* — so
-the one session that was actually recoverable was the one you could not reach.
-Job `6aa10a5663687a981bbfb6a3` sat like that for 6½ hours.
-
-`reapOrphanedJobs()` now runs at every startup. Because the lock is in-process, a
-row still in a live state at boot is orphaned by definition, so it needs no
-liveness check: each one is marked `error` with `stoppedBecause:
-process_restarted_mid_run` and a summary naming the restart, saying whether the
-session survived, and warning to check the tree first. A killed job can leave
-uncommitted edits; preflight now commits those as their own labelled commit
-rather than refusing (below), so check what they are before resuming.
-
-The rule this leaves standing: **do not kickstart this server while a job is
-running.** `/healthz` → `activeJob` is the check, and the reaper only makes the
-aftermath legible — it does not make the restart free.
-
-## What a job actually does
-
-1. **Preflight.** Refuses if another job is running or if the repo is on the
-   wrong branch. A **dirty tree is not a refusal** — everything in it is staged
-   and committed first, under the operator's own name, as
-   `WIP: tree as found when a code-agent job started`. See *Why a dirty tree
-   stopped being a blocker* below; the short version is that the agent's commits
-   are identified by author, so parked work is invisible to the revert path, and
-   `baseSha` is read afterwards so the job never claims it. `.env`,
-   `librechat.yaml` and `searxng/settings.yml` are the exception — all three are
-   ignored, so if one ever turns up staged it means a live credential was
-   force-added, and preflight refuses instead.
-2. **Context.** Finds the caller's most recently touched conversation, pulls its
-   last dozen messages out of Mongo, and hands them to the agent as raw evidence.
-   The sender never has to curate a bug report; the transcript showing the empty
-   tool result is simply there. Skipped if that conversation has not moved in
-   `CODE_AGENT_CONTEXT_MAX_AGE_MIN` (30) — a stale transcript presented as
-   evidence is worse than none, and the premise alone is a valid input anyway.
-3. **The session.** `claude -p` with the briefing from `prompt.js`, deny rules
-   from `agent-settings.json`, in the real working tree.
-4. **Tests.** The wrapper runs `./scripts/agent-test.sh` itself over the touched
-   workspaces. Not distrust — "tests were green at deploy time" is a fact about
-   the tree as it stands *now*, and only a run now establishes it. A suite that
-   fails is re-run **on its own** before it is allowed to revert anything; see
-   below, because this is where the whole thing was going wrong.
-5. **Set aside leftovers.** Anything the agent left uncommitted is `git stash`ed
-   first. The gate tests the working tree but the remedy only undoes commits, so
-   a half-finished edit left by a cut-off agent would otherwise fail the tests
-   and provoke a revert that could not possibly fix it. It is also what would
-   have shipped, since the image builds from the working tree. Stashed rather
-   than discarded: `git stash pop` brings it back.
-6. **Deploy.** `./scripts/deploy.sh --yes`, which is the real validation chain:
-   branch check, health wait, both sidecar probes, 14 feature markers.
-7. **Auto-revert on failure.** A stack that fails verification is a stack the
-   user cannot talk to a model on — nobody is left who could ask for the change
-   to be undone. So it undoes itself and redeploys.
-8. **Changelog.** `CHANGELOG-agent.md`, prepended and committed separately, so
-   reverting a change does not also revert the record that it happened.
-
-## Why a dirty tree stopped being a blocker
-
-The old refusal read: *the working tree has uncommitted changes, so a fix would
-sweep them into its own commit and they would ship without anyone deciding to.*
-
-The premise is true — the image builds from the working tree. The conclusion was
-wrong, and the operator put it plainly: git is what tracking and reverting are
-*for*. Committing is how work becomes recoverable, not how it becomes dangerous.
-The refusal left the changes in the only state that has no record at all, and
-handed the operator a chore in exchange for nothing.
-
-What made it concrete: on 2026-09-09 the blocker was a preset-import feature that
-another agent had already built **and deployed**. It was live in the running
-stack while existing nowhere in git. Refusing to start protected nothing; the
-code was already serving requests. One `git commit` would have been strictly
-safer than the state being defended.
-
-So preflight parks the tree instead. Three properties that already existed are
-what make that safe rather than reckless:
-
-- `ownCommitsSince()` collects only commits authored `LibreChat code-agent`. The
-  parked commit is authored by the operator, so **the revert path cannot see
-  it** — no matter how the job ends.
-- `baseSha` is read *after* parking, so the agent's diff starts above it and the
-  job never counts the work as its own.
-- It is one commit with one subject: `git revert <sha>` undoes exactly it.
-
-`--author` is passed explicitly because `execute()` sets `GIT_AUTHOR_NAME`
-process-wide for the agent's own commits. Without it, a park performed after any
-earlier job in the same process would be stamped with the agent's name and handed
-straight to the revert path — the precise failure this is meant to prevent.
-
-The one thing parking does **not** decide is whether that work is ready. It ships
-in the deploy at the end of the job, the same as everything else in the tree —
-which is what would have happened anyway, minus the record. The tool result says
-so, names the sha, and gives the revert command.
-
-## The gate, and what it is allowed to conclude
-
-For its first three real runs this gate was a coin flip, and it did not know it.
-
-Measured on 2026-09-09 on an **unmodified** tree, `./scripts/agent-test.sh api`
-failed 2 runs in 4. A different set of suites failed each time —
-`AuthService.spec.js`, `skills.test.js`, `optionalShareFileAuth.spec.js` — and
-every one of them passed when run alone. The errors are `Topology is closed`,
-`Client must be connected before running operations`, `interrupted at shutdown`:
-connection races, not logic. `api/jest.config.js` runs `maxWorkers: '50%'`, and
-`api/test/jestSetup.js` hardcodes `MONGO_URI = 'mongodb://127.0.0.1:27017/…'`,
-which is dead upstream and on this host is the live stack's mongod — published
-on loopback by `docker-compose.override.yml` *for this sidecar*. The thing that
-let the agent exist is a good candidate for what makes its gate unreliable.
-
-The old gate read red as "your commits failed the tests" and reverted every
-commit in range. It spent both of its reverts that way:
-
-| job | work | reverted on |
-|---|---|---|
-| `6a9ed6c8` | 8 commits | `AuthService.spec.js` — diff was in `packages/api/src/mcp/` |
-| `6aa10a56` | 2 commits | `AuthService.spec.js` — diff was a datetime prepend |
-
-Neither diff came near auth. The failure output was byte-identical across two
-unrelated changes, which is the tell.
-
-So a failure now has to survive isolation. Each suite that failed in the parallel
-run is re-run on its own; passing alone means the change does not own it, and
-those are named as flaky in the job record and the changelog rather than quietly
-forgiven. Only suites that fail **both** ways revert. Above `ISOLATION_BUDGET`
-(8) failing suites the workspace is taken at face value — a handful is a flaky
-harness, thirty is a change that broke something.
-
-**Isolation is only half of it.** The second way the gate was wrong is
-deterministic, and it is the one that actually failed the datetime job: `api` and
-`client` resolve `@librechat/api` through `packages/api/dist/index.cjs`, not
-`src`. An export added to `packages/api/src` is invisible to their tests until
-the package is rebuilt, and they fail with `createDatetimeFormatter is not a
-function` — 15 tests, none of which say "stale build". Production never sees it,
-because the Dockerfile builds the packages during the image build. So the gate
-now runs `npm run build` in any touched `packages/*` before testing anything that
-consumes it. `dist/` is gitignored, so that leaves the tree clean.
-
-Between the two: isolation handles failures that are real-looking but random,
-the package build handles failures that are repeatable but not about the code.
-Neither of them excuses a failure that is both real and repeatable — that still
-reverts, which is what a gate is for.
-
-What this deliberately does *not* do is compare against the base commit. That
-would be the complete answer to "did this change break it", and it costs a second
-full checkout mid-job — a detached HEAD that a crash would strand. Isolation
-catches the failure mode actually observed here. If a genuinely pre-existing
-failure ever reverts a job, that is when to pay for the baseline.
-
-## Why there is no conversation header
-
-`{{LIBRECHAT_BODY_CONVERSATIONID}}` is the only placeholder that would name the
-calling chat, and it cannot be used here. A `LIBRECHAT_BODY_*` placeholder makes
-the connection **require** a chat request body carrying that field
-(`UserConnectionManager.getUserConnection` → `getMissingRuntimeBodyPlaceholderFields`),
-and switching a server on from the MCP dropdown is a *reinitialize with no body*.
-So it fails with `MCP error -32600: Request body field(s) required to resolve
-runtime MCP placeholders: conversationId` and the UI shows **"failed to
-initialize MCP server"** — the server cannot be enabled in the one place it is
-meant to be enabled.
-
-The conversation is therefore found from the user id: their most recently updated
-conversation, and only if it moved in the last 30 minutes. That is a heuristic,
-deliberately bounded rather than trusted, and the job runs on the premise alone
-when the window lapses.
-
-## Why it is not a container
-
-It was one, briefly, and everything that went wrong with it was container tax:
-
-- Claude Code refuses `--dangerously-skip-permissions` as root, but the container
-  had to be root to reach the mounted docker socket to run `deploy.sh` — so the
-  agent had to be spawned at a dropped uid, with `git config` written for both
-  uids, and the repo bind-mounted at its own host path so the daemon would
-  resolve relative binds correctly.
-- It needed its own credential, and `ANTHROPIC_API_KEY` on this stack is the
-  literal string `user_provided` (LibreChat's per-user-key sentinel), so it had
-  to be pointed at a separate key and base URL.
-- And that meant paying per token — $0.96 for a single one-word turn on the
-  marketplace — for a Claude Code that was worse than the one already sitting on
-  the machine, authenticated, one version newer.
-
-As a host process all of that is simply absent. `git`, `docker compose`,
-`deploy.sh` and `claude` all behave exactly as they do when the operator runs
-them, because it *is* the operator running them.
-
-The one thing the container did buy was isolation from the rest of the home
-directory. That is gone, and the deny list gained the specific things `git
-revert` cannot undo — the Forgejo PAT, `~/.ssh`, `~/.aws`, `gh` credentials.
-File tools are already confined to the repo by the working directory; those
-entries cover the shell path around it.
-
-**Mongo has to be reachable from the host** for this, so
-`docker-compose.override.yml` binds it to `127.0.0.1:27017` — loopback only, off
-the LAN and off Tailscale.
-
-## What is denied, and why only this
-
-`agent-settings.json` is short on purpose. `git revert` undoes a bad edit, so the
-deny list is only for the things it cannot undo:
-
-- `.env`, `.env.*`, `searxng/settings.yml` — a leaked secret is out. (The Brave
-  API key and the SearXNG `secret_key` live in that file.)
-- `data-node/**` — chat history.
-- `scripts/agent-test.sh` — the gate that decides whether the agent's own work
-  survives. An agent that can weaken its own verification makes every later job
-  less trustworthy with nothing to show for it in any diff anyone reads.
-- `CHANGELOG-agent.md` — the wrapper writes it; an agent editing its own record
-  defeats the record.
-- `git push` — publication is a human decision, and the GitHub fork is public.
-- `docker`, *running* `deploy.sh` — not a restriction on capability, a sequencing
-  rule. The wrapper deploys once, after the tests, so the job state and the
-  changelog are true. An ad-hoc deploy mid-session makes both of them lie.
-
-**`scripts/deploy.sh` is editable, and was not until 2026-09-09.** A feature that
-compiles into the api image is only half-landed until `deploy.sh` greps the image
-for it — that marker is what tells a later reader whether a running stack has the
-feature or silently predates it. Denying the edit meant no agent could finish one:
-`fork-customizations.md` §14 shipped without its marker and a human has to add it.
-So the edit is allowed and the run is not, which is the half the sequencing rule
-was ever about. The prompt tells the agent to add marker lines and never remove or
-loosen one. That is a briefing, not a wall — the residual risk is a deleted marker,
-and the thing that catches it is reading the diff, since the wrapper's post-job
-deploy runs whatever version of the script the session just left in the tree.
-
-Every commit is authored `LibreChat code-agent <code-agent@librechat.local>`, so
-`git log --author=code-agent` separates what a model changed from what a person
-did, permanently, with no list to maintain.
-
-## Environment
-
-| Var | Default | Notes |
-|---|---|---|
-| `CODE_AGENT_MAX_TURNS` | `250` | A backstop, not a budget — 80 cut a real investigation off mid-thought. |
-| `CODE_AGENT_MODEL` | unset | Empty means whatever the installed Claude Code defaults to, which is usually right. |
-| `CODE_AGENT_DAILY_LIMIT` | `0` (off) | Filing only happens from a chat the operator is in, so there is nothing to ration. |
-| `MONGO_URI` | `mongodb://127.0.0.1:27017/LibreChat` | Loopback, via the compose port binding. |
-| `CODE_AGENT_MAX_TURNS` | `80` | `claude --max-turns`. |
-| `CODE_AGENT_TIMEOUT_SEC` | `2700` | Wall clock for one session. |
-| `CODE_AGENT_REPO_PATH` | `/Users/wolfram/projects/librechat` | Must be identical on host and in the container. |
-| `DEPLOY_BRANCH` | `local-features` | Preflight refuses anything else. |
-
-### Usage, not cost
-
-It runs on the operator's own Claude Code subscription, so `total_cost_usd` from
-the CLI is **not a bill**. `modelUsage[…].costBasis` says `"list"` — it is what
-the work would have cost at API list price had it gone through a key. Leading
-with that number invites reading money that was never spent.
-
-What a subscription actually consumes is tokens, and they are not one number:
-
-| | means |
-|---|---|
-| **out** | generation, the real work |
-| **cache-write** | new context being laid down |
-| **cache-read** | context reused, roughly a tenth the weight |
-| **in** | uncached input, usually tiny |
-
-So a run that looks enormous by cache-read is generally cheap, and one heavy on
-cache-write is not. `check_fix`, `/agent` and the changelog all report the
-breakdown, with the list-price figure last and labelled as notional.
-
-Live totals during a run are summed from each assistant message; the final
-figures come from the stream's `result` event, which is authoritative.
-
-There is no daily limit by default. It existed to bound spend against a paid key;
-the agent runs on the operator's own subscription now, and a filing only ever
-happens from a chat they are sitting in — so it was rationing something nobody
-could spend behind their back, while blocking the one case that genuinely needs
-several filings in a row: a bad afternoon.
-
-### Health
-
-`/healthz` reports `agentAvailable`, which actually runs `claude --version`. That
-is the check worth having: a LaunchAgent inherits no login shell, so a `PATH`
-missing `~/.local/bin` shows up as "claude: not found" — and without the probe it
-would only show up after a job had been filed and a conversation dropped.
-`deploy.sh` warns (does not fail) when it cannot reach the sidecar, since the
-stack is fine without it.
-
-## Turning it on
-
-The container can run without being reachable by any model — nothing connects
-until this block exists in `librechat.yaml`, which is the deliberate on-switch:
-
-```yaml
-mcpSettings:
-  allowedDomains: ["mcp-image-gen", "mcp-audio-ears", "mcp-code-agent"]
-  allowedAddresses: ["mcp-image-gen:3013", "mcp-audio-ears:3014", "mcp-code-agent:3015"]
-
-mcpServers:
-  code-agent:
-    type: sse
-    url: "http://mcp-code-agent:3015/sse"
-    headers:
-      x-user-id: "{{LIBRECHAT_USER_ID}}"
-      # No conversation header — see "Why there is no conversation header" below.
-    chatMenu: true
-    timeout: 60000
-    requiresOAuth: false
-    serverInstructions: |
-      You can file a fault against this LibreChat stack itself and have it fixed.
-
-      Use `request_fix` when you notice something wrong with your own environment
-      — a tool returning nothing, a file you cannot read, a capability that is
-      documented but absent. Describe what you noticed in one or two sentences,
-      in your own words. Do NOT write a specification, do not guess at the cause
-      unless you actually know it, and do not propose an implementation: a Claude
-      Code session reads the whole repository and works it out, and a confident
-      wrong guess sends it down your wrong path.
-
-      Filing costs real money and changes a live system. Ask the user first
-      unless they have already asked you to fix it.
-
-      The deploy restarts the api, so THIS CONVERSATION WILL DROP a few minutes
-      after you file. That is expected. Tell the user to hard-refresh once, then
-      call `check_fix(job_id)` to read what was found and done.
-
-      Every change is a git commit and `check_fix` returns the exact command to
-      undo it. Offer that if the user is unhappy with the result — it is routine,
-      not an emergency.
-```
-
-Then `./scripts/deploy.sh --config`.
+At most 12 retained worktrees are allowed by default. Hitting that bound lists the job
+IDs to resume or archive; it never deletes paused work by age. `/healthz` inventories
+retained directories, cleanup warnings and recovery refs independently of recent Mongo
+history. Failed image-build directories are separately recorded for inspection, then
+removed on a build retry or safe job cleanup; image
+IDs and tags remain subject to normal Docker retention. Do not prune an image needed
+for a pending deployment or rollback.
+
+Startup reconciles unfinished records without assuming every child died. Interrupted
+editing/testing can be resumed after recorded processes exit. Interrupted integration
+or deployment is `recovery_required`. An explicit `resume_fix` can recover only when
+the branch parents, clean target, and live image match the recorded transaction; an
+unrelated branch advance/image requires human inspection. The supervisor does not
+silently repeat a deploy at boot. Legacy jobs created before isolation remain readable,
+but their shared-checkout sessions cannot be resumed under this new contract.
+
+New job reports live in the durable record, Mongo, MCP and `/agent`. `CHANGELOG-agent.md`
+remains the historical record; this workflow does not append commits to the operator's
+checkout merely to log a failed or no-change job. The source undo is one
+`git revert -m 1 <integration-sha>`; runtime application is a separate step.
+
+## MCP surface and configuration
+
+`request_fix`, `check_fix`, `resume_fix`, `add_note`, `list_fixes`, `pause_fix`, `archive_fix`.
+Keep full IDs across chat turns. Poll in 30–60 seconds or on the next user turn. An API
+deployment may disconnect the chat; reconnect and check the same ID rather than filing
+again. Starting a job does not guarantee a deployment or a disconnect.
+
+`prompt.js` exports `SERVER_INSTRUCTIONS`, also served by MCP initialization. Since
+LibreChat can skip those instructions for a server with per-user placeholders, the
+same text must be used in `librechat.yaml`'s code-agent `serverInstructions`. Tool
+descriptions carry the essential status and handoff contract independently.
+
+| Variable | Default | Meaning |
+| --- | --- | --- |
+| `REPO_PATH` | `/Users/wolfram/projects/librechat` | Operator checkout/runtime project |
+| `DEPLOY_BRANCH` | `local-features` | Integration branch; never upstream `main` here |
+| `CODE_AGENT_WORKTREE_ROOT` | repo-specific state directory | Durable job directories |
+| `CODE_AGENT_MAX_WORKTREES` | 12 | Retained-worktree capacity |
+| `CODE_AGENT_MAX_TURNS` | 250 | CLI turns per model segment |
+| `CODE_AGENT_MAX_CONTINUATIONS` | 2 | Automatic extra segments per start/resume |
+| `CODE_AGENT_TIMEOUT_SEC` | 2700 | Total model-running time per start/resume |
+| `CODE_AGENT_MODEL` | installed CLI default | Optional model override |
+| `CODE_AGENT_DAILY_LIMIT` | 0 (off) | New jobs per user/day; resumes remain available |
+| `CODE_AGENT_CONTEXT_MAX_AGE_MIN` | 30 | Conversation heuristic window |
+| `CODE_AGENT_CONTEXT_MESSAGES` | 12 | Maximum context messages |
+| `PORT` | 3015 | Host MCP listener |
+| `MONGO_URI` | `mongodb://mongodb:27017/LibreChat` | Set to host loopback in launchd |
+
+Run `npm test` here. Tests use real temporary Git repositories/worktrees and real child
+processes, with controlled replacements only at the Claude/deployment boundary. They
+do not invoke a paid model, modify the operator checkout, or deploy the live stack.
