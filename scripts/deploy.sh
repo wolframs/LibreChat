@@ -140,7 +140,7 @@ else
     compose up -d --no-build --no-deps --force-recreate api
   elif [[ "$MODE" == "config" ]]; then
     bold "Recreating api + cost-dashboard (config-only, no rebuild)"
-    compose up -d --force-recreate api cost-dashboard
+    compose up -d --no-deps --force-recreate api cost-dashboard
   else
     bold "Building api from working tree"
     # ${a[@]+…} guard: bash 3.2 (macOS) treats an empty array as unbound under `set -u`

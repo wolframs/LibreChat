@@ -2,7 +2,10 @@ import { execFile } from 'child_process';
 import { realpathSync } from 'node:fs';
 import { commandScope, managedRun } from './commands.js';
 
-export const REPO = realpathSync(process.env.REPO_PATH || '/Users/wolfram/projects/librechat');
+// The native resolver also canonicalizes APFS path casing, as Compose's getcwd does.
+export const REPO = realpathSync.native(
+  process.env.REPO_PATH || '/Users/wolfram/projects/librechat',
+);
 export const BRANCH = process.env.DEPLOY_BRANCH || 'local-features';
 
 export function run(cmd, args, { cwd = REPO, timeout = 60_000, env } = {}) {

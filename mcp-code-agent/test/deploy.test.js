@@ -59,6 +59,20 @@ test('prebuilt deployment tags the immutable image and recreates only api withou
   );
 });
 
+test('config-only reload recreates api and dashboard without changing dependencies', async (t) => {
+  const { repo, env } = await setup(t);
+  const result = await run('bash', ['./scripts/deploy.sh', '--config', '--yes'], {
+    cwd: repo,
+    env,
+  });
+  assert.equal(result.err, null, result.stdout + result.stderr);
+  const calls = (await fs.readFile(env.COMMAND_LOG, 'utf8')).trim().split('\n').map(JSON.parse);
+  assert.deepEqual(
+    calls.filter((a) => a.includes('up')),
+    [['compose', 'up', '-d', '--no-deps', '--force-recreate', 'api', 'cost-dashboard']],
+  );
+});
+
 test('prebuilt deployment refuses new WIP and does not even retag the image', async (t) => {
   const { repo, env } = await setup(t);
   await fs.writeFile(path.join(repo, 'operator-wip'), 'keep this');
