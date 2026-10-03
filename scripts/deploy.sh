@@ -11,6 +11,7 @@
 #   ./scripts/deploy.sh              full deploy: guards -> build -> recreate -> verify
 #   ./scripts/deploy.sh --config     .env / librechat.yaml change only (no rebuild)
 #   ./scripts/deploy.sh --check      verify the running stack, change nothing
+#   ./scripts/deploy.sh --build-only build API and sidecars without restarting services
 #   ./scripts/deploy.sh --sidecars   like --check, then rebuild any sidecar whose
 #                                    running code has drifted from the working tree
 #   ./scripts/deploy.sh --no-cache   full deploy with a from-scratch image build
@@ -37,6 +38,7 @@ while [[ $# -gt 0 ]]; do
   case "$1" in
     --config)   MODE=config ;;
     --check)    MODE=check ;;
+    --build-only) MODE=build-only ;;
     --sidecars) MODE=sidecars ;;
     --no-cache) BUILD_ARGS+=(--no-cache) ;;
     --yes|-y)   ASSUME_YES=1 ;;
@@ -119,6 +121,13 @@ if grep -q 'CHANGEME' searxng/settings.yml; then
 fi
 ok "runtime config files present"
 
+if [[ "$MODE" == "build-only" ]]; then
+  bold "Building API and sidecars without changing running containers"
+  compose build "${BUILD_ARGS[@]+"${BUILD_ARGS[@]}"}" api cost-dashboard mcp-image-gen mcp-audio-ears
+  ok "Build complete; running services have not been restarted"
+  exit 0
+fi
+
 if [[ "$MODE" == "check" || "$MODE" == "sidecars" ]]; then
   echo
 else
@@ -139,8 +148,12 @@ else
     docker image tag "$PREBUILT_IMAGE" librechat-fork:local
     compose up -d --no-build --no-deps --force-recreate api
   elif [[ "$MODE" == "config" ]]; then
-    bold "Recreating api + cost-dashboard (config-only, no rebuild)"
-    compose up -d --no-deps --force-recreate api cost-dashboard
+    bold "Recreating config consumers (no rebuild)"
+    # All four read secrets or feature settings from .env/librechat.yaml at
+    # process start. Recreating only api leaves the sidecars on stale keys and
+    # limits even though a config deploy reported success.
+    compose up -d --no-deps --force-recreate \
+      api cost-dashboard mcp-image-gen mcp-audio-ears
   else
     bold "Building api from working tree"
     # ${a[@]+…} guard: bash 3.2 (macOS) treats an empty array as unbound under `set -u`
@@ -209,7 +222,12 @@ if ! compose exec -T cost-dashboard test -r /app/librechat.yaml 2>/dev/null; the
     any container that was not recreated afterwards. The market-price button on gateway
     models silently stops appearing. Fix:  docker compose up -d --force-recreate cost-dashboard"
 fi
-markets_json="$(curl -fsS "$BASE_URL/cost/markets/endpoints" 2>/dev/null)" || markets_json=""
+# This is an internal config/readiness probe, not an authenticated browser check.
+# Public /cost routes require a session, which deployment deliberately does not hold.
+markets_json="$(compose exec -T cost-dashboard python -c \
+  'import json, urllib.request; data = json.load(urllib.request.urlopen("http://127.0.0.1:5000/cost/markets/endpoints", timeout=10)); assert isinstance(data.get("endpoints"), list); print(json.dumps(data, separators=(",", ":")))' \
+  2>/dev/null)" || die "cost-dashboard market endpoint probe failed"
+[[ -n "$markets_json" ]] || die "cost-dashboard market endpoint returned no response"
 if [[ -n "$markets_json" ]]; then
   if [[ "$markets_json" == '{"endpoints":[]}'* ]] && grep -q 'api.surplusintelligence.ai' librechat.yaml; then
     warn "librechat.yaml has a marketplace baseURL but /cost/markets/endpoints is empty"
@@ -360,7 +378,14 @@ if [[ -n "$DRIFTED" && "$MODE" == "sidecars" ]]; then
   echo
   bold "Rebuilding$DRIFTED"
   compose up -d --build $DRIFTED
-  ok "rebuilt — re-run --check to confirm"
+  # nginx caches the dashboard container's address for the worker lifetime.
+  # If that sidecar moved, reload the proxy before repeating every health and
+  # source check against the newly built containers.
+  if [[ " $DRIFTED " == *" cost-dashboard "* ]]; then
+    compose restart nginx
+  fi
+  ok "rebuilt — verifying the replacement containers"
+  exec "$0" --check
 elif [[ -n "$DRIFTED" ]]; then
   echo "      or rebuild every drifted one:  $0 --sidecars"
 fi
@@ -391,6 +416,7 @@ check_marker "anthropic model-fetch path"  "isAnthropicProvider" "/app/packages/
 check_marker "models.filter"               "applyModelFilter" "/app/packages/api/dist/index.cjs"
 check_marker "models.chatOnly"             "applyChatOnlyFilter" "/app/packages/api/dist/index.cjs"
 check_marker "market-prices popover (client)" "com_ui_market_prices" "/app/client/dist/assets/*.js"
+check_marker "browser session auth for sidecars" "createBrowserSessionAuth" "/app/packages/api/dist/index.cjs"
 # Without this, every gateway request bills as zero input tokens — silently, with
 # a correct reply and no error anywhere. See fork-customizations.md §10.
 check_marker "gateway usage recovery"       "observeAnthropicStreamUsage" "/app/packages/api/dist/index.cjs"
@@ -407,6 +433,16 @@ check_marker "MCP image file_id passthrough" "librechat/file_id" "/app/packages/
 # sees the picture, the model never does, and the reply describes something it
 # was not shown. Measured on Surplus 2026-09-07; see fork-customizations.md §13.
 check_marker "tool_result media lift"       "liftToolResultMedia" "/app/packages/api/dist/index.cjs"
+# @langchain/openai 1.5.x assumes every terminal Responses event has an output
+# array. Our install hook guards provider-compatible streams that legitimately
+# omit it; checking node_modules proves the patch survived the image build.
+check_marker "Responses missing-output guard" "Array.isArray(response.output)" "/app/node_modules/@langchain/openai/dist/converters/responses.cjs"
+# The dashboard needs the exact component rates that performed billing. Without
+# this schema field mongoose strips them and the cache panel has to guess.
+check_marker "transaction component rates"   "rateDetail" "/app/packages/data-schemas/dist/index.cjs"
+# Mixed-provider agent graphs must keep each child agent's destination instead
+# of stamping every usage row with the primary agent's route.
+check_marker "per-agent route attribution"   "routedViaByAgentId" "/app/api/server/services/Endpoints/agents/initialize.js"
 
 echo
 if [[ $MISSING -eq 1 ]]; then

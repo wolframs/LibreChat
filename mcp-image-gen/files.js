@@ -1,9 +1,10 @@
 import fs from 'fs/promises';
 import path from 'path';
+import { ObjectId } from 'mongodb';
 import { getDb } from './db.js';
 
-const UPLOADS_DIR = "/app/uploads";
-const IMAGES_DIR = "/app/images";
+const UPLOADS_DIR = '/app/uploads';
+const IMAGES_DIR = '/app/images';
 
 export function extractFileId(input) {
   if (!input) return null;
@@ -16,22 +17,33 @@ export function extractFileId(input) {
   return withoutExt.includes('__') ? withoutExt.split('__')[0] : withoutExt;
 }
 
-export async function fetchImageById(fileId) {
+export async function fetchImageById(fileId, userId) {
+  if (!userId) {
+    throw new Error('Authenticated user context is required.');
+  }
   const db = await getDb();
-  const fileRecord = await db.collection('files').findOne({ file_id: fileId });
+  const fileRecord = await db
+    .collection('files')
+    .findOne({ file_id: fileId, user: new ObjectId(userId) });
   if (!fileRecord) {
-    throw new Error(`File details not found in MongoDB for file_id: ${fileId}`);
+    throw new Error(`Image not found for file_id ${fileId} belonging to this user.`);
   }
 
   const relativePath = fileRecord.filepath;
   let absolutePath;
+  let root;
 
   if (relativePath.startsWith('/images/') || relativePath.startsWith('images/')) {
     const cleanPath = relativePath.replace(/^(\/)?images\//, '');
-    absolutePath = path.join(IMAGES_DIR, cleanPath);
+    root = IMAGES_DIR;
+    absolutePath = path.resolve(root, cleanPath);
   } else {
     const cleanPath = relativePath.replace(/^(\/)?uploads\//, '');
-    absolutePath = path.join(UPLOADS_DIR, cleanPath);
+    root = UPLOADS_DIR;
+    absolutePath = path.resolve(root, cleanPath);
+  }
+  if (absolutePath !== root && !absolutePath.startsWith(root + path.sep)) {
+    throw new Error(`Refusing to read outside the image mounts: ${relativePath}`);
   }
 
   console.log(`Reading file directly from disk: ${absolutePath}`);

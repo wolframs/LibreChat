@@ -1391,17 +1391,16 @@ describe('getOpenAIConfig', () => {
     it('should handle mixed case and underscore variations', () => {
       const addParams = {
         maxTokens: 1000, // camelCase - known
-        topP: 0.9, // camelCase - known
-        top_p: 0.8, // snake_case - unknown, should go to modelKwargs
+        topP: 0.9, // stale camelCase alias
+        top_p: 0.8, // canonical provider parameter wins
         customParam: 'value', // unknown
       };
 
       const result = getOpenAIConfig(mockApiKey, { addParams });
 
       expect(result.llmConfig.maxTokens).toBe(1000);
-      expect(result.llmConfig.topP).toBe(0.9);
+      expect(result.llmConfig.topP).toBe(0.8);
       expect(result.llmConfig.modelKwargs).toEqual({
-        top_p: 0.8,
         customParam: 'value',
       });
     });

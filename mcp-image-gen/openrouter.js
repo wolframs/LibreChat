@@ -17,7 +17,7 @@ import axios from 'axios';
  *
  * IMAGE_GEN_API=auto|images|chat picks; auto keeps upstream's heuristic.
  */
-function useChatRoute(model) {
+function shouldUseChatRoute(model) {
   const mode = (process.env.IMAGE_GEN_API || 'auto').toLowerCase();
   if (mode === 'chat') return true;
   if (mode === 'images') return false;
@@ -42,13 +42,13 @@ async function downloadImage(url) {
  * Shared by both providers: the same data URI is what OpenRouter's
  * `input_references` and Surplus's `input_images` take.
  */
-export async function referencesToDataUrls({ urlsToFetch, fetchImageById, extractFileId }) {
+export async function referencesToDataUrls({ urlsToFetch, fetchImageById, extractFileId, userId }) {
   const out = [];
   for (const refUrl of urlsToFetch) {
     const fileId = extractFileId(refUrl);
     console.log(`Extracted file_id: "${fileId}" from: "${refUrl}"`);
     try {
-      const { buffer, contentType } = await fetchImageById(fileId);
+      const { buffer, contentType } = await fetchImageById(fileId, userId);
       out.push(`data:${contentType};base64,${buffer.toString('base64')}`);
     } catch (fetchErr) {
       console.warn(`[Warning] Skipping reference image "${fileId}": ${fetchErr.message}`);
@@ -57,14 +57,20 @@ export async function referencesToDataUrls({ urlsToFetch, fetchImageById, extrac
   return out;
 }
 
-export async function generateImageOnOpenRouter({ prompt, selectedModel, dataUrls, apiKey, aspect_ratio }) {
+export async function generateImageOnOpenRouter({
+  prompt,
+  selectedModel,
+  dataUrls,
+  apiKey,
+  aspect_ratio,
+}) {
   const headers = { Authorization: `Bearer ${apiKey}`, 'Content-Type': 'application/json' };
 
   let base64Image = null;
   let mimeType = 'image/png';
   let usage = null;
 
-  if (useChatRoute(selectedModel)) {
+  if (shouldUseChatRoute(selectedModel)) {
     // Chat models take the ratio as prose as well; the dedicated API does not need this.
     const finalPrompt = aspect_ratio ? `${prompt} (Aspect ratio: ${aspect_ratio})` : prompt;
     console.log(`Calling OpenRouter chat/completions (modalities): ${selectedModel}...`);
@@ -95,7 +101,9 @@ export async function generateImageOnOpenRouter({ prompt, selectedModel, dataUrl
       const raw = message.images[0];
       const imgUrl = typeof raw === 'string' ? raw : raw.url || raw.image_url?.url;
       if (imgUrl) {
-        const decodedUrl = /data%3A|%3Bbase64%2C/.test(imgUrl) ? decodeURIComponent(imgUrl) : imgUrl;
+        const decodedUrl = /data%3A|%3Bbase64%2C/.test(imgUrl)
+          ? decodeURIComponent(imgUrl)
+          : imgUrl;
         if (decodedUrl.startsWith('data:')) {
           const m = decodedUrl.match(/^data:([^;]+);base64,(.+)$/);
           if (m) {

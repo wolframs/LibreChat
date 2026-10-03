@@ -42,7 +42,10 @@ function createMcpServer() {
   server.tool(
     'get_user_images',
     {
-      limit: z.number().optional().describe('Max number of recent images to return. Defaults to 10.'),
+      limit: z
+        .number()
+        .optional()
+        .describe('Max number of recent images to return. Defaults to 10.'),
     },
     (args) => handleGetUserImages(args, mcpContext),
   );
@@ -79,6 +82,11 @@ function createMcpServer() {
 
 const transports = new Map();
 
+function requestUserId(req) {
+  const value = req.headers['x-user-id'];
+  return typeof value === 'string' && value.trim() ? value.trim() : null;
+}
+
 /** What `--check` needs to know: which models are configured, and which of them cannot run. */
 async function healthReport() {
   const keys = { openrouter: Boolean(openRouterKey()), surplus: Boolean(surplusKey()) };
@@ -96,7 +104,9 @@ async function healthReport() {
       const { usd, n } = await surplusSpendLast7Days();
       surplusWeek = { capUsd: SURPLUS_WEEKLY_CAP_USD, spentUsd: Number(usd.toFixed(4)), images: n };
       if (SURPLUS_WEEKLY_CAP_USD > 0 && usd >= SURPLUS_WEEKLY_CAP_USD) {
-        warnings.push(`Surplus weekly cap reached ($${usd.toFixed(4)} of $${SURPLUS_WEEKLY_CAP_USD})`);
+        warnings.push(
+          `Surplus weekly cap reached ($${usd.toFixed(4)} of $${SURPLUS_WEEKLY_CAP_USD})`,
+        );
       }
     } catch (err) {
       warnings.push(`could not read Surplus spend from Mongo: ${err.message}`);
@@ -141,10 +151,14 @@ app.get('/healthz', async (_req, res) => {
 const SSE_KEEPALIVE_MS = parseInt(process.env.SSE_KEEPALIVE_MS ?? '30000', 10);
 
 app.get('/sse', async (req, res) => {
-  console.log('New SSE connection. Query:', req.query, 'Headers:', req.headers);
+  const userId = requestUserId(req);
+  if (!userId) {
+    return res.status(401).send('Authenticated user context is required');
+  }
+  console.log('New authenticated SSE connection. Query:', req.query);
   const transport = new SSEServerTransport('/messages', res);
   const server = createMcpServer();
-  transports.set(transport.sessionId, transport);
+  transports.set(transport.sessionId, { transport, userId });
   const keepalive = setInterval(() => {
     if (!res.writableEnded) res.write(': keepalive\n\n');
   }, SSE_KEEPALIVE_MS);
@@ -157,12 +171,17 @@ app.get('/sse', async (req, res) => {
 });
 
 app.post('/messages', async (req, res) => {
-  const userId = req.headers['x-user-id'];
+  const userId = requestUserId(req);
+  if (!userId) {
+    return res.status(401).send('Authenticated user context is required');
+  }
+  const session = transports.get(req.query.sessionId);
+  if (!session || session.userId !== userId) {
+    return res.status(403).send('Session does not belong to this user');
+  }
   const conversationId = req.headers['x-conversation-id'];
   mcpContext.run({ userId, conversationId }, async () => {
-    const transport = transports.get(req.query.sessionId);
-    if (transport) await transport.handlePostMessage(req, res);
-    else res.status(400).send('Session not found');
+    await session.transport.handlePostMessage(req, res);
   });
 });
 
@@ -177,9 +196,13 @@ app.listen(PORT, () => {
   console.log(`MCP Image Generation server (imager) on port ${PORT}`);
   console.log(`  default:   ${DEFAULT_MODEL}`);
   for (const m of MODELS) {
-    console.log(`  model:     ${m.id} via ${m.provider}${m.price != null ? ` ($${m.price}/${m.unit})` : ''}`);
+    console.log(
+      `  model:     ${m.id} via ${m.provider}${m.price != null ? ` ($${m.price}/${m.unit})` : ''}`,
+    );
   }
-  console.log(`  catalogue: ${catalogue.fetched ? `fetched (${catalogue.matched} matched)` : `not fetched${catalogue.error ? ` — ${catalogue.error}` : ''}`}`);
+  console.log(
+    `  catalogue: ${catalogue.fetched ? `fetched (${catalogue.matched} matched)` : `not fetched${catalogue.error ? ` — ${catalogue.error}` : ''}`}`,
+  );
   console.log(`  MONGO_URI: ${MONGO_URI}`);
   console.log(`  surplus cap: $${SURPLUS_WEEKLY_CAP_USD}/7d`);
   healthReport().then((h) => {

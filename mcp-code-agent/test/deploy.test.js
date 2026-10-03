@@ -26,6 +26,7 @@ async function setup(t) {
 const fs=require('node:fs');const a=process.argv.slice(2);fs.appendFileSync(process.env.COMMAND_LOG,JSON.stringify(a)+'\\n');
 if(a[0]==='compose'&&a.includes('ps'))console.log('api');
 if(a[0]==='compose'&&a.includes('exec')&&a.includes('node'))console.log('{}');
+if(a[0]==='compose'&&a.includes('exec')&&a.includes('python'))console.log('{"endpoints":["test"]}');
 `;
   const curl = `#!${process.execPath}
 if(!process.argv.includes('-o'))console.log('{"rates":1,"endpoints":["test"]}');
@@ -59,7 +60,7 @@ test('prebuilt deployment tags the immutable image and recreates only api withou
   );
 });
 
-test('config-only reload recreates api and dashboard without changing dependencies', async (t) => {
+test('config-only reload recreates every env consumer without changing dependencies', async (t) => {
   const { repo, env } = await setup(t);
   const result = await run('bash', ['./scripts/deploy.sh', '--config', '--yes'], {
     cwd: repo,
@@ -69,7 +70,37 @@ test('config-only reload recreates api and dashboard without changing dependenci
   const calls = (await fs.readFile(env.COMMAND_LOG, 'utf8')).trim().split('\n').map(JSON.parse);
   assert.deepEqual(
     calls.filter((a) => a.includes('up')),
-    [['compose', 'up', '-d', '--no-deps', '--force-recreate', 'api', 'cost-dashboard']],
+    [
+      [
+        'compose',
+        'up',
+        '-d',
+        '--no-deps',
+        '--force-recreate',
+        'api',
+        'cost-dashboard',
+        'mcp-image-gen',
+        'mcp-audio-ears',
+      ],
+    ],
+  );
+});
+
+test('build-only builds all changed services without restarting or tagging a running deployment', async (t) => {
+  const { repo, env } = await setup(t);
+  const result = await run('bash', ['./scripts/deploy.sh', '--build-only', '--yes'], {
+    cwd: repo,
+    env,
+  });
+  assert.equal(result.err, null, result.stdout + result.stderr);
+  const calls = (await fs.readFile(env.COMMAND_LOG, 'utf8')).trim().split('\n').map(JSON.parse);
+  assert.deepEqual(
+    calls.filter((a) => a.includes('build')),
+    [['compose', 'build', 'api', 'cost-dashboard', 'mcp-image-gen', 'mcp-audio-ears']],
+  );
+  assert.equal(
+    calls.some((a) => a.includes('up') || a.includes('restart') || a.includes('tag')),
+    false,
   );
 });
 

@@ -159,6 +159,24 @@ describe('AgentClient - recordCollectedUsage', () => {
 
       expect(client.usage).toEqual({ input_tokens: 200, output_tokens: 75 });
     });
+
+    it('should not replace message usage with title usage', async () => {
+      client.usage = { input_tokens: 200, output_tokens: 75 };
+      mockRecordCollectedUsage.mockResolvedValue({ input_tokens: 20, output_tokens: 8 });
+
+      await client.recordCollectedUsage({
+        collectedUsage: [{ input_tokens: 20, output_tokens: 8, model: 'gpt-4' }],
+        context: 'title',
+        balance: { enabled: true },
+        transactions: { enabled: true },
+      });
+
+      expect(mockRecordCollectedUsage).toHaveBeenCalledWith(
+        expect.any(Object),
+        expect.objectContaining({ context: 'title' }),
+      );
+      expect(client.usage).toEqual({ input_tokens: 200, output_tokens: 75 });
+    });
   });
 
   describe('sequential execution (single agent with tool calls)', () => {

@@ -9,6 +9,7 @@
     "packages/*"
   ],
   "scripts": {
+    "postinstall": "node scripts/patch-langchain-responses.mjs",
     "update": "node config/update.js",
     "add-balance": "node config/add-balance.js",
     "set-balance": "node config/set-balance.js",
@@ -186,7 +187,8 @@
       "dompurify": "3.4.0"
     },
     "svgo": "^2.8.2",
-    "js-yaml": "^4.2.0",
+    "js-yaml": "^4.3.2",
+    "websocket-driver": "0.7.5",
     "ws": "^8.21.0"
   },
   "nodemonConfig": {

@@ -1088,6 +1088,54 @@ describe('BaseClient', () => {
         }),
       );
     });
+
+    test('should not estimate and bill a rendered provider error as model output', async () => {
+      TestClient.sendCompletion.mockImplementation(async () => {
+        TestClient.hasModelRequestError = true;
+        return { completion: 'Rendered provider error', metadata: undefined };
+      });
+      TestClient.getTokenCountForResponse = jest.fn().mockReturnValue(50);
+      TestClient.recordTokenUsage = jest.fn().mockResolvedValue(undefined);
+      TestClient.buildMessages.mockReturnValue({
+        prompt: [],
+        tokenCountMap: { res: 50 },
+      });
+
+      await TestClient.sendMessage('Hello', {});
+
+      expect(TestClient.recordTokenUsage).not.toHaveBeenCalled();
+    });
+
+    test('should not estimate usage when collected output usage is zero', async () => {
+      TestClient.getStreamUsage = jest.fn().mockReturnValue({ completion_tokens: 0 });
+      TestClient.getTokenCountForResponse = jest.fn().mockReturnValue(50);
+      TestClient.recordTokenUsage = jest.fn().mockResolvedValue(undefined);
+      TestClient.buildMessages.mockReturnValue({
+        prompt: [],
+        tokenCountMap: { res: 50 },
+      });
+
+      const response = await TestClient.sendMessage('Hello', {});
+
+      expect(response.tokenCount).toBe(0);
+      expect(TestClient.getTokenCountForResponse).not.toHaveBeenCalled();
+      expect(TestClient.recordTokenUsage).not.toHaveBeenCalled();
+    });
+
+    test('should estimate usage when collected output usage is not finite', async () => {
+      TestClient.getStreamUsage = jest.fn().mockReturnValue({ completion_tokens: Number.NaN });
+      TestClient.getTokenCountForResponse = jest.fn().mockReturnValue(50);
+      TestClient.recordTokenUsage = jest.fn().mockResolvedValue(undefined);
+      TestClient.buildMessages.mockReturnValue({
+        prompt: [],
+        tokenCountMap: { res: 50 },
+      });
+
+      const response = await TestClient.sendMessage('Hello', {});
+
+      expect(response.tokenCount).toBe(50);
+      expect(TestClient.recordTokenUsage).toHaveBeenCalledTimes(1);
+    });
   });
 
   describe('getMessagesWithinTokenLimit with instructions', () => {

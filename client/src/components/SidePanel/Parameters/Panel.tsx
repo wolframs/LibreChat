@@ -1,5 +1,4 @@
 import React, { useMemo, useState, useEffect, useCallback } from 'react';
-import keyBy from 'lodash/keyBy';
 import { RotateCcw } from 'lucide-react';
 import {
   excludedKeys,
@@ -15,6 +14,7 @@ import { SaveAsPresetDialog } from '~/components/Endpoints';
 import { useSetIndexOptions, useLocalize } from '~/hooks';
 import { useGetEndpointsQuery } from '~/data-provider';
 import { componentMapping } from './components';
+import { mergeParameterDefinitions } from './definitions';
 import { useChatContext } from '~/Providers';
 import { logger } from '~/utils';
 
@@ -45,15 +45,12 @@ export default function Parameters() {
     const overriddenEndpointKey = customParams.defaultParamsEndpoint ?? endpointKey;
     const defaultParams = paramSettings[combinedKey] ?? paramSettings[overriddenEndpointKey] ?? [];
     const overriddenParams = endpointsConfig[provider]?.customParams?.paramDefinitions ?? [];
-    const overriddenParamsMap = keyBy(overriddenParams, 'key');
     const modelAwareParams = applyModelAwareDefaults(
       defaultParams.filter((param) => param != null),
       overriddenEndpointKey,
       model,
     );
-    return modelAwareParams.map(
-      (param) => (overriddenParamsMap[param.key] as SettingDefinition) ?? param,
-    );
+    return mergeParameterDefinitions(modelAwareParams, overriddenParams);
   }, [endpointType, endpointsConfig, model, provider]);
 
   useEffect(() => {

@@ -1164,6 +1164,51 @@ describe('ToolService - Action Capability Gating', () => {
     });
   });
 
+  it('keeps LibreChat web_search defined and dispatchable independently of native Responses search', async () => {
+    const capabilities = [AgentCapabilities.tools, AgentCapabilities.web_search];
+    const req = createMockReq(capabilities);
+    req.config.webSearch = { searchProvider: 'offline-fixture' };
+    mockGetEndpointsConfig.mockResolvedValue(createEndpointsConfig(capabilities));
+    mockLoadToolDefinitions.mockImplementation((params, deps) =>
+      jest.requireActual('@librechat/api').loadToolDefinitions(params, deps),
+    );
+    const searchTool = { name: Tools.web_search, invoke: jest.fn() };
+    mockLoadToolsUtil.mockResolvedValue({ loadedTools: [searchTool], toolContextMap: {} });
+    const agent = {
+      id: 'offline-agent',
+      provider: 'openAI',
+      model: 'gpt-4',
+      tools: [Tools.web_search],
+    };
+
+    const definitions = await loadAgentTools({
+      req,
+      res: {},
+      agent,
+      definitionsOnly: true,
+    });
+    expect(definitions.toolDefinitions).toEqual(
+      expect.arrayContaining([expect.objectContaining({ name: Tools.web_search })]),
+    );
+
+    const execution = await loadToolsForExecution({
+      req,
+      res: {},
+      agent,
+      toolNames: [Tools.web_search],
+      toolRegistry: definitions.toolRegistry,
+      actionsEnabled: false,
+    });
+    expect(mockLoadToolsUtil).toHaveBeenCalledWith(
+      expect.objectContaining({
+        tools: [Tools.web_search],
+        webSearch: req.config.webSearch,
+      }),
+    );
+    expect(execution.loadedTools).toEqual([searchTool]);
+    expect(searchTool.invoke).not.toHaveBeenCalled();
+  });
+
   describe('checkCapability logic', () => {
     const createCheckCapability = (enabledCapabilities, logger = { warn: jest.fn() }) => {
       return (capability) => {

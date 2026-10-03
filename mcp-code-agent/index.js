@@ -23,6 +23,11 @@ const mcpContext = new AsyncLocalStorage();
 
 const transports = new Map();
 
+function requestUserId(req) {
+  const value = req.headers['x-user-id'];
+  return typeof value === 'string' && value.trim() ? value.trim() : null;
+}
+
 const BOOTED_AT = Date.now();
 const SRC_DIR = path.dirname(fileURLToPath(import.meta.url));
 
@@ -85,11 +90,23 @@ app.get('/healthz', async (_req, res) => res.json(await healthPayload()));
 // Human-facing live view of the same data, proxied to /agent by nginx.
 mountView(app, healthPayload);
 
+const SSE_KEEPALIVE_MS = parseInt(process.env.SSE_KEEPALIVE_MS ?? '30000', 10);
+
 app.get('/sse', async (req, res) => {
+  const userId = requestUserId(req);
+  if (!userId) {
+    return res.status(401).send('Authenticated user context is required');
+  }
   const transport = new SSEServerTransport('/messages', res);
   const server = createMcpServer(mcpContext);
-  transports.set(transport.sessionId, transport);
-  req.on('close', () => transports.delete(transport.sessionId));
+  transports.set(transport.sessionId, { transport, userId });
+  const keepalive = setInterval(() => {
+    if (!res.writableEnded) res.write(': keepalive\n\n');
+  }, SSE_KEEPALIVE_MS);
+  req.on('close', () => {
+    clearInterval(keepalive);
+    transports.delete(transport.sessionId);
+  });
   await server.connect(transport);
 });
 
@@ -100,18 +117,28 @@ app.post('/messages', async (req, res) => {
   // chat request body, and enabling a server from the MCP dropdown is a
   // reinitialize with no body — a hard -32600 and a "failed to initialize MCP
   // server" popup. The conversation is found from the user instead (runner.js).
-  const store = { userId: req.headers['x-user-id'] };
+  const userId = requestUserId(req);
+  if (!userId) {
+    return res.status(401).send('Authenticated user context is required');
+  }
+  const session = transports.get(req.query.sessionId);
+  if (!session || session.userId !== userId) {
+    return res.status(403).send('Session does not belong to this user');
+  }
+  const store = { userId };
   mcpContext.run(store, async () => {
-    const transport = transports.get(req.query.sessionId);
-    if (transport) await transport.handlePostMessage(req, res);
-    else res.status(400).send('Session not found');
+    await session.transport.handlePostMessage(req, res);
   });
 });
 
 const PORT = process.env.PORT || 3015;
+// OrbStack maps host.docker.internal to the macOS loopback namespace (verified
+// from the running api container), so the MCP client still reaches this while
+// LAN and Tailscale peers can no longer connect directly and forge x-user-id.
+const BIND_HOST = process.env.CODE_AGENT_BIND_HOST || '127.0.0.1';
 await initialize();
-const httpServer = app.listen(PORT, async () => {
-  console.log(`MCP code-agent server on port ${PORT}`);
+const httpServer = app.listen(PORT, BIND_HOST, async () => {
+  console.log(`MCP code-agent server on ${BIND_HOST}:${PORT}`);
   console.log(`  repo:   ${REPO} (${await currentBranch()} @ ${(await head()).slice(0, 9)})`);
   console.log(`  model:  ${MODEL || '(claude default)'}`);
   console.log(`  uid:    ${process.getuid()} — uses the Claude Code already logged in here`);

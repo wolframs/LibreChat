@@ -69,11 +69,22 @@ description when it comes back zero, because a model reading a tool result skims
 
 | Env | Default | Notes |
 |---|---|---|
-| `OPENROUTER_KEY` | — | Server-wide; the per-user limits below are what bound who spends on it |
+| `OPENROUTER_KEY` | — | Server-wide; the per-user budget below bounds admission to spend on it |
 | `AUDIO_EARS_MODEL` | `google/gemini-3.8-flash` | $0.75/M in, $3.75/M out |
-| `AUDIO_EARS_DAILY_LIMIT` | 20 | Per user, per container-local day. 0 disables |
-| `AUDIO_EARS_COOLDOWN_SEC` | 5 | 0 disables |
+| `AUDIO_EARS_WEEKLY_BUDGET_USD` | 1 | Rolling seven-day per-user budget. Unknown-cost calls conservatively reserve the allowance available when admitted |
 | `AUDIO_EARS_TIMEOUT_SEC` | 600 | Whole listen, chunks included. The MCP `timeout` in `librechat.yaml` must exceed it |
+
+Budget admission sums each user's settled audio cost over the preceding seven
+days. A durable per-user MongoDB mutex prevents concurrent listens from sharing
+the same remaining allowance. Each admitted listen reserves that allowance;
+after every chunk/model call, the Python runner stops before another call when
+known spend has consumed it. If any dispatched call has no trustworthy cost,
+the reservation is retained rather than silently returned.
+
+OpenRouter exposes provider-rate ceilings but no total request-cost ceiling. A
+single already-admitted provider call can therefore finish slightly above the
+remaining allowance; that settled overrun is counted and blocks further listens
+until rolling spend falls below the limit.
 
 Measured cost: a 4:08 track at source bitrate was 2 chunks, 6206 audio tokens,
 **$0.0158**. Most of that is output tokens, not the audio — so `shrink: true`

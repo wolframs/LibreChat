@@ -22,6 +22,9 @@ const AUDIO_TYPE_RE = /^audio\//;
  */
 export async function resolveAudioRecord(input, userId) {
   const db = await getDb();
+  if (!userId) {
+    throw new Error('Authenticated user context is required.');
+  }
   const raw = String(input ?? '').trim();
   if (!raw) {
     throw new Error('No file_id given. Call get_user_audio first to list what is available.');
@@ -44,10 +47,7 @@ export async function resolveAudioRecord(input, userId) {
     return files[idx];
   }
 
-  const query = { file_id: raw };
-  if (userId) {
-    query.user = new ObjectId(userId);
-  }
+  const query = { file_id: raw, user: new ObjectId(userId) };
   const record = await db.collection('files').findOne(query);
   if (!record) {
     throw new Error(
@@ -64,11 +64,11 @@ export async function resolveAudioRecord(input, userId) {
 
 /** Recent audio uploads for one user, newest first. */
 export async function listUserAudio(userId, limit = 10) {
-  const db = await getDb();
-  const query = { type: { $regex: AUDIO_TYPE_RE } };
-  if (userId) {
-    query.user = new ObjectId(userId);
+  if (!userId) {
+    throw new Error('Authenticated user context is required.');
   }
+  const db = await getDb();
+  const query = { type: { $regex: AUDIO_TYPE_RE }, user: new ObjectId(userId) };
   return db.collection('files').find(query).sort({ createdAt: -1 }).limit(limit).toArray();
 }
 

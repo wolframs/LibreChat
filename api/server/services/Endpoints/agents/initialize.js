@@ -941,8 +941,10 @@ const initializeClient = async ({ req, res, signal, endpointOption }) => {
    *  (primary fallback).
    *  @type {Map<string, import('@librechat/api').EndpointTokenConfig | undefined>} */
   const endpointTokenConfigByAgentId = new Map();
+  const routedViaByAgentId = new Map();
   for (const [agentId, ctx] of agentToolContexts) {
     endpointTokenConfigByAgentId.set(agentId, ctx?.endpointTokenConfig);
+    routedViaByAgentId.set(agentId, ctx?.routedVia);
   }
   /** Price emitted usage per producing agent too, so the streamed/persisted
    *  `metadata.usage.cost` matches the per-agent balance transaction. */
@@ -983,6 +985,9 @@ const initializeClient = async ({ req, res, signal, endpointOption }) => {
      *  agents + subagents); falls back to the primary config when an agent
      *  isn't present or has no configured rates. */
     endpointTokenConfigByAgentId,
+    /** Per-agent destination provenance for mixed-provider graphs. */
+    routedVia: primaryConfig.routedVia,
+    routedViaByAgentId,
     /** Capture sinks the handlers fill during the run; `sendCompletion` reads
      *  them to persist the breakdown + usage rollup on the response message. */
     contextUsageSink,

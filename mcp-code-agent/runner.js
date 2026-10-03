@@ -169,10 +169,11 @@ export async function getJob(id) {
 }
 
 export async function listJobs(userId, limit = 10) {
+  if (!userId) throw new Error('Authenticated user context is required.');
   const db = await getDb();
   return db
     .collection('mcp_code_agent_jobs')
-    .find(userId ? { userId } : {})
+    .find({ userId })
     .sort({ createdAt: -1 })
     .limit(Math.min(100, Math.max(1, Math.trunc(limit) || 10)))
     .toArray();

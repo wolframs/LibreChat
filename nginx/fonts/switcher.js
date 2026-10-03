@@ -24,12 +24,36 @@
   const SIZES = [14, 15, 16, 17, 18];
   const DEFAULT_SIZE = 16;
 
+  const memory = new Map();
+  const storage = {
+    get: (key) => {
+      if (memory.has(key)) return memory.get(key);
+      try { return localStorage.getItem(key); }
+      catch { return memory.get(key) ?? null; }
+    },
+    set: (key, value) => {
+      memory.set(key, value);
+      try { localStorage.setItem(key, value); } catch { /* Keep this session's setting. */ }
+    },
+    remove: (key) => {
+      memory.set(key, null);
+      try { localStorage.removeItem(key); } catch { /* Storage may be unavailable. */ }
+    },
+  };
   const readJson = (key, fallback) => {
-    try { return JSON.parse(localStorage.getItem(key)) || fallback; }
+    try { return JSON.parse(storage.get(key)) || fallback; }
     catch { return fallback; }
   };
-  let custom = readJson(CUSTOM_KEY, []);
-  let hidden = readJson(HIDDEN_KEY, []);
+  const storedCustom = readJson(CUSTOM_KEY, []);
+  const storedHidden = readJson(HIDDEN_KEY, []);
+  let custom = Array.isArray(storedCustom) ? storedCustom.filter((f) =>
+    f && typeof f.id === 'string' && /^gf-[a-z0-9-]+$/.test(f.id) &&
+    typeof f.label === 'string' && typeof f.stack === 'string' &&
+    typeof f.href === 'string' && f.href.startsWith('https://fonts.googleapis.com/css2?'),
+  ) : [];
+  let hidden = Array.isArray(storedHidden) ? storedHidden.filter((id) =>
+    typeof id === 'string' && BUILTINS.some((f) => f.id === id),
+  ) : [];
 
   const visibleFonts = () =>
     BUILTINS.filter((f) => !hidden.includes(f.id)).concat(custom);
@@ -54,7 +78,7 @@
   const applyFont = (id) => {
     const f = allFonts().find((x) => x.id === id) || BUILTINS[0];
     document.documentElement.style.setProperty('--app-font', f.stack);
-    localStorage.setItem(FONT_KEY, f.id);
+    storage.set(FONT_KEY, f.id);
     if (panel) {
       panel.querySelectorAll('[data-font]').forEach((b) => {
         b.setAttribute('aria-pressed', String(b.dataset.font === f.id));
@@ -65,15 +89,15 @@
   const applySize = (px) => {
     const size = SIZES.includes(px) ? px : DEFAULT_SIZE;
     sizeStyle.textContent = size === DEFAULT_SIZE ? '' : 'html{font-size:' + size + 'px !important}';
-    localStorage.setItem(SIZE_KEY, String(size));
+    storage.set(SIZE_KEY, String(size));
     if (panel) {
       const label = panel.querySelector('.lcfs-size-val');
       if (label) label.textContent = size + 'px';
     }
   };
 
-  applyFont(localStorage.getItem(FONT_KEY) || 'aleo');
-  applySize(parseInt(localStorage.getItem(SIZE_KEY), 10) || DEFAULT_SIZE);
+  applyFont(storage.get(FONT_KEY) || 'aleo');
+  applySize(parseInt(storage.get(SIZE_KEY), 10) || DEFAULT_SIZE);
 
   // Try progressively simpler Google Fonts css2 specs: variable weight range,
   // then the common static weights, then bare family (regular only).
@@ -109,21 +133,21 @@
     link.dataset.lcfsFont = id;
     const font = { id, label: name, stack: '"' + name + '", "Aleo", Georgia, serif', href: link.href };
     custom.push(font);
-    localStorage.setItem(CUSTOM_KEY, JSON.stringify(custom));
+    storage.set(CUSTOM_KEY, JSON.stringify(custom));
     return font;
   };
 
   const removeFont = (id) => {
     if (custom.some((f) => f.id === id)) {
       custom = custom.filter((f) => f.id !== id);
-      localStorage.setItem(CUSTOM_KEY, JSON.stringify(custom));
+      storage.set(CUSTOM_KEY, JSON.stringify(custom));
       const link = document.querySelector('link[data-lcfs-font="' + id + '"]');
       if (link) link.remove();
     } else if (!hidden.includes(id)) {
       hidden.push(id);
-      localStorage.setItem(HIDDEN_KEY, JSON.stringify(hidden));
+      storage.set(HIDDEN_KEY, JSON.stringify(hidden));
     }
-    if (localStorage.getItem(FONT_KEY) === id) {
+    if (storage.get(FONT_KEY) === id) {
       applyFont((visibleFonts()[0] || BUILTINS[0]).id);
     }
   };
@@ -135,9 +159,9 @@
     });
     custom = [];
     hidden = [];
-    localStorage.removeItem(CUSTOM_KEY);
-    localStorage.removeItem(HIDDEN_KEY);
-    if (!visibleFonts().some((f) => f.id === localStorage.getItem(FONT_KEY))) applyFont('aleo');
+    storage.remove(CUSTOM_KEY);
+    storage.remove(HIDDEN_KEY);
+    if (!visibleFonts().some((f) => f.id === storage.get(FONT_KEY))) applyFont('aleo');
   };
 
   const css = `
@@ -164,6 +188,7 @@
       color:#9a9aa0;cursor:pointer;font-size:14px;line-height:1;padding:0;flex:none;
       opacity:0;transition:opacity .1s}
     .lcfs-row:hover .lcfs-x,.lcfs-x:focus-visible{opacity:1}
+    @media (hover:none){.lcfs-x{opacity:1;width:30px;height:30px}}
     .lcfs-x:hover{background:rgba(255,80,80,.18);color:#ff8080}
     .lcfs-add-toggle{display:block;width:100%;text-align:left;padding:7px 10px;margin:6px 0 2px;
       border:0;border-radius:8px;background:none;color:#9a9aa0;cursor:pointer;
@@ -202,6 +227,7 @@
   btn.textContent = 'Aa';
   btn.setAttribute('aria-label', 'Font settings');
   btn.setAttribute('aria-expanded', 'false');
+  btn.setAttribute('aria-controls', 'lcfs-panel');
 
   let addFormOpen = false;
 
@@ -212,7 +238,7 @@
     h.textContent = 'Font';
     panel.appendChild(h);
 
-    const active = localStorage.getItem(FONT_KEY);
+    const active = storage.get(FONT_KEY);
     visibleFonts().forEach((f) => {
       const row = document.createElement('div');
       row.className = 'lcfs-row';
@@ -226,7 +252,14 @@
       x.className = 'lcfs-x';
       x.textContent = '×';
       x.setAttribute('aria-label', 'Remove ' + f.label + ' from list');
-      x.addEventListener('click', (e) => { e.stopPropagation(); removeFont(f.id); render(); });
+      x.addEventListener('click', (e) => {
+        e.stopPropagation();
+        const index = visibleFonts().findIndex((font) => font.id === f.id);
+        removeFont(f.id);
+        render();
+        const rows = panel.querySelectorAll('.lcfs-row .lcfs-x');
+        (rows[Math.min(index, rows.length - 1)] || panel.querySelector('.lcfs-add-toggle'))?.focus();
+      });
       row.append(b, x);
       panel.appendChild(row);
     });
@@ -255,6 +288,7 @@
           applyFont(font.id);
           addFormOpen = false;
           render();
+          panel.querySelector('[data-font][aria-pressed="true"]')?.focus();
         } catch {
           input.classList.add('lcfs-err');
           hint.classList.add('lcfs-err');
@@ -265,7 +299,12 @@
       add.addEventListener('click', submit);
       input.addEventListener('keydown', (e) => {
         if (e.key === 'Enter') { e.stopPropagation(); submit(); }
-        if (e.key === 'Escape') { e.stopPropagation(); addFormOpen = false; render(); }
+        if (e.key === 'Escape') {
+          e.stopPropagation();
+          addFormOpen = false;
+          render();
+          panel.querySelector('.lcfs-add-toggle')?.focus();
+        }
       });
       form.append(input, add);
       panel.append(form, hint);
@@ -285,12 +324,12 @@
     minus.setAttribute('aria-label', 'Smaller text');
     const val = document.createElement('span');
     val.className = 'lcfs-size-val';
-    val.textContent = (parseInt(localStorage.getItem(SIZE_KEY), 10) || DEFAULT_SIZE) + 'px';
+    val.textContent = (parseInt(storage.get(SIZE_KEY), 10) || DEFAULT_SIZE) + 'px';
     const plus = document.createElement('button');
     plus.textContent = '+';
     plus.setAttribute('aria-label', 'Larger text');
     const step = (dir) => {
-      const cur = parseInt(localStorage.getItem(SIZE_KEY), 10) || DEFAULT_SIZE;
+      const cur = parseInt(storage.get(SIZE_KEY), 10) || DEFAULT_SIZE;
       const idx = Math.min(Math.max(SIZES.indexOf(cur) + dir, 0), SIZES.length - 1);
       applySize(SIZES[idx]);
     };
@@ -303,7 +342,11 @@
       const reset = document.createElement('button');
       reset.className = 'lcfs-reset';
       reset.textContent = 'Restore default list';
-      reset.addEventListener('click', () => { resetList(); render(); });
+      reset.addEventListener('click', () => {
+        resetList();
+        render();
+        panel.querySelector('.lcfs-add-toggle')?.focus();
+      });
       panel.appendChild(reset);
     }
   };
@@ -312,7 +355,9 @@
     if (!panel) {
       panel = document.createElement('div');
       panel.className = 'lcfs-panel';
-      panel.setAttribute('role', 'menu');
+      panel.id = 'lcfs-panel';
+      panel.setAttribute('role', 'dialog');
+      panel.setAttribute('aria-label', 'Font settings');
       panel.hidden = true;
       document.body.appendChild(panel);
       render();
@@ -321,6 +366,7 @@
     if (show) { addFormOpen = false; render(); }
     panel.hidden = !show;
     btn.setAttribute('aria-expanded', String(show));
+    if (show) panel.querySelector('[data-font][aria-pressed="true"]')?.focus();
   };
 
   btn.addEventListener('click', (e) => { e.stopPropagation(); toggle(); });
@@ -329,7 +375,11 @@
     if (panel && !panel.hidden && !panel.contains(e.target) && e.target !== btn) toggle(false);
   });
   document.addEventListener('keydown', (e) => {
-    if (e.key === 'Escape' && panel && !panel.hidden) toggle(false);
+    if (e.key === 'Escape' && panel && !panel.hidden) {
+      toggle(false);
+      btn.focus();
+      e.preventDefault();
+    }
   });
 
   const mount = () => document.body && document.body.appendChild(btn);

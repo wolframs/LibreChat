@@ -9,6 +9,7 @@ export interface ITransaction extends Document {
   context?: string;
   valueKey?: string;
   rate?: number;
+  rateDetail?: Record<string, number>;
   rawAmount?: number;
   tokenValue?: number;
   inputTokens?: number;
@@ -65,6 +66,13 @@ const transactionSchema: Schema<ITransaction> = new Schema(
       type: String,
     },
     rate: Number,
+    /** Component rates for structured prompt usage. Without this, Mongoose's
+     *  strict schema silently strips the cache rates calculated by the API. */
+    rateDetail: {
+      input: Number,
+      write: Number,
+      read: Number,
+    },
     rawAmount: Number,
     tokenValue: Number,
     inputTokens: { type: Number },

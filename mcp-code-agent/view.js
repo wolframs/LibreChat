@@ -53,7 +53,7 @@ function card(job) {
   ].includes(job.status);
   const age = Math.round((Date.now() - new Date(job.createdAt).getTime()) / 1000);
 
-  return `<article>
+  return `<article data-job-id="${esc(job._id)}">
     <header>
       <span class="dot" style="background:${colour}${live ? ';animation:pulse 1.4s infinite' : ''}"></span>
       <b style="color:${colour}">${esc(label)}</b>
@@ -114,7 +114,6 @@ export function mountView(app, health) {
     res.type('html').send(`<!doctype html><meta charset="utf-8">
 <title>code-agent</title>
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<meta http-equiv="refresh" content="${live ? 5 : 20}">
 <style>
 :root{color-scheme:dark;--bg:#0d1117;--panel:#161b22;--border:#30363d;--text:#c9d1d9;--dim:#8b949e}
 body{background:var(--bg);color:var(--text);font:14px/1.55 ui-sans-serif,system-ui,sans-serif;margin:0;padding:1.5rem;max-width:60rem}
@@ -127,6 +126,7 @@ header{display:flex;align-items:baseline;gap:.55rem;flex-wrap:wrap}
 time{color:var(--dim);font-size:.8rem;margin-left:auto}
 .dot{width:.6rem;height:.6rem;border-radius:50%;display:inline-block;flex:none}
 @keyframes pulse{0%,100%{opacity:1}50%{opacity:.25}}
+@media (prefers-reduced-motion:reduce){.dot{animation:none!important}}
 blockquote{margin:.6rem 0;padding-left:.8rem;border-left:2px solid var(--border);color:var(--text)}
 .progress{margin:.5rem 0;color:var(--dim)}
 .progress code{background:#0d1117;border:1px solid var(--border);border-radius:3px;padding:.05rem .35rem;color:var(--text)}
@@ -140,9 +140,14 @@ pre{white-space:pre-wrap;background:#0d1117;border:1px solid var(--border);borde
 ul{margin:.5rem 0;padding-left:1.1rem}
 .deploy,.undo,.meta{color:var(--dim);font-size:.85rem;margin:.35rem 0 0}
 .undo code{color:var(--text)}
+.refresh{background:var(--panel);border:1px solid var(--border);border-radius:4px;color:var(--text);font:inherit;padding:.2rem .55rem;cursor:pointer}
+.refresh:focus-visible{outline:2px solid #58a6ff;outline-offset:2px}
 </style>
 <h1>code-agent</h1>
-<div class="bar">
+<button class="refresh" id="agent-refresh" type="button">Refresh now</button>
+<span id="refresh-status" role="status" aria-live="polite"></span>
+<main id="agent-content" data-refresh-ms="${live ? 5000 : 20000}">
+<div class="bar" id="agent-bar">
   <b>${esc(h.branch)}</b> @ <code>${esc(h.head)}</code>
   · tree ${h.clean ? 'clean' : '<span style="color:#d29922">dirty</span>'}
   · claude ${h.agentAvailable ? 'ok' : '<span style="color:#f85149">unavailable</span>'}
@@ -150,6 +155,7 @@ ul{margin:.5rem 0;padding-left:1.1rem}
   · limit ${h.dailyLimit}/day
   · ${(h.worktrees || []).filter((j) => j.retained).length} retained worktrees
 </div>
+<div id="agent-stale">
 ${
   /* A stale server answers every probe healthily and behaves like the version
      you already replaced. Worth a banner, because the page is where you come
@@ -161,6 +167,104 @@ ${
        ${h.activeJob ? '<p>Wait until the active job finishes before restarting.</p>' : `<pre>launchctl kickstart -k gui/${process.getuid()}/local.librechat.code-agent</pre>`}</article>`
     : ''
 }
-${jobs.length ? jobs.map(card).join('') : '<article>No jobs filed yet.</article>'}`);
+</div>
+<div id="agent-cards">
+${jobs.length ? jobs.map(card).join('') : '<article data-job-id="empty">No jobs filed yet.</article>'}
+</div>
+</main>
+<script>
+(() => {
+  const content = document.getElementById('agent-content');
+  const status = document.getElementById('refresh-status');
+  const button = document.getElementById('agent-refresh');
+  let pending = false;
+  let timer;
+
+  const pinned = (node) => {
+    if (!node) return false;
+    if (node.contains(document.activeElement) && document.activeElement !== document.body) return true;
+    const selection = window.getSelection();
+    if (!selection || selection.isCollapsed) return false;
+    for (let i = 0; i < selection.rangeCount; i++) {
+      if (selection.getRangeAt(i).intersectsNode(node)) return true;
+    }
+    return false;
+  };
+
+  const syncOne = (current, incoming) => {
+    if (pinned(current) || current.innerHTML === incoming.innerHTML) return;
+    current.innerHTML = incoming.innerHTML;
+  };
+
+  const syncCards = (incoming) => {
+    const current = document.getElementById('agent-cards');
+    const byId = new Map(Array.from(current.children, (card) => [card.dataset.jobId, card]));
+    const incomingIds = new Set();
+    Array.from(incoming.children).forEach((next, index) => {
+      const id = next.dataset.jobId;
+      incomingIds.add(id);
+      const old = byId.get(id);
+      if (!old) {
+        current.insertBefore(next.cloneNode(true), current.children[index] || null);
+        return;
+      }
+      if (!pinned(old) && old.innerHTML !== next.innerHTML) old.innerHTML = next.innerHTML;
+      if (!pinned(old) && current.children[index] !== old) {
+        current.insertBefore(old, current.children[index] || null);
+      }
+    });
+    Array.from(current.children).forEach((old) => {
+      if (!incomingIds.has(old.dataset.jobId) && !pinned(old)) old.remove();
+    });
+  };
+
+  const refresh = async (manual = false) => {
+    if (pending) return;
+    pending = true;
+    button.setAttribute('aria-disabled', 'true');
+    clearTimeout(timer);
+    const controller = new AbortController();
+    let timeout;
+    try {
+      const page = await Promise.race([
+        (async () => {
+          const response = await fetch(location.href, {
+            credentials: 'same-origin', cache: 'no-store', signal: controller.signal,
+          });
+          if (!response.ok) throw new Error('HTTP ' + response.status);
+          return new DOMParser().parseFromString(await response.text(), 'text/html');
+        })(),
+        new Promise((_, reject) => {
+          timeout = setTimeout(() => {
+            controller.abort();
+            reject(new Error('timed out'));
+          }, 10000);
+        }),
+      ]);
+      const next = page.getElementById('agent-content');
+      if (!next || !next.querySelector('#agent-bar') ||
+          !next.querySelector('#agent-stale') || !next.querySelector('#agent-cards')) {
+        throw new Error('unexpected page response');
+      }
+      syncOne(document.getElementById('agent-bar'), next.querySelector('#agent-bar'));
+      syncOne(document.getElementById('agent-stale'), next.querySelector('#agent-stale'));
+      syncCards(next.querySelector('#agent-cards'));
+      content.dataset.refreshMs = next.dataset.refreshMs;
+      if (manual) status.textContent = 'Updated.';
+      else if (status.textContent.startsWith('Refresh failed')) status.textContent = '';
+    } catch (error) {
+      status.textContent = 'Refresh failed (' + error.message + '); retrying automatically.';
+    } finally {
+      clearTimeout(timeout);
+      pending = false;
+      button.removeAttribute('aria-disabled');
+      timer = setTimeout(refresh, Number(content.dataset.refreshMs) || 20000);
+    }
+  };
+
+  button.addEventListener('click', () => refresh(true));
+  timer = setTimeout(refresh, Number(content.dataset.refreshMs) || 20000);
+})();
+</script>`);
   });
 }

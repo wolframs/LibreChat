@@ -175,6 +175,7 @@ descriptions carry the essential status and handoff contract independently.
 | `CODE_AGENT_TIMEOUT_SEC` | 2700 | Total model-running time per start/resume |
 | `CODE_AGENT_MODEL` | installed CLI default | Optional model override |
 | `CODE_AGENT_DAILY_LIMIT` | 0 (off) | New jobs per user/day; resumes remain available |
+| `CODE_AGENT_BIND_HOST` | `127.0.0.1` | Listener address. Keep loopback-only; OrbStack reaches it through `host.docker.internal`. |
 | `CODE_AGENT_CONTEXT_MAX_AGE_MIN` | 30 | Conversation heuristic window |
 | `CODE_AGENT_CONTEXT_MESSAGES` | 12 | Maximum context messages |
 | `PORT` | 3015 | Host MCP listener |

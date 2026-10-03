@@ -68,6 +68,7 @@ export function presetToAgentForm(preset: TPreset, fallbackName: string): AgentF
 
   return {
     ...getDefaultAgentFormValues(),
+    agent: undefined,
     name: preset.title?.trim() || preset.model?.trim() || fallbackName,
     description: '',
     instructions: getInstructions(preset),

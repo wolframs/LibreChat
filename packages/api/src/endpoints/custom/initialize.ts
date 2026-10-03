@@ -135,6 +135,7 @@ function buildAnthropicCustomConfig({
   apiKey,
   baseURL,
   modelOptions,
+  cacheTTL,
   endpointConfig,
   userProvidesURL,
   allowedAddresses,
@@ -143,6 +144,7 @@ function buildAnthropicCustomConfig({
   apiKey: string;
   baseURL: string;
   modelOptions: AnthropicModelOptions;
+  cacheTTL?: '5m' | '1h';
   endpointConfig: Partial<TEndpoint>;
   userProvidesURL: boolean;
   allowedAddresses?: string[] | null;
@@ -150,6 +152,7 @@ function buildAnthropicCustomConfig({
 }): InitializeResultBase {
   const result = getAnthropicLLMConfig(apiKey, {
     modelOptions,
+    cacheTTL,
     proxy: PROXY ?? undefined,
     reverseProxyUrl: baseURL,
     baseURLIsUserProvided: userProvidesURL,
@@ -341,6 +344,8 @@ export async function initializeCustom({
       apiKey,
       baseURL,
       modelOptions: modelOptions as AnthropicModelOptions,
+      cacheTTL:
+        req.body.cacheTTL === '5m' || req.body.cacheTTL === '1h' ? req.body.cacheTTL : undefined,
       endpointConfig,
       userProvidesURL,
       allowedAddresses: appConfig?.endpoints?.allowedAddresses,

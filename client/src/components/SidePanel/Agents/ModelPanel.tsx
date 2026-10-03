@@ -1,5 +1,4 @@
 import React, { useMemo, useEffect } from 'react';
-import keyBy from 'lodash/keyBy';
 import { ControlCombobox } from '@librechat/client';
 import { ChevronLeft, RotateCcw } from 'lucide-react';
 import { useFormContext, useWatch, Controller } from 'react-hook-form';
@@ -15,11 +14,39 @@ import {
 import type * as t from 'librechat-data-provider';
 import type { AgentForm, AgentModelPanelProps, StringOption } from '~/common';
 import { componentMapping } from '~/components/SidePanel/Parameters/components';
+import { mergeParameterDefinitions } from '~/components/SidePanel/Parameters/definitions';
 import { useGetEndpointsQuery } from '~/data-provider';
 import { useLiveAnnouncer } from '~/Providers';
 import { useLocalize } from '~/hooks';
 import { Panel } from '~/common';
 import { cn } from '~/utils';
+
+/** LibreChat-only controls that remain meaningful after changing providers.
+ * Provider request parameters are deliberately reset: otherwise hidden values
+ * such as Anthropic `topK` or an old camel-case `topP` can keep winning after
+ * the visible controls have changed to another provider's schema. */
+const providerAgnosticParameterKeys = new Set<keyof t.AgentModelParameters>([
+  'maxContextTokens',
+  'resendFiles',
+  'fileTokenLimit',
+]);
+
+export function retainProviderAgnosticParameters(
+  parameters: Partial<t.AgentModelParameters> | undefined,
+): t.AgentModelParameters {
+  return Object.fromEntries(
+    Object.entries(parameters ?? {}).filter(([key]) =>
+      providerAgnosticParameterKeys.has(key as keyof t.AgentModelParameters),
+    ),
+  ) as t.AgentModelParameters;
+}
+
+export function shouldResetProviderParameters(
+  currentProvider: string,
+  selectedProvider: string,
+): boolean {
+  return Boolean(currentProvider && selectedProvider && currentProvider !== selectedProvider);
+}
 
 export default function ModelPanel({
   providers,
@@ -82,15 +109,12 @@ export default function ModelPanel({
     const defaultParams =
       agentParamSettings[combinedKey] ?? agentParamSettings[overriddenEndpointKey] ?? [];
     const overriddenParams = endpointsConfig[provider]?.customParams?.paramDefinitions ?? [];
-    const overriddenParamsMap = keyBy(overriddenParams, 'key');
     const modelAwareParams = applyModelAwareDefaults(
       defaultParams.filter((param) => param != null),
       overriddenEndpointKey,
       model ?? '',
     );
-    return modelAwareParams.map(
-      (param) => (overriddenParamsMap[param.key] as SettingDefinition) ?? param,
-    );
+    return mergeParameterDefinitions(modelAwareParams, overriddenParams);
   }, [endpointType, endpointsConfig, model, provider]);
 
   const setOption = (optionKey: keyof t.AgentModelParameters) => (value: t.AgentParameterValue) => {
@@ -149,7 +173,16 @@ export default function ModelPanel({
                     displayValue={alternateName[display] ?? display}
                     selectPlaceholder={localize('com_ui_select_provider')}
                     searchPlaceholder={localize('com_ui_select_search_provider')}
-                    setValue={field.onChange}
+                    setValue={(selectedProvider) => {
+                      if (shouldResetProviderParameters(value, selectedProvider)) {
+                        setValue(
+                          'model_parameters',
+                          retainProviderAgnosticParameters(modelParameters),
+                          { shouldDirty: true },
+                        );
+                      }
+                      field.onChange(selectedProvider);
+                    }}
                     items={providers.map((provider) => ({
                       label: typeof provider === 'string' ? provider : provider.label,
                       value: typeof provider === 'string' ? provider : provider.value,

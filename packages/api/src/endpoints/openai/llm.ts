@@ -137,6 +137,12 @@ function deleteConfigParam({
   llmConfig: OpenAILLMConfig;
   modelKwargs: Record<string, unknown>;
 }) {
+  if (param === 'top_p') {
+    delete llmConfig.topP;
+    delete modelKwargs.top_p;
+    delete modelKwargs.topP;
+    return;
+  }
   if (param === 'reasoning_effort') {
     removeReasoningPayload(llmConfig as Record<string, unknown>);
     removeReasoningPayload(modelKwargs);
@@ -457,6 +463,7 @@ export function getOpenAILLMConfig({
     promptCacheTtl,
     frequency_penalty,
     presence_penalty,
+    top_p,
     ...modelOptions
   } = cleanedModelOptions as Partial<
     t.OpenAIParameters & { promptCache?: boolean; promptCacheTtl?: '5m' | '1h' }
@@ -475,6 +482,9 @@ export function getOpenAILLMConfig({
   }
   if (presence_penalty != null) {
     llmConfig.presencePenalty = presence_penalty;
+  }
+  if (top_p != null) {
+    llmConfig.topP = top_p;
   }
 
   const modelKwargs: Record<string, unknown> = {};
@@ -499,6 +509,12 @@ export function getOpenAILLMConfig({
       if (key === 'web_search') {
         if (enableWebSearch === undefined && typeof value === 'boolean') {
           enableWebSearch = value;
+        }
+        continue;
+      }
+      if (key === 'top_p') {
+        if (llmConfig.topP === undefined && typeof value === 'number') {
+          llmConfig.topP = value;
         }
         continue;
       }
@@ -557,6 +573,15 @@ export function getOpenAILLMConfig({
         if (typeof value === 'boolean') {
           enableWebSearch = value;
         }
+        continue;
+      }
+      if (key === 'top_p') {
+        if (typeof value === 'number') {
+          llmConfig.topP = value;
+        }
+        continue;
+      }
+      if (key === 'topP' && typeof addParams.top_p === 'number') {
         continue;
       }
       if (key === 'promptCache') {
@@ -641,7 +666,7 @@ export function getOpenAILLMConfig({
     /** OpenRouter expects web search as a plugins parameter */
     modelKwargs.plugins = [{ id: 'web' }];
     hasModelKwargs = true;
-  } else if (enableWebSearch) {
+  } else if (enableWebSearch && llmConfig.useResponsesApi !== false) {
     /** Standard OpenAI web search uses tools API */
     llmConfig.useResponsesApi = true;
     tools.push({ type: 'web_search' });

@@ -91,6 +91,7 @@ function useLatestMessageSiblingIndexes(
 export function useLatestMessage(
   index: string | number,
   messagesQueryIdOverride?: string | null,
+  predicate?: (message: TMessage) => boolean,
 ): TMessage | null {
   const conversationId = useRecoilValue(store.conversationIdByIndex(index));
   const messagesQueryId = useLatestMessagesQueryId(index, conversationId, messagesQueryIdOverride);
@@ -101,8 +102,9 @@ export function useLatestMessage(
         messages,
         conversationId,
         (parentId) => siblingIndexes[getParentLookupKey(parentId)] ?? 0,
+        predicate,
       ),
-    [conversationId, siblingIndexes],
+    [conversationId, siblingIndexes, predicate],
   );
 
   return useMessagesCacheSelect(messagesQueryId, select);

@@ -20,6 +20,7 @@
     <key>MONGO_URI</key><string>mongodb://127.0.0.1:27017/LibreChat</string>
     <key>REPO_PATH</key><string>/Users/wolfram/projects/librechat</string>
     <key>PORT</key><string>3015</string>
+    <key>CODE_AGENT_BIND_HOST</key><string>127.0.0.1</string>
   </dict>
   <key>RunAtLoad</key><true/>
   <key>KeepAlive</key><true/>

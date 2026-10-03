@@ -145,7 +145,8 @@ Measured 2026-09-08, all of it:
 - **Moderation differs per model and the description says so.** `meta/muse-image` refuses
   "a woman in a bikini" (`content management policy`, 67 s); every Venice model returns it;
   lustify is uncensored. `MODERATION` in `models.js` feeds the `model` description, and an
-  OpenRouter filter refusal comes back naming the lenient models and "nothing was billed".
+  OpenRouter filter refusal comes back naming the lenient models and saying no image was returned;
+  its HTTP error alone does not establish the provider's settled charge.
 - **Model-facing text uses the registered tool names** (`generate_image_mcp_imager`,
   `TOOL_SUFFIX` in `tools.js`): LibreChat appends `_mcp_<yaml key>`, and a bare
   `generate_image` in the instructions is a `Tool not found` round-trip.

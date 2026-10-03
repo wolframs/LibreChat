@@ -7,7 +7,7 @@ import { AsyncLocalStorage } from 'node:async_hooks';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
 import { createMcpServer } from '../server.js';
-import { describeJob } from '../tools.js';
+import { describeJob, handleListFixes } from '../tools.js';
 import { SERVER_INSTRUCTIONS } from '../prompt.js';
 import { Deployment } from '../deployment.js';
 import { Worktrees, gitAt, headAt } from '../worktrees.js';
@@ -63,6 +63,13 @@ test('reports never label paused, failed, or pending-application work as deploye
     describeJob({ id: '1234567890abcdef12345678', status: 'done', worktree: '/tmp/job' }),
     /deployed and verified/,
   );
+});
+
+test('job listings fail closed without an authenticated user context', async () => {
+  const result = await handleListFixes({}, { getStore: () => undefined });
+
+  assert.equal(result.isError, true);
+  assert.match(result.content[0].text, /Authenticated user context is required/);
 });
 
 test('image build uses only archived tested source, excluding operator WIP and ignored job files', async (t) => {

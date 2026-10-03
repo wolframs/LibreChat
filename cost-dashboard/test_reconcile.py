@@ -12,6 +12,11 @@ import reconcile
 UTC = timezone.utc
 
 
+class WriteResult:
+    def __init__(self, modified_count=1):
+        self.modified_count = modified_count
+
+
 class FakeTransactions:
     """Just enough of a pymongo collection to record writes."""
 
@@ -20,6 +25,10 @@ class FakeTransactions:
 
     def update_one(self, query, update):
         self.updates.append((query, update))
+        return WriteResult()
+
+    def count_documents(self, _query, **_kwargs):
+        return 0
 
 
 def _group(at, model="claude-opus-4.8", out_tokens=100, values=(-300.0, -700.0)):
@@ -168,6 +177,28 @@ class TestMatchGroups:
         assert not matches
         assert len(unmatched) == 1
 
+    def test_does_not_reuse_a_request_consumed_by_an_earlier_run(self):
+        billed = datetime(2026, 8, 4, 12, 0, 0, tzinfo=UTC)
+
+        matches, unmatched = reconcile.match_groups(
+            [_group(billed + timedelta(seconds=5))],
+            [_row(billed, request_id="already-used")],
+            {"already-used"},
+        )
+
+        assert not matches
+        assert len(unmatched) == 1
+
+    def test_ignores_export_rows_without_a_request_id(self):
+        billed = datetime(2026, 8, 4, 12, 0, 0, tzinfo=UTC)
+        row = _row(billed)
+        row["request_id"] = ""
+
+        matches, unmatched = reconcile.match_groups([_group(billed)], [row])
+
+        assert not matches
+        assert len(unmatched) == 1
+
 
 class TestLoadPendingGroups:
     class FakeCursor(list):
@@ -179,6 +210,16 @@ class TestLoadPendingGroups:
 
         def find(self, *_args, **_kwargs):
             return iter(self.docs)
+
+        def count_documents(self, query, **_kwargs):
+            return sum(
+                1
+                for doc in self.docs
+                if doc.get("messageId") == query.get("messageId")
+                and doc.get("context") == query.get("context")
+                and doc.get("model") == query.get("model")
+                and "reconciled" in doc
+            )
 
     def test_separates_the_reply_from_its_title_generation(self):
         """Both carry the same messageId but are billed as separate requests."""
@@ -214,6 +255,27 @@ class TestLoadPendingGroups:
         ]
 
         assert reconcile.load_pending_groups(self.FakeFind(docs)) == []
+
+    def test_excludes_a_partially_reconciled_group(self):
+        at = datetime(2026, 8, 4, 17, 34, 30, tzinfo=UTC)
+        routed = {"baseURL": "https://api.surplusintelligence.ai/v1"}
+        docs = [
+            {"_id": 1, "messageId": "m1", "context": "message", "model": "model",
+             "tokenType": "prompt", "rawAmount": -9, "tokenValue": -1,
+             "createdAt": at, "routedVia": routed},
+            {"_id": 2, "messageId": "m1", "context": "message", "model": "model",
+             "tokenType": "completion", "rawAmount": -2, "tokenValue": -1,
+             "createdAt": at, "routedVia": routed,
+             "reconciled": {"source": "surplus", "requestId": "used"}},
+        ]
+
+        # The real pending query returns only the unreconciled half, while the
+        # count checks the complete collection and detects the crash residue.
+        source = self.FakeFind(docs)
+        source.find = lambda *_args, **_kwargs: iter([docs[0]])
+        status = {}
+        assert reconcile.load_pending_groups(source, status) == []
+        assert status == {"excluded_partial_groups": 1}
 
 
 class TestApplyMatch:
@@ -271,6 +333,18 @@ class TestApplyMatch:
             assert set(update.keys()) == {"$set"}
             assert set(update["$set"].keys()) == {"reconciled"}
 
+    def test_does_not_overwrite_an_already_reconciled_doc(self):
+        class RacedTransactions(FakeTransactions):
+            def count_documents(self, _query, **_kwargs):
+                return 1
+
+        at = datetime(2026, 8, 4, 12, 0, 0, tzinfo=UTC)
+        entry = reconcile._index_rows([_row(at)])[("claude-opus-4.8", 100)][0]
+        fake = RacedTransactions()
+
+        assert reconcile.apply_match(fake, _group(at), entry, False) == 0
+        assert fake.updates == []
+
 
 class TestRunOnce:
     def test_reports_a_clear_error_without_a_key(self, monkeypatch):
@@ -278,6 +352,99 @@ class TestRunOnce:
         result = reconcile.run_once(FakeTransactions())
         assert result["ok"] is False
         assert "SURPLUS_API_KEY" in result["error"]
+
+    class FakeLocks:
+        def __init__(self, occupied=False):
+            self.occupied = occupied
+            self.inserted = []
+            self.deleted = []
+
+        def insert_one(self, doc):
+            if self.occupied:
+                raise reconcile.DuplicateKeyError("duplicate lock")
+            self.occupied = True
+            self.inserted.append(doc)
+
+        def delete_one(self, query):
+            self.deleted.append(query)
+            self.occupied = False
+
+    class LockDatabase:
+        def __init__(self, locks):
+            self.locks = locks
+            self.image_usage = type("ImageUsage", (), {"distinct": lambda *_args: []})()
+
+        def __getitem__(self, name):
+            if name == "reconciliation_locks":
+                return self.locks
+            assert name == "mcp_image_gen_usage"
+            return self.image_usage
+
+    class LockTransactions(FakeTransactions):
+        def __init__(self, locks):
+            super().__init__()
+            self.database = TestRunOnce.LockDatabase(locks)
+
+        def distinct(self, *_args, **_kwargs):
+            return []
+
+    def test_competing_pass_fails_closed_on_the_global_lock(self, monkeypatch):
+        monkeypatch.setattr(reconcile, "SURPLUS_API_KEY", "configured")
+        locks = self.FakeLocks(occupied=True)
+
+        result = reconcile.run_once(self.LockTransactions(locks))
+
+        assert result["ok"] is False
+        assert "lock is already held" in result["error"]
+        assert "manually" in result["error"]
+        assert locks.deleted == []
+
+    def test_releases_the_owned_lock_when_the_pass_errors(self, monkeypatch):
+        monkeypatch.setattr(reconcile, "SURPLUS_API_KEY", "configured")
+        monkeypatch.setattr(
+            reconcile, "fetch_usage_rows", lambda _session: (_ for _ in ()).throw(RuntimeError("boom"))
+        )
+        locks = self.FakeLocks()
+
+        result = reconcile.run_once(self.LockTransactions(locks))
+
+        assert result["ok"] is False
+        assert "RuntimeError: boom" in result["error"]
+        assert len(locks.inserted) == 1
+        assert locks.deleted == [
+            {"_id": reconcile.LOCK_ID, "owner": locks.inserted[0]["owner"]}
+        ]
+
+    def test_partial_write_reserves_request_id_from_image_phase(self, monkeypatch):
+        monkeypatch.setattr(reconcile, "SURPLUS_API_KEY", "configured")
+        at = datetime(2026, 8, 4, 12, 0, 0, tzinfo=UTC)
+        group = _group(at)
+        entry = reconcile._index_rows([_row(at)])[('claude-opus-4.8', 100)][0]
+        seen = {}
+        monkeypatch.setattr(reconcile, "fetch_usage_rows", lambda _session: [_row(at)])
+        monkeypatch.setattr(
+            reconcile,
+            "load_pending_groups",
+            lambda _transactions, status: status.update(excluded_partial_groups=2) or [group],
+        )
+        monkeypatch.setattr(
+            reconcile, "match_groups", lambda _groups, _rows, _used: ([(group, entry, False)], [])
+        )
+        monkeypatch.setattr(reconcile, "apply_match", lambda *_args, **_kwargs: 1)
+
+        def capture_image(_usage, _rows, now=None, used_request_ids=None):
+            seen["used"] = set(used_request_ids)
+            return 0, 0, 0
+
+        monkeypatch.setattr(reconcile, "reconcile_image_usage", capture_image)
+
+        result = reconcile.run_once(self.LockTransactions(self.FakeLocks()))
+
+        assert result["ok"] is True
+        assert result["matched"] == 0
+        assert result["transactions_updated"] == 1
+        assert result["excluded_partial_groups"] == 2
+        assert seen["used"] == {"r1"}
 
 
 class FakeUsage:
@@ -292,6 +459,7 @@ class FakeUsage:
 
     def update_one(self, query, update):
         self.updates.append((query, update))
+        return WriteResult()
 
 
 def _image_row(at, model="venice-sd35", request_id="i1", cost="0.003500", direct="0.010000"):
@@ -325,7 +493,7 @@ class TestReconcileImageUsage:
 
         assert (matched, ambiguous, unmatched) == (1, 0, 0)
         (query, update), = usage.updates
-        assert query == {"_id": "u1"}
+        assert query == {"_id": "u1", "reconciled": {"$exists": False}}
         rec = update["$set"]["reconciled"]
         assert rec["requestId"] == "i1"
         assert rec["costUSD"] == 0.0035
@@ -376,3 +544,30 @@ class TestReconcileImageUsage:
             {"_id": "u1", "provider": "openrouter", "model": "meta/muse-image", "requestedAt": sent},
         ])
         assert reconcile.reconcile_image_usage(usage, [_image_row(sent)]) == (0, 0, 0)
+
+    def test_does_not_reuse_a_request_consumed_by_chat_reconciliation(self):
+        sent = datetime(2026, 9, 8, 14, 33, 9, tzinfo=UTC)
+        usage = FakeUsage([
+            {"_id": "u1", "provider": "surplus", "model": "venice-sd35", "requestedAt": sent},
+        ])
+
+        result = reconcile.reconcile_image_usage(
+            usage,
+            [_image_row(sent, request_id="already-used")],
+            used_request_ids={"already-used"},
+        )
+
+        assert result == (0, 0, 1)
+        assert usage.updates == []
+
+    def test_ignores_export_rows_without_a_request_id(self):
+        sent = datetime(2026, 9, 8, 14, 33, 9, tzinfo=UTC)
+        usage = FakeUsage([
+            {"_id": "u1", "provider": "surplus", "model": "venice-sd35",
+             "requestedAt": sent},
+        ])
+        row = _image_row(sent)
+        row["request_id"] = ""
+
+        assert reconcile.reconcile_image_usage(usage, [row]) == (0, 0, 1)
+        assert usage.updates == []

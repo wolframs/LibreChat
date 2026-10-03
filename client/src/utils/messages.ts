@@ -20,6 +20,7 @@ export const TEXT_KEY_DIVIDER = '|||';
 export const STREAM_START_FAILED_METADATA_KEY = 'streamStartFailed';
 
 type SiblingIndexLookup = (parentMessageId: string | null | undefined) => number;
+type MessagePredicate = (message: TMessage) => boolean;
 
 export type BranchSiblingIndex = {
   parentMessageId: string | null | undefined;
@@ -30,6 +31,7 @@ export const selectActiveBranchTail = (
   messages: TMessage[] | null | undefined,
   rootSiblingKey: string | null | undefined,
   getSiblingIndex: SiblingIndexLookup = () => 0,
+  predicate: MessagePredicate = () => true,
 ): TMessage | null => {
   const messagesTree = buildTree({ messages: messages ?? null });
   if (!messagesTree?.length) {
@@ -49,7 +51,9 @@ export const selectActiveBranchTail = (
       return tail;
     }
 
-    tail = message;
+    if (predicate(message)) {
+      tail = message;
+    }
     parentMessageId = message.messageId;
     siblings = message.children ?? [];
   }

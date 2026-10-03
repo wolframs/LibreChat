@@ -11,10 +11,15 @@ const requireLdapAuth = require('./requireLdapAuth');
 const abortMiddleware = require('./abortMiddleware');
 const checkInviteUser = require('./checkInviteUser');
 const requireJwtAuth = require('./requireJwtAuth');
+const requireBrowserSessionAuth = require('./requireBrowserSessionAuth');
 const { requireRumProxyAuth } = require('./requireJwtAuth');
 const configMiddleware = require('./config/app');
 const validateModel = require('./validateModel');
 const moderateText = require('./moderateText');
+const requireBrowserAuth = (req, res, next) =>
+  req.headers.authorization
+    ? requireJwtAuth(req, res, next)
+    : requireBrowserSessionAuth(req, res, next);
 const logHeaders = require('./logHeaders');
 const setHeaders = require('./setHeaders');
 const validate = require('./validate');
@@ -38,6 +43,8 @@ module.exports = {
   moderateText,
   validateModel,
   requireJwtAuth,
+  requireBrowserSessionAuth,
+  requireBrowserAuth,
   requireRumProxyAuth,
   setTwoFactorTempUser,
   checkInviteUser,

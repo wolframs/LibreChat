@@ -6,6 +6,7 @@ export * from './balance';
 export * from './json';
 export * from './capabilities';
 export * from './auth';
+export * from './browserSession';
 export {
   tenantContextMiddleware,
   restoreTenantContextFromReq,

@@ -4,13 +4,10 @@ Run with `./cost-dashboard/test.sh test_cache.py` (the image carries no test
 files and no pytest, so the suite runs against a mounted source tree).
 
 The contract under test is the one thing on `/cost` that is a *judgement* rather
-than a sum: whether prompt caching earned the 1.25x premium it charges on every
-write. It is expressed as a counterfactual — what these same tokens would have
-cost with caching off — and the whole construction rests on the write and read
-multipliers being fixed ratios of the model's input rate, which is what lets the
-rate cancel out. If Anthropic ever prices caching some other way, or a gateway
-stops mirroring those ratios, these numbers quietly stop meaning anything, so the
-multipliers are asserted here rather than only living in a comment.
+than a sum: whether prompt caching paid for itself. It is expressed as a
+counterfactual — what these same tokens would have cost with caching off — using
+the component rates stored with each transaction rather than one provider's
+ratios for every model.
 """
 
 import os
@@ -18,6 +15,33 @@ import os
 os.environ.setdefault("MONGO_URI", "mongodb://localhost:27017/test")
 
 import app  # noqa: E402  (import after MONGO_URI; MongoClient is lazy and never connects here)
+
+
+class CaptureTransactions:
+    def __init__(self):
+        self.pipelines = []
+
+    def aggregate(self, pipeline):
+        self.pipelines.append(pipeline)
+        return []
+
+
+def test_every_spend_summary_excludes_credit_transactions(monkeypatch):
+    capture = CaptureTransactions()
+    monkeypatch.setattr(app, "transactions", capture)
+
+    app._cost_since(None)
+    app._nominal_since(None)
+    app._savings()
+    app._by_routing()
+    app._by_model()
+    app._by_conversation()
+
+    assert len(capture.pipelines) == 6
+    for pipeline in capture.pipelines:
+        assert pipeline[0]["$match"]["tokenType"] == {
+            "$in": ["prompt", "completion"]
+        }
 
 
 def group(name, model, write, read, plain, actual, uncached, messages=1):
@@ -33,13 +57,44 @@ def group(name, model, write, read, plain, actual, uncached, messages=1):
     }
 
 
-def test_multipliers_match_anthropics_published_ratios():
-    """A cache write is 1.25x input and a read 0.10x, and `tx.ts` follows both.
+def rated_group(name, model, write, read, plain, actual, rates, messages=1):
+    row = group(name, model, write, read, plain, actual, actual, messages)
+    del row["uncached"]
+    row["_id"]["rates"] = rates
+    return row
 
-    These are the constants the counterfactual is built on, not a tuning knob.
-    """
-    assert app.CACHE_WRITE_MULTIPLIER == 1.25
-    assert app.CACHE_READ_MULTIPLIER == 0.10
+
+def test_uses_each_transactions_component_rates():
+    """Kimi writes at 1x and reads at 0.25x; Anthropic uses 1.25x/0.10x."""
+    kimi = rated_group(
+        "Kimi", "kimi-k2", 1000, 3000, 0, 1_050, {"input": 0.6, "write": 0.6, "read": 0.15}
+    )
+    claude = rated_group(
+        "Claude", "claude", 1000, 3000, 0, 1_550, {"input": 1, "write": 1.25, "read": 0.1}
+    )
+
+    result = app._fold_cache_rows([kimi, claude])
+
+    by_name = {row["name"]: row for row in result["rows"]}
+    assert by_name["Kimi"]["uncached"] == 0.0024
+    assert by_name["Claude"]["uncached"] == 0.004
+
+
+def test_legacy_rows_fall_back_to_exact_model_rate_tables():
+    row = rated_group("Kimi", "kimi-k2", 1000, 3000, 0, 1_050, None)
+    result = app._fold_cache_rows(
+        [row], {"kimi-k2": (0.6, 2.5)}, {"kimi-k2": (0.6, 0.15)}
+    )
+    assert result["rows"][0]["uncached"] == 0.0024
+    assert result["unpriced_messages"] == 0
+
+
+def test_unknown_rates_do_not_invent_savings():
+    row = rated_group("Unknown", "mystery", 1000, 3000, 0, 1_050, None, messages=2)
+    result = app._fold_cache_rows([row])
+    assert result["rows"][0]["uncached"] == result["rows"][0]["actual"]
+    assert result["saved"] == 0
+    assert result["unpriced_messages"] == 2
 
 
 def test_hit_rate_is_reads_over_everything_through_the_cache():

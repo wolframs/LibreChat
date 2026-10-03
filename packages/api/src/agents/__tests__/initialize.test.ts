@@ -2178,6 +2178,38 @@ describe('initializeAgent — run-scoped MCP tool definitions', () => {
     jest.clearAllMocks();
   });
 
+  it('captures a child route without overwriting the primary request route', async () => {
+    const { agent, req, res, loadTools, db } = createMocks();
+    const primaryRoute = { endpoint: 'Gateway A', baseURL: 'https://a.example.com' };
+    const childRoute = { endpoint: 'Gateway B', baseURL: 'https://b.example.com' };
+    req.routedVia = primaryRoute;
+    mockGetProviderConfig.mockReturnValue({
+      overrideProvider: Providers.OPENAI,
+      getOptions: jest
+        .fn()
+        .mockImplementation(async ({ req: childReq }: { req: ServerRequest }) => {
+          childReq.routedVia = childRoute;
+          return { llmConfig: { model: 'test-model', maxTokens: 4096 } };
+        }),
+    });
+
+    const result = await initializeAgent(
+      {
+        req,
+        res,
+        agent,
+        loadTools,
+        endpointOption: { endpoint: EModelEndpoint.agents },
+        allowedProviders: new Set([Providers.OPENAI]),
+        isInitialAgent: false,
+      },
+      db,
+    );
+
+    expect(result.routedVia).toEqual(childRoute);
+    expect(req.routedVia).toEqual(primaryRoute);
+  });
+
   it('carries mcpAvailableTools from the loadTools result onto the initialized agent', async () => {
     /** Regression guard for the request-scoped MCP/PTC handoff: dropping this
      *  field at the destructure boundary forces per-call reinitialization

@@ -16,6 +16,9 @@ Each ledger prices a row a different way, and the row says which:
                       and `reconciled.costUSD` is the marketplace's settled charge once
                       the hourly export has been matched (reconcile.py)          — settled / list
   audio               `cost` is OpenRouter's settled figure, summed over chunks   — reported
+                      A running/unknown row has `cost: null`; `reservedCost` is a
+                      budget guard, never spend. `knownPartialCost` is the sum of
+                      trustworthy chunk costs already incurred.                  — unknown
 
 so the effective cost of a row is `reconciled.costUSD ?? cost ?? listCost ?? 0`,
 in that order. List is ~3x settled on Surplus, so an unmatched row over-counts
@@ -38,7 +41,7 @@ IMAGE_EFFECTIVE_USD = {
 }
 
 HAS_RECONCILED = {"$ne": [{"$type": "$reconciled.costUSD"}, "missing"]}
-HAS_REPORTED = {"$ne": [{"$type": "$cost"}, "missing"]}
+HAS_REPORTED = {"$isNumber": "$cost"}
 
 #: `provider` for rows written before the field existed.
 IMAGE_PROVIDER = {
@@ -54,7 +57,9 @@ IMAGE_PROVIDER = {
     ]
 }
 
-AUDIO_EFFECTIVE_USD = {"$ifNull": ["$cost", 0]}
+AUDIO_EFFECTIVE_USD = {
+    "$cond": [HAS_REPORTED, "$cost", {"$ifNull": ["$knownPartialCost", 0]}]
+}
 
 
 def _match(since):
@@ -85,15 +90,25 @@ def image_pipeline(since=None):
 
 
 def audio_pipeline(since=None):
-    """Per model totals from the audio ledger. Every row is OpenRouter-reported."""
+    """Per model audio totals; reservations remain unknown, never list-priced."""
     return [
-        {"$match": _match(since)},
+        {"$match": {**_match(since), "status": {"$ne": "canceled"}}},
         {
             "$group": {
                 "_id": {"model": "$model", "provider": "openrouter"},
                 "calls": {"$sum": 1},
                 "usd": {"$sum": AUDIO_EFFECTIVE_USD},
                 "reported_calls": {"$sum": {"$cond": [HAS_REPORTED, 1, 0]}},
+                "unknown_calls": {"$sum": {"$cond": [{"$not": HAS_REPORTED}, 1, 0]}},
+                "known_partial_usd": {
+                    "$sum": {
+                        "$cond": [
+                            {"$not": HAS_REPORTED},
+                            {"$ifNull": ["$knownPartialCost", 0]},
+                            0,
+                        ]
+                    }
+                },
                 "audio_tokens": {"$sum": {"$ifNull": ["$audioTokens", 0]}},
             }
         },
@@ -127,6 +142,9 @@ def fold_rows(image_groups, audio_groups):
                 "has_reported": reported > 0,
                 "has_list": calls - settled - reported > 0,
                 "list_calls": calls - settled - reported,
+                "has_unknown": False,
+                "unknown_calls": 0,
+                "known_partial_usd": 0.0,
                 "ambiguous": g.get("ambiguous", 0),
                 "extra": "",
             }
@@ -134,6 +152,7 @@ def fold_rows(image_groups, audio_groups):
     for g in audio_groups:
         calls = g["calls"]
         reported = g.get("reported_calls", 0)
+        unknown = g.get("unknown_calls", calls - reported)
         tokens = g.get("audio_tokens", 0)
         rows.append(
             {
@@ -147,8 +166,11 @@ def fold_rows(image_groups, audio_groups):
                 "settled_list_usd": 0.0,
                 "has_settled": False,
                 "has_reported": reported > 0,
-                "has_list": calls - reported > 0,
-                "list_calls": calls - reported,
+                "has_list": False,
+                "list_calls": 0,
+                "has_unknown": unknown > 0,
+                "unknown_calls": unknown,
+                "known_partial_usd": float(g.get("known_partial_usd", 0)),
                 "ambiguous": 0,
                 "extra": f"{tokens:,} audio tokens" if tokens else "",
             }
@@ -164,6 +186,7 @@ def totals_from_rows(rows):
         "usd": usd,
         "calls": sum(r["calls"] for r in rows),
         "list_calls": sum(r["list_calls"] for r in rows),
+        "unknown_calls": sum(r.get("unknown_calls", 0) for r in rows),
         "settled_usd": sum(r["settled_usd"] for r in rows),
         "settled_list_usd": sum(r["settled_list_usd"] for r in rows),
         "ambiguous": sum(r["ambiguous"] for r in rows),

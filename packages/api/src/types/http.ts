@@ -8,6 +8,7 @@ import type { ObservedStreamUsage } from '~/endpoints/anthropic/streamUsage';
  * (have to use type alias because you can't extend indexed access types like Request['body'])
  */
 export type RequestBody = {
+  cacheTTL?: '5m' | '1h';
   messageId?: string;
   fileTokenLimit?: number;
   conversationId?: string;

@@ -19,7 +19,8 @@ const fail = (value) => ({ ...text(value), isError: true });
 async function jobFor(id, context) {
   const job = await getJob(id);
   const userId = context.getStore()?.userId;
-  if (!job || (userId && job.userId && userId !== job.userId))
+  if (!userId) throw new Error('Authenticated user context is required.');
+  if (!job || !job.userId || userId !== job.userId)
     throw new Error('No accessible job with that full ID. Use list_fixes to find it.');
   return job;
 }
@@ -135,6 +136,7 @@ export async function handleRequestFix({ premise }, context) {
     if (!premise || premise.trim().length < 8)
       return fail('Describe the requested work or observation in a sentence.');
     const userId = context.getStore()?.userId;
+    if (!userId) return fail('Authenticated user context is required.');
     const limit = Number(process.env.CODE_AGENT_DAILY_LIMIT || 0);
     if (limit > 0 && userId) {
       const day = new Date();
@@ -239,7 +241,9 @@ export async function handleArchiveFix({ job_id }, context) {
 
 export async function handleListFixes({ limit }, context) {
   try {
-    const jobs = await listJobs(context.getStore()?.userId, limit);
+    const userId = context.getStore()?.userId;
+    if (!userId) return fail('Authenticated user context is required.');
+    const jobs = await listJobs(userId, limit);
     const rows = jobs.map(
       (j) =>
         `- \`${j._id}\` ${new Date(j.createdAt).toISOString().slice(0, 16)} UTC — **${j.status}**${j.worktree && !j.cleanedAt ? ' [worktree retained]' : ''} — ${j.premise?.split('\n')[0]?.slice(0, 120) || ''}`,

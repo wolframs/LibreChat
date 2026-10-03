@@ -39,7 +39,14 @@ _ENTRY = re.compile(
     re.MULTILINE,
 )
 
-_cache = {"mtime": None, "rates": {}}
+_CACHE_ENTRY = re.compile(
+    r"^\s*'?(?P<key>[A-Za-z0-9._-]+)'?\s*:\s*\{\s*"
+    r"write:\s*(?P<write>[\d.]+)\s*,\s*"
+    r"read:\s*(?P<read>[\d.]+)\s*\}",
+    re.MULTILINE,
+)
+
+_cache = {"mtime": None, "rates": {}, "cache_rates": {}}
 _lock = threading.Lock()
 
 
@@ -62,24 +69,44 @@ def _parse(source):
     }
 
 
-def list_prices(path=None):
-    """{model id: (input, output)} in dollars per 1M tokens, cached by mtime."""
-    path = path or TX_TS
+def _parse_cache(source):
+    """Cache write/read rates from `cacheTokenValues`, by exact model id."""
+    start = source.find("export const cacheTokenValues")
+    if start < 0:
+        return {}
+    end = source.find("export const premiumTokenValues", start + 1)
+    block = source[start : end if end > start else len(source)]
+    return {
+        m.group("key"): (float(m.group("write")), float(m.group("read")))
+        for m in _CACHE_ENTRY.finditer(block)
+    }
+
+
+def _load(path):
+    """Return both rate tables, cached together by source mtime."""
     try:
         mtime = os.path.getmtime(path)
     except OSError:
-        return {}
+        return {}, {}
     with _lock:
         if _cache["mtime"] == mtime:
-            return _cache["rates"]
+            return _cache["rates"], _cache["cache_rates"]
         try:
             with open(path, encoding="utf-8") as fh:
-                rates = _parse(fh.read())
+                source = fh.read()
         except OSError:
-            return {}
-        _cache["mtime"] = mtime
-        _cache["rates"] = rates
-        return rates
+            return {}, {}
+        rates = _parse(source)
+        cache_rates = _parse_cache(source)
+        _cache.update({"mtime": mtime, "rates": rates, "cache_rates": cache_rates})
+        return rates, cache_rates
+
+
+def list_prices(path=None):
+    """{model id: (input, output)} in dollars per 1M tokens, cached by mtime."""
+    path = path or TX_TS
+    rates, _ = _load(path)
+    return rates
 
 
 def list_price(model, path=None):
@@ -87,3 +114,17 @@ def list_price(model, path=None):
     if not model:
         return None
     return list_prices(path).get(model)
+
+
+def cache_prices(path=None):
+    """{model id: (cache write, cache read)} in dollars per 1M tokens."""
+    path = path or TX_TS
+    _, rates = _load(path)
+    return rates
+
+
+def cache_price(model, path=None):
+    """(cache write, cache read) $/1M for `model`, or None if unknown."""
+    if not model:
+        return None
+    return cache_prices(path).get(model)

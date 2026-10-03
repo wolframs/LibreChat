@@ -1,7 +1,8 @@
 import React, { useState, useRef, useMemo, useEffect } from 'react';
-import { Skeleton } from '@librechat/client';
+import { Skeleton, useToastContext } from '@librechat/client';
 import { apiBaseUrl } from 'librechat-data-provider';
 import DialogImage from './DialogImage';
+import { useLocalize } from '~/hooks';
 import { cn } from '~/utils';
 
 /** Max display height for chat images (Tailwind JIT class) */
@@ -47,6 +48,8 @@ const Image = ({
 }) => {
   const [isOpen, setIsOpen] = useState(false);
   const triggerRef = useRef<HTMLButtonElement>(null);
+  const localize = useLocalize();
+  const { showToast } = useToastContext();
 
   const absoluteImageUrl = useMemo(() => {
     if (!imagePath) return imagePath;
@@ -65,12 +68,43 @@ const Image = ({
   }, [imagePath]);
 
   const downloadImage = async () => {
+    let response: Response;
     try {
-      const response = await fetch(absoluteImageUrl);
-      if (!response.ok) {
-        throw new Error(`Failed to fetch image: ${response.status}`);
+      response = await fetch(absoluteImageUrl);
+    } catch (error) {
+      console.error('Download failed:', error);
+      let target: URL;
+      try {
+        target = new URL(absoluteImageUrl, window.location.href);
+      } catch {
+        showToast({ status: 'error', message: localize('com_ui_download_error') });
+        return;
+      }
+      if (
+        target.origin === window.location.origin ||
+        (target.protocol !== 'http:' && target.protocol !== 'https:')
+      ) {
+        showToast({ status: 'error', message: localize('com_ui_download_error') });
+        return;
       }
 
+      const link = document.createElement('a');
+      link.href = absoluteImageUrl;
+      link.target = '_blank';
+      link.rel = 'noopener noreferrer';
+      document.body.appendChild(link);
+      link.click();
+      document.body.removeChild(link);
+      showToast({ status: 'error', message: localize('com_ui_image_download_opened') });
+      return;
+    }
+
+    if (!response.ok) {
+      showToast({ status: 'error', message: localize('com_ui_download_error') });
+      return;
+    }
+
+    try {
       const blob = await response.blob();
       const url = window.URL.createObjectURL(blob);
 
@@ -84,12 +118,7 @@ const Image = ({
       window.URL.revokeObjectURL(url);
     } catch (error) {
       console.error('Download failed:', error);
-      const link = document.createElement('a');
-      link.href = absoluteImageUrl;
-      link.download = altText || 'image.png';
-      document.body.appendChild(link);
-      link.click();
-      document.body.removeChild(link);
+      showToast({ status: 'error', message: localize('com_ui_download_error') });
     }
   };
 

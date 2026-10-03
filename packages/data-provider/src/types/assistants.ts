@@ -167,9 +167,15 @@ export type AgentModelParameters = {
   max_context_tokens: AgentParameterValue;
   max_output_tokens: AgentParameterValue;
   top_p: AgentParameterValue;
+  topP?: AgentParameterValue;
+  topK?: AgentParameterValue;
   frequency_penalty: AgentParameterValue;
   presence_penalty: AgentParameterValue;
+  resendFiles?: boolean;
+  fileTokenLimit?: AgentParameterValue;
   useResponsesApi?: boolean;
+  promptCache?: boolean;
+  promptCacheTtl?: '5m' | '1h';
 };
 
 export interface AgentBaseResource {

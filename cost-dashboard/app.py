@@ -22,11 +22,17 @@ import buyer
 import markets
 import reconcile
 import sidecars
-from listprices import list_prices
+from listprices import cache_prices, list_prices
 from routing import IS_ESTIMATED
 
 MICRO_PER_USD = 1_000_000
 ROOT_PARENT = "00000000-0000-0000-0000-000000000000"
+
+# Credits and other account adjustments live in the same collection as token
+# debits. They have a monetary value but are not model spend; allowing them into
+# the totals makes a top-up look like an expensive conversation and can even
+# produce negative-looking savings. Every spend query starts from this filter.
+SPEND_TRANSACTIONS = {"tokenType": {"$in": ["prompt", "completion"]}}
 
 #: Marketplace credit below which the dashboard stops treating the balance as
 #: background information and starts asking for a top-up. Around a dollar is a
@@ -98,7 +104,7 @@ DIRECT_COST = {
 def _cost_since(since):
     match = {"createdAt": {"$gte": since}} if since else {}
     pipeline = [
-        {"$match": match},
+        {"$match": {**SPEND_TRANSACTIONS, **match}},
         {"$group": {"_id": None, "micro": {"$sum": EFFECTIVE_MICRO}}},
     ]
     result = list(transactions.aggregate(pipeline))
@@ -108,7 +114,13 @@ def _cost_since(since):
 def _nominal_since(since):
     match = {"createdAt": {"$gte": since}} if since else {}
     pipeline = [
-        {"$match": {**match, "routedVia.baseURL": {"$exists": True}}},
+        {
+            "$match": {
+                **SPEND_TRANSACTIONS,
+                **match,
+                "routedVia.baseURL": {"$exists": True},
+            }
+        },
         {"$match": {"$expr": IS_ESTIMATED}},
         {"$group": {"_id": None, "micro": NOMINAL_COST}},
     ]
@@ -124,7 +136,12 @@ def _savings():
     really happened, at the prices really paid.
     """
     pipeline = [
-        {"$match": {"reconciled.costUSD": {"$exists": True}}},
+        {
+            "$match": {
+                **SPEND_TRANSACTIONS,
+                "reconciled.costUSD": {"$exists": True},
+            }
+        },
         {
             "$group": {
                 "_id": None,
@@ -154,22 +171,6 @@ def _savings():
     }
 
 
-# Anthropic prices a cache write at 1.25x and a cache read at 0.10x the model's
-# own input rate, and every entry in LibreChat's `cacheTokenValues` follows those
-# two ratios exactly. Surplus preserves them as well: a settled cache read came
-# back 12.4x below the write that created it (2026-08-21, claude-opus-4.8), which
-# is 1.25/0.10 to within rounding.
-#
-# That fixed shape is what makes the panel below possible without knowing any
-# model's rate. A prompt transaction's stored cost is `rate x actual_units`,
-# where `actual_units = input + 1.25*write + 0.10*read`. The same tokens with no
-# caching would have cost `rate x (input + write + read)`. The rate cancels, so
-# scaling the cost we already have by the ratio of those two sums gives the exact
-# counterfactual — for nominal and settled rows alike, since both are
-# proportional to the same unit count.
-CACHE_WRITE_MULTIPLIER = 1.25
-CACHE_READ_MULTIPLIER = 0.10
-
 # Stored negative, exactly like `rawAmount` — a debit against the account. Every
 # use below wants the magnitude, and a `$gt: 0` test against the raw field is
 # silently always false, which reads as "caching never happened" on data where it
@@ -177,17 +178,6 @@ CACHE_READ_MULTIPLIER = 0.10
 _W = {"$abs": {"$ifNull": ["$writeTokens", 0]}}
 _R = {"$abs": {"$ifNull": ["$readTokens", 0]}}
 _I = {"$abs": {"$ifNull": ["$inputTokens", 0]}}
-
-#: Billable units actually incurred, cache discounts applied.
-ACTUAL_UNITS = {
-    "$add": [
-        _I,
-        {"$multiply": [_W, CACHE_WRITE_MULTIPLIER]},
-        {"$multiply": [_R, CACHE_READ_MULTIPLIER]},
-    ]
-}
-#: The same tokens billed flat, as if no cache had been used.
-UNCACHED_UNITS = {"$add": [_I, _W, _R]}
 
 #: Only prompt transactions that actually went through the cache carry the
 #: breakdown; everything else has no `writeTokens`/`readTokens` at all and must
@@ -199,27 +189,16 @@ HAS_CACHE_TOKENS = {
     ]
 }
 
-#: What those rows would have cost with caching off. Guarded against a zero unit
-#: count, which cannot happen given the `$gt` above but would be a divide-by-zero
-#: if a future schema change ever let it through.
-UNCACHED_MICRO = {
-    "$cond": [
-        {"$gt": [ACTUAL_UNITS, 0]},
-        {"$multiply": [EFFECTIVE_MICRO, {"$divide": [UNCACHED_UNITS, ACTUAL_UNITS]}]},
-        EFFECTIVE_MICRO,
-    ]
-}
-
 
 def _cache_stats():
     """Did prompt caching pay for itself, per destination?
 
     The question this exists to answer is not "is the cache working" but "is it
-    earning the write premium". On a marketplace the seller is chosen per
+    earning the write cost". On a marketplace the seller is chosen per
     request, so a cache written on one turn is only read on the next if the same
-    seller answers; a run of misses bills every prefix at 1.25x and saves
-    nothing. That failure is silent — the requests all succeed — so it has to be
-    read off the money, which is what `saved` below is.
+    seller answers; a run of misses bills every prefix at its provider-specific
+    write rate and saves nothing. That failure is silent — the requests all
+    succeed — so it has to be read off the money, which is what `saved` below is.
 
     A negative `saved` means caching is costing more than it returns and should
     be turned off for that destination. Nothing else in the stack will say so.
@@ -233,37 +212,93 @@ def _cache_stats():
                         "_id": {
                             "name": {"$ifNull": ["$routedVia.endpoint", "Direct to provider"]},
                             "model": "$model",
+                            # New transactions persist the exact component rates
+                            # used by billing, including endpoint overrides. Keep
+                            # each rate set separate so changes over time do not
+                            # get averaged into a fictitious schedule.
+                            "rates": "$rateDetail",
                         },
                         "write": {"$sum": _W},
                         "read": {"$sum": _R},
                         "plain": {"$sum": _I},
                         "actual": {"$sum": EFFECTIVE_MICRO},
-                        "uncached": {"$sum": UNCACHED_MICRO},
                         "messages": {"$sum": 1},
                     }
                 },
             ]
-        )
+        ),
+        list_prices(),
+        cache_prices(),
     )
 
 
-def _fold_cache_rows(rows):
+def _valid_rate_set(rates):
+    return (
+        isinstance(rates, dict)
+        and all(isinstance(rates.get(k), (int, float)) and rates[k] >= 0
+                for k in ("input", "write", "read"))
+        and rates["input"] > 0
+    )
+
+
+def _uncached_micro(row, prompt_rates, cached_rates):
+    """Scale a row's effective cost to the no-cache token mix.
+
+    The transaction's persisted component rates are authoritative. Legacy rows
+    predate that schema field, so use the exact model entries from the same
+    source tables that billed them. If neither is available, return the actual
+    cost as a conservative zero-saving estimate and flag it as unpriced instead
+    of silently applying Anthropic ratios to another provider.
+    """
+    if "uncached" in row:
+        # Unit-test/compatibility input from before rates moved into this fold.
+        return row["uncached"], True
+
+    model = row.get("_id", {}).get("model")
+    rates = row.get("_id", {}).get("rates")
+    if not _valid_rate_set(rates):
+        prompt = prompt_rates.get(model)
+        cached = cached_rates.get(model)
+        if prompt and cached:
+            rates = {"input": prompt[0], "write": cached[0], "read": cached[1]}
+
+    if not _valid_rate_set(rates):
+        return row["actual"], False
+
+    actual_nominal = (
+        row["plain"] * rates["input"]
+        + row["write"] * rates["write"]
+        + row["read"] * rates["read"]
+    )
+    if actual_nominal <= 0:
+        return row["actual"], False
+    uncached_nominal = (row["plain"] + row["write"] + row["read"]) * rates["input"]
+    return row["actual"] * uncached_nominal / actual_nominal, True
+
+
+def _fold_cache_rows(rows, prompt_rates=None, cached_rates=None):
     """Collapse per-(destination, model) groups into per-destination rows.
 
     Split out from the query so the arithmetic that decides whether caching is
     winning can be tested without a database.
     """
     by_dest = {}
+    prompt_rates = prompt_rates or {}
+    cached_rates = cached_rates or {}
     for r in rows:
         dest = by_dest.setdefault(
             r["_id"]["name"],
             {"name": r["_id"]["name"], "write": 0, "read": 0, "plain": 0,
-             "actual": 0.0, "uncached": 0.0, "messages": 0, "models": []},
+             "actual": 0.0, "uncached": 0.0, "messages": 0,
+             "unpriced_messages": 0, "models": []},
         )
         for field in ("write", "read", "plain", "messages"):
             dest[field] += r[field]
         dest["actual"] += r["actual"] / MICRO_PER_USD
-        dest["uncached"] += r["uncached"] / MICRO_PER_USD
+        uncached, priced = _uncached_micro(r, prompt_rates, cached_rates)
+        dest["uncached"] += uncached / MICRO_PER_USD
+        if not priced:
+            dest["unpriced_messages"] += r["messages"]
         dest["models"].append(r["_id"]["model"])
 
     out = []
@@ -305,6 +340,7 @@ def _fold_cache_rows(rows):
         "actual": sum(d["actual"] for d in out),
         "uncached": sum(d["uncached"] for d in out),
         "messages": sum(d["messages"] for d in out),
+        "unpriced_messages": sum(d["unpriced_messages"] for d in out),
     }
 
 
@@ -351,6 +387,7 @@ def _by_routing():
     rows = list(
         transactions.aggregate(
             [
+                {"$match": SPEND_TRANSACTIONS},
                 {
                     "$group": {
                         "_id": {
@@ -388,6 +425,7 @@ def _by_model():
     rows = list(
         transactions.aggregate(
             [
+                {"$match": SPEND_TRANSACTIONS},
                 {
                     "$group": {
                         "_id": {"model": "$model", "type": "$tokenType"},
@@ -412,6 +450,7 @@ def _by_conversation():
     rows = list(
         transactions.aggregate(
             [
+                {"$match": SPEND_TRANSACTIONS},
                 {
                     "$group": {
                         "_id": {"cid": "$conversationId", "type": "$tokenType"},
@@ -454,6 +493,7 @@ TEMPLATE = r"""<!doctype html>
 <html lang="en">
 <head>
 <meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
 <title>LibreChat cost</title>
 <style>
 @font-face{font-family:"Aleo";font-style:normal;font-weight:300 700;font-display:swap;src:url(/fonts/aleo-normal.woff2) format("woff2")}
@@ -478,8 +518,8 @@ h1 { font-weight: 600; margin: 0 0 0.2em; font-size: 1.6em; }
 h2 { font-weight: 600; margin: 2em 0 0.4em; padding-bottom: 0.3em; border-bottom: 1px solid var(--border);
      font-size: 1.2em; color: var(--accent); }
 .subhead { color: var(--muted); font-size: 0.9em; }
-.summary { display: grid; grid-template-columns: repeat(4, 1fr); gap: 0.8em; margin: 1.5em 0; }
-.summary.five { grid-template-columns: repeat(5, 1fr); }
+.summary { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 0.8em; margin: 1.5em 0; }
+.summary.five { grid-template-columns: repeat(5, minmax(0, 1fr)); }
 /* Credit is money still to spend, not money spent — it reads down the same row
    as the totals, so it is tinted apart from them rather than sitting in a
    banner of its own while it is healthy. */
@@ -490,6 +530,9 @@ h2 { font-weight: 600; margin: 2em 0 0.4em; padding-bottom: 0.3em; border-bottom
 .card .value { font-size: 1.7em; margin-top: 0.25em; font-variant-numeric: tabular-nums; }
 .card .value.small { font-size: 1.3em; }
 table { border-collapse: collapse; width: 100%; margin-top: 0.4em; font-size: 0.95em; }
+.table-scroll { max-width: 100%; overflow-x: auto; overscroll-behavior-inline: contain; }
+.table-scroll:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+.table-scroll td.left:not(.title-cell) { max-width: 18rem; overflow-wrap: anywhere; }
 th, td { padding: 0.4em 0.7em; text-align: right; border-bottom: 1px solid var(--border); }
 th { background: var(--panel); color: var(--muted); font-weight: 500; font-size: 0.78em;
      text-transform: uppercase; letter-spacing: 0.05em; }
@@ -548,6 +591,12 @@ td.dest { white-space: nowrap; }
    direction never shifts the column. */
 th.sortable { cursor: pointer; user-select: none; -webkit-user-select: none; white-space: nowrap; }
 th.sortable:hover { color: var(--text); }
+th.sortable .sort-button { appearance: none; display: inline-flex; align-items: center;
+  gap: 0; border: 0; background: none; color: inherit; cursor: pointer;
+  font: inherit; text-transform: inherit; letter-spacing: inherit; padding: 0;
+  text-align: inherit; }
+th.sortable .sort-button:focus-visible { outline: 2px solid var(--accent);
+  outline-offset: 3px; border-radius: 2px; }
 th.sorted { color: var(--accent); }
 th .sort-hint { display: inline-block; margin-left: 0.45em; width: 0.9em;
                 color: var(--dim); font-size: 0.9em; }
@@ -566,6 +615,17 @@ footer { color: var(--dim); font-size: 0.78em; text-align: right; margin: 3em 0 
          font-family: "JetBrains Mono", ui-monospace, monospace; }
 a { color: var(--accent); text-decoration: none; }
 a:hover { text-decoration: underline; }
+@media (max-width: 800px) {
+  .table-scroll table { min-width: 700px; }
+  .summary, .summary.five { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .card .value { font-size: 1.45em; overflow-wrap: anywhere; }
+  .table-tools { flex-wrap: wrap; }
+  .table-filter { min-width: 0; width: 100%; }
+  .table-scroll td.dest { white-space: normal; }
+}
+@media (max-width: 340px) {
+  .summary, .summary.five { grid-template-columns: minmax(0, 1fr); }
+}
 </style>
 </head>
 <body>
@@ -684,6 +744,7 @@ negative for a destination, caching is losing money there.</div>
          placeholder="Filter destinations&hellip;" aria-label="Filter prompt caching rows">
   <span class="filter-count" data-count-for="table-cache" aria-live="polite"></span>
 </div>
+<div class="table-scroll" role="region" aria-label="Prompt caching table, scroll horizontally" tabindex="0">
 <table id="table-cache" data-sortable>
 <thead><tr>
   <th class="left">Destination</th>
@@ -732,12 +793,15 @@ negative for a destination, caching is losing money there.</div>
   </td>
 </tr></tfoot>
 </table>
+</div>
 <div class="subhead" style="margin-top:0.6em">Counts only the prompt transactions that carried a
 cache breakdown &mdash; a request whose prefix never reached the gateway's 4096-token cache floor is
-absent rather than counted as a miss. Slow chats are the case to watch: this fork sends a 5-minute
-TTL by default, so leaving a conversation idle longer than that guarantees the next turn rewrites
-the whole prefix at 1.25&times;. The cache pill in the chat header counts that window down and arms
-an hour on click.</div>
+absent rather than counted as a miss. The counterfactual uses each transaction's stored cache rates,
+falling back to the exact model entry in LibreChat's rate table for older records. Slow chats are the
+case to watch: once the TTL expires, the next request rewrites the prefix at that provider's write
+rate. The cache pill in the chat header counts the window down and arms an hour on supported direct
+endpoints.{% if cache.unpriced_messages %} {{ cache.unpriced_messages }} older message(s) had no exact
+rate; their spend is included, but conservatively contributes zero estimated savings.{% endif %}</div>
 {% endif %}
 
 <h2>By routing</h2>
@@ -747,6 +811,7 @@ an hour on click.</div>
          placeholder="Filter destinations&hellip;" aria-label="Filter routing rows">
   <span class="filter-count" data-count-for="table-routing" aria-live="polite"></span>
 </div>
+<div class="table-scroll" role="region" aria-label="Routing table, scroll horizontally" tabindex="0">
 <table id="table-routing" data-sortable>
 <thead><tr>
   <th class="left">Destination</th>
@@ -775,8 +840,12 @@ an hour on click.</div>
   </td>
 </tr>
 {% endfor %}
+{% if not by_routing %}
+<tr><td colspan="8" class="left muted">No routed usage recorded yet.</td></tr>
+{% endif %}
 </tbody>
 </table>
+</div>
 
 <h2>By model</h2>
 <div class="table-tools">
@@ -784,6 +853,7 @@ an hour on click.</div>
          placeholder="Filter models&hellip;" aria-label="Filter model rows">
   <span class="filter-count" data-count-for="table-model" aria-live="polite"></span>
 </div>
+<div class="table-scroll" role="region" aria-label="Model cost table, scroll horizontally" tabindex="0">
 <table id="table-model" data-sortable>
 <thead><tr>
   <th class="left">Model</th>
@@ -806,8 +876,12 @@ an hour on click.</div>
   <td class="num cost">${{ "%.4f"|format(m.total_cost) }}</td>
 </tr>
 {% endfor %}
+{% if not by_model %}
+<tr><td colspan="7" class="left muted">No model usage recorded yet.</td></tr>
+{% endif %}
 </tbody>
 </table>
+</div>
 
 {% if tools.rows %}
 <h2>Tool sidecars</h2>
@@ -818,8 +892,11 @@ an hour on click.</div>
    figure in the response (OpenRouter), `settled` the marketplace's charge from
    its hourly export (Surplus, via reconcile.py), `list` the catalogue price of
    a Surplus call the export has not been matched to yet — about 3x what it will
-   settle at, so a `list` figure is an over-estimate, never an under-estimate. #}
-<div class="subhead">Spend by the MCP sidecars on their own server-wide keys &mdash; ${{ "%.4f"|format(tools.all) }} of the all-time total above, none of it attributable to a conversation. <span class="mono">imager</span> rows are one image each; <span class="mono">audio-ears</span> rows one listen.{% if tools.totals.list_calls > 0 %} {{ tools.totals.list_calls }} call{% if tools.totals.list_calls != 1 %}s{% endif %} still at catalogue list price, awaiting the marketplace's hourly export.{% endif %}</div>
+   settle at, so a `list` figure is an over-estimate, never an under-estimate.
+   `unknown` is an incomplete audio call: only known incurred chunk costs are
+   included; its budget reservation is deliberately not reported as spend. #}
+<div class="subhead">Spend by the MCP sidecars on their own server-wide keys &mdash; ${{ "%.4f"|format(tools.all) }} of the all-time total above, none of it attributable to a conversation. <span class="mono">imager</span> rows are one image each; <span class="mono">audio-ears</span> rows one listen.{% if tools.totals.list_calls > 0 %} {{ tools.totals.list_calls }} call{% if tools.totals.list_calls != 1 %}s{% endif %} still at catalogue list price, awaiting the marketplace's hourly export.{% endif %}{% if tools.totals.unknown_calls > 0 %} {{ tools.totals.unknown_calls }} audio call{% if tools.totals.unknown_calls != 1 %}s have{% else %} has{% endif %} incomplete provider cost data; totals include only known incurred chunk costs, never the conservative budget reservation.{% endif %}</div>
+<div class="table-scroll" role="region" aria-label="Tool sidecar table, scroll horizontally" tabindex="0">
 <table id="table-tools" data-sortable>
 <thead><tr>
   <th class="left">Tool</th>
@@ -843,6 +920,7 @@ an hour on click.</div>
     {% if r.has_reported %}<span class="tag ok">reported</span>{% endif %}
     {% if r.has_settled %}<span class="tag settled">settled{% if r.ambiguous %} ({{ r.ambiguous }} ambiguous){% endif %}</span>{% endif %}
     {% if r.has_list %}<span class="tag" title="{{ r.list_calls }} call(s) priced at the catalogue list rate until the marketplace's export is matched">list &times;{{ r.list_calls }}</span>{% endif %}
+    {% if r.has_unknown %}<span class="tag" title="{{ r.unknown_calls }} audio call(s) have incomplete provider cost data; displayed spend includes only known incurred chunk costs, not reservedCost">unknown &times;{{ r.unknown_calls }}</span>{% endif %}
   </td>
 </tr>
 {% endfor %}
@@ -855,6 +933,7 @@ an hour on click.</div>
   <td></td>
 </tr></tfoot>
 </table>
+</div>
 {% endif %}
 
 <h2>By conversation</h2>
@@ -864,6 +943,7 @@ an hour on click.</div>
          placeholder="Filter conversations&hellip;" aria-label="Filter conversation rows">
   <span class="filter-count" data-count-for="table-conv" aria-live="polite"></span>
 </div>
+<div class="table-scroll" role="region" aria-label="Conversation cost table, scroll horizontally" tabindex="0">
 <table id="table-conv" data-sortable>
 <thead><tr>
   <th class="left">Title</th>
@@ -890,9 +970,13 @@ an hour on click.</div>
   <td class="left dim mono">{{ c.updated }}</td>
 </tr>
 {% endfor %}
+{% if not by_conv %}
+<tr><td colspan="9" class="left muted">No conversation usage recorded yet.</td></tr>
+{% endif %}
 </tbody>
 </table>
 
+</div>
 <footer>Rendered {{ now }} · {{ tx_count }} transactions across {{ by_conv|length }} conversations{% if tools.totals.calls %} · {{ tools.totals.calls }} sidecar calls{% endif %}</footer>
 
 <script>
@@ -985,16 +1069,20 @@ an hour on click.</div>
       th.classList.add("sortable");
       th.setAttribute("data-col", String(i));
       th.setAttribute("aria-sort", "none");
-      th.setAttribute("title", "Click to sort");
       var hint = document.createElement("span");
       hint.className = "sort-hint";
       hint.setAttribute("aria-hidden", "true");
       hint.textContent = "\u2195";
+      var button = document.createElement("button");
+      button.type = "button";
+      button.className = "sort-button";
+      button.setAttribute("aria-label", "Sort by " + (th.textContent || "").trim());
       var label = document.createElement("span");
       label.className = "th-label";
       while (th.firstChild) label.appendChild(th.firstChild);
-      th.appendChild(label);
-      th.appendChild(hint);
+      button.appendChild(label);
+      button.appendChild(hint);
+      th.appendChild(button);
     });
 
     function setHints(activeCol, dir) {
@@ -1009,7 +1097,8 @@ an hour on click.</div>
     }
 
     head.addEventListener("click", function (ev) {
-      var th = ev.target.closest ? ev.target.closest("th") : null;
+      var button = ev.target.closest ? ev.target.closest("button.sort-button") : null;
+      var th = button ? button.closest("th") : null;
       if (!th || ths.indexOf(th) === -1) return;
       var col = parseInt(th.getAttribute("data-col"), 10);
       var dir;
@@ -1313,7 +1402,7 @@ def _conv_msg_counts():
 
 EXPORT_TEMPLATE = """<!doctype html>
 <html lang="en"><head>
-<meta charset="utf-8"><title>LibreChat export</title>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>LibreChat export</title>
 <style>
 @font-face{font-family:"Aleo";font-style:normal;font-weight:300 700;font-display:swap;src:url(/fonts/aleo-normal.woff2) format("woff2")}
 @font-face{font-family:"Aleo";font-style:italic;font-weight:300 700;font-display:swap;src:url(/fonts/aleo-italic.woff2) format("woff2")}
@@ -1333,6 +1422,9 @@ h2 { font-weight:600; margin:2em 0 .4em; padding-bottom:.3em; border-bottom:1px 
         padding:.9em 1.1em; margin:1em 0 1.5em; display:flex; gap:.8em; flex-wrap:wrap; align-items:center; }
 .bulk strong { color:var(--accent); margin-right:.5em; }
 table { border-collapse:collapse; width:100%; margin-top:.4em; font-size:.95em; }
+.table-scroll { max-width:100%; overflow-x:auto; overscroll-behavior-inline:contain; }
+.table-scroll:focus-visible { outline:2px solid var(--accent); outline-offset:-2px; }
+.table-scroll td:not(.title-cell) { max-width:18rem; overflow-wrap:anywhere; }
 th, td { padding:.4em .7em; text-align:left; border-bottom:1px solid var(--border); }
 th { background:var(--panel); color:var(--muted); font-weight:500; font-size:.78em;
      text-transform:uppercase; letter-spacing:.05em; }
@@ -1344,6 +1436,7 @@ tr:hover td { background:var(--hover); }
 .btn { color:var(--accent); text-decoration:none; padding:.15em .55em; border:1px solid var(--border);
        border-radius:3px; font-size:.82em; font-family:"JetBrains Mono",ui-monospace,monospace; }
 .btn:hover { background:var(--hover); }
+@media (max-width:800px) { .table-scroll table { min-width:700px; } }
 .branchy { color:var(--accent); font-weight:500; }
 footer { color:var(--dim); font-size:.78em; text-align:right; margin:3em 0 1em;
          font-family:"JetBrains Mono",ui-monospace,monospace; }
@@ -1361,6 +1454,7 @@ footer { color:var(--dim); font-size:.78em; text-align:right; margin:3em 0 1em;
 </div>
 
 <h2>Conversations ({{ convs|length }})</h2>
+<div class="table-scroll" role="region" aria-label="Conversation export table, scroll horizontally" tabindex="0">
 <table>
 <thead><tr>
   <th>Title</th>
@@ -1381,15 +1475,19 @@ footer { color:var(--dim); font-size:.78em; text-align:right; margin:3em 0 1em;
   <td class="num">{{ c.n }}</td>
   <td class="dim mono">{{ c.updated }}</td>
   <td>
-    <a class="btn" href="/export/{{ c.cid }}.md">md</a>
-    <a class="btn" href="/export/{{ c.cid }}.jsonl">jsonl</a>
-    {% if c.branches > 1 %}<a class="btn" href="/export/{{ c.cid }}.zip">zip</a>{% endif %}
+    <a class="btn" href="/export/{{ c.cid }}.md" aria-label="Download {{ c.title }} as Markdown">md</a>
+    <a class="btn" href="/export/{{ c.cid }}.jsonl" aria-label="Download {{ c.title }} as JSONL">jsonl</a>
+    {% if c.branches > 1 %}<a class="btn" href="/export/{{ c.cid }}.zip" aria-label="Download {{ c.title }} branches as ZIP">zip</a>{% endif %}
   </td>
 </tr>
 {% endfor %}
+{% if not convs %}
+<tr><td colspan="7" class="muted">No conversations available to export yet.</td></tr>
+{% endif %}
 </tbody>
 </table>
 
+</div>
 <footer>Rendered {{ now }} · {{ convs|length }} conversations</footer>
 
 </body></html>

@@ -64,8 +64,11 @@ const systemTools = {
 const MAX_SEARCH_LEN = 100;
 const escapeRegex = (str = '') => str.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 const getSafeModelParameters = (modelParameters) => {
-  const { useResponsesApi } = modelParameters ?? {};
-  return typeof useResponsesApi === 'boolean' ? { useResponsesApi } : {};
+  const { promptCache, useResponsesApi } = modelParameters ?? {};
+  return {
+    ...(typeof promptCache === 'boolean' ? { promptCache } : {}),
+    ...(typeof useResponsesApi === 'boolean' ? { useResponsesApi } : {}),
+  };
 };
 const hasEditBit = (permission) => (permission & PermissionBits.EDIT) === PermissionBits.EDIT;
 

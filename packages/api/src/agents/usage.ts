@@ -581,6 +581,9 @@ export interface RecordUsageParams {
    * callers (responses.js / openai.js) omit it and use `endpointTokenConfig`.
    */
   resolveEndpointTokenConfig?: (usage: UsageMetadata) => EndpointTokenConfig | undefined;
+  /** Per-usage route resolver for mixed-provider graphs. A known direct agent
+   *  may intentionally resolve to undefined. */
+  resolveRoutedVia?: (usage: UsageMetadata) => TxMetadata['routedVia'];
   /**
    * Token counts read off the raw streamed body for gateways that report them
    * in a frame the parser does not read. Consumed by {@link repairStreamUsage}
@@ -588,9 +591,8 @@ export interface RecordUsageParams {
    */
   observedStreamUsage?: ObservedStreamUsage[];
   /**
-   * Destination that served the request, from `req.routedVia`.
-   * Applies to every usage item in the batch: they all went to the same base
-   * URL, since routing is resolved once per request at initialization.
+   * Primary destination fallback. Multi-agent callers should also provide
+   * `resolveRoutedVia`, because each producing agent may use another endpoint.
    */
   routedVia?: TxMetadata['routedVia'];
 }
@@ -621,6 +623,7 @@ export async function recordCollectedUsage(
     collectedUsage,
     endpointTokenConfig,
     resolveEndpointTokenConfig,
+    resolveRoutedVia,
     observedStreamUsage,
     routedVia,
     context = 'message',
@@ -687,6 +690,7 @@ export async function recordCollectedUsage(
         total_output_tokens += completion;
       }
 
+      const usageRoutedVia = resolveRoutedVia ? resolveRoutedVia(usage) : routedVia;
       const txMetadata: TxMetadata = {
         user,
         balance,
@@ -701,7 +705,7 @@ export async function recordCollectedUsage(
           : endpointTokenConfig,
         context: usageContext,
         model: usage.model ?? model,
-        ...(routedVia && { routedVia }),
+        ...(usageRoutedVia && { routedVia: usageRoutedVia }),
       };
 
       if (useBulk) {

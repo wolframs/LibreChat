@@ -1,10 +1,11 @@
 import { memo, useEffect, useMemo, useState } from 'react';
 import { useRecoilState } from 'recoil';
-import { EModelEndpoint, Constants } from 'librechat-data-provider';
+import { EModelEndpoint, Constants, ContentTypes, isAgentsEndpoint } from 'librechat-data-provider';
 import type { TMessage } from 'librechat-data-provider';
-import { useGetMessagesByConvoId, useGetEndpointsQuery } from '~/data-provider';
+import { useGetAgentByIdQuery, useGetEndpointsQuery } from '~/data-provider';
 import { useChatContext } from '~/Providers';
 import { useLocalize } from '~/hooks';
+import { useLatestMessage } from '~/hooks/Messages/useLatestMessage';
 import { useMarketplaceEndpoints } from '~/hooks/Chat';
 import { cn } from '~/utils';
 import store from '~/store';
@@ -13,6 +14,12 @@ const TTL_MS: Record<string, number> = {
   '5m': 5 * 60 * 1000,
   '1h': 60 * 60 * 1000,
 };
+
+export const isCacheTTLAnchor = (message: TMessage): boolean =>
+  message.isCreatedByUser !== true &&
+  message.error !== true &&
+  (message.cacheTTL === '5m' || message.cacheTTL === '1h') &&
+  !message.content?.some((part) => part.type === ContentTypes.ERROR);
 
 /** Formats remaining ms: "59m" style above 10 minutes, else "mm:ss". */
 function formatRemaining(ms: number): string {
@@ -26,30 +33,6 @@ function formatRemaining(ms: number): string {
 }
 
 /**
- * Newest message — anchors the cache window. Prefers the latest timestamp,
- * but a message with NO timestamp is treated as newest: a just-streamed
- * response hasn't been refetched from the DB yet and briefly lacks
- * `createdAt`, and skipping it would anchor the countdown on the previous
- * turn's TTL (its arrival time is substituted for the timestamp downstream).
- */
-function getAnchorMessage(messages: TMessage[] | undefined): TMessage | undefined {
-  if (!messages || messages.length === 0) {
-    return undefined;
-  }
-  let anchor: TMessage | undefined;
-  let anchorTime = -Infinity;
-  for (const message of messages) {
-    const raw = message.createdAt ?? message.updatedAt;
-    const time = raw != null ? new Date(raw).getTime() : Infinity;
-    if (!Number.isNaN(time) && time >= anchorTime) {
-      anchorTime = time;
-      anchor = message;
-    }
-  }
-  return anchor;
-}
-
-/**
  * Subtle overlay pill fixed above the font-switcher "Aa" button. Shows a live
  * countdown of the current Anthropic prompt-cache TTL for the active chat
  * (refreshed on every API call), and one-shot arms a 1-hour TTL for the next
@@ -58,8 +41,8 @@ function getAnchorMessage(messages: TMessage[] | undefined): TMessage | undefine
  *
  * The countdown reflects the TTL the LAST prompt was ACTUALLY sent with, read
  * back from the response message's persisted `cacheTTL` field, never the
- * current toggle state. Messages predating that field fall back to '5m' (the
- * pre-native-TTL default); new turns always carry the recorded value.
+ * current toggle state. Messages predating that field have unknown TTL and
+ * cannot start a countdown; user/error tails retain the last valid ancestor.
  */
 function CacheTTLPill() {
   const localize = useLocalize();
@@ -68,9 +51,12 @@ function CacheTTLPill() {
   const armKey = conversationId || Constants.NEW_CONVO;
 
   const [armed, setArmed] = useRecoilState(store.armedCacheTTLByConvoId(armKey));
+  const [showReadoutHint, setShowReadoutHint] = useState(false);
 
   const { data: endpointsConfig } = useGetEndpointsQuery();
-  const endpoint = conversation?.endpoint ?? '';
+  const agentId = isAgentsEndpoint(conversation?.endpoint) ? conversation?.agent_id : null;
+  const { data: agent } = useGetAgentByIdQuery(agentId);
+  const endpoint = agent?.provider ?? conversation?.endpoint ?? '';
   /**
    * Anthropic's own endpoint, or a custom row declaring `provider: anthropic` —
    * the latter is a gateway or marketplace reached through the same native
@@ -82,7 +68,8 @@ function CacheTTLPill() {
     endpoint === EModelEndpoint.anthropic ||
     endpointsConfig?.[endpoint]?.provider === EModelEndpoint.anthropic;
   /** `promptCache` defaults to true when unset (anthropicSettings). */
-  const cacheEnabled = conversation?.promptCache !== false;
+  const cacheEnabled =
+    (agent?.model_parameters?.promptCache ?? conversation?.promptCache) !== false;
   const visible = isAnthropic && cacheEnabled;
   /**
    * Whether arming 1h is worth offering. A gateway may rewrite `cache_control`
@@ -105,11 +92,10 @@ function CacheTTLPill() {
    */
   const isMarketplace = useMarketplaceEndpoints().includes(endpoint);
 
-  const { data: messages } = useGetMessagesByConvoId(conversationId, {
-    enabled: visible && !!conversationId,
-  });
-
-  const anchor = useMemo(() => getAnchorMessage(messages), [messages]);
+  /** Follow the branch currently selected in the message UI. A chronological
+   *  max over every cached message can select a newer sibling branch and show
+   *  its TTL while the user is reading an older branch. */
+  const anchor = useLatestMessage(0, conversationId, isCacheTTLAnchor);
   const anchorId = anchor?.messageId;
   /** Arrival-time stand-in for anchors that haven't been persisted yet. */
   const [seenAt, setSeenAt] = useState(() => Date.now());
@@ -122,9 +108,9 @@ function CacheTTLPill() {
     }
     const raw = anchor.createdAt ?? anchor.updatedAt;
     const time = raw != null ? new Date(raw).getTime() : NaN;
-    return Number.isNaN(time) ? seenAt : time;
+    return Number.isFinite(time) && time <= Date.now() ? time : seenAt;
   }, [anchor, seenAt]);
-  const lastTTL: '5m' | '1h' = anchor?.cacheTTL === '1h' ? '1h' : '5m';
+  const lastTTL = anchor?.cacheTTL;
 
   /** Re-render each second so the countdown ticks. */
   const [now, setNow] = useState(() => Date.now());
@@ -141,7 +127,7 @@ function CacheTTLPill() {
   }
 
   const remaining =
-    anchorTime != null ? anchorTime + (TTL_MS[lastTTL] ?? TTL_MS['5m']) - now : null;
+    anchorTime != null && lastTTL != null ? anchorTime + TTL_MS[lastTTL] - now : null;
   const expired = remaining != null && remaining <= 0;
 
   /**
@@ -153,7 +139,10 @@ function CacheTTLPill() {
     if (!canExtend) {
       return;
     }
-    setArmed((prev) => (prev == null ? '1h' : prev === '1h' ? '5m' : null));
+    setArmed((prev) => {
+      if (prev == null) return '1h';
+      return prev === '1h' ? '5m' : null;
+    });
   };
 
   /**
@@ -190,45 +179,80 @@ function CacheTTLPill() {
     title = `${title} · ${localize('com_ui_cache_ttl_marketplace')}`;
   }
 
+  let pillClass = cn(
+    'bg-surface-secondary border-border-light text-text-secondary',
+    canExtend && 'hover:bg-surface-tertiary',
+  );
+  let dotClass = 'bg-emerald-500';
+  if (effectiveArmed === '1h') {
+    pillClass = 'border-amber-400/60 bg-amber-400/20 text-amber-700 dark:text-amber-300';
+    dotClass = 'bg-amber-500';
+  } else if (effectiveArmed === '5m') {
+    pillClass = 'border-sky-400/60 bg-sky-400/20 text-sky-700 dark:text-sky-300';
+    dotClass = 'bg-sky-500';
+  } else if (expired || remaining == null) {
+    pillClass = 'bg-surface-secondary border-border-light text-text-secondary';
+    dotClass = 'bg-text-secondary';
+  }
+
+  const className = cn(
+    'fixed bottom-[156px] right-[10px] flex min-h-8 items-center gap-1 rounded-full border px-2 py-1 text-xs',
+    'shadow-sm backdrop-blur transition-colors md:bottom-[50px] md:right-[14px]',
+    'focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring-primary',
+    !canExtend && 'cursor-default',
+    pillClass,
+  );
+  const content = (
+    <>
+      <span aria-hidden="true" className={cn('inline-block h-1.5 w-1.5 rounded-full', dotClass)} />
+      <span className="tabular-nums">{label}</span>
+    </>
+  );
+
+  if (!canExtend) {
+    return (
+      <div
+        role="timer"
+        aria-live="off"
+        tabIndex={0}
+        title={title}
+        aria-label={title}
+        onTouchStart={() => setShowReadoutHint((previous) => !previous)}
+        onBlur={() => setShowReadoutHint(false)}
+        onKeyDown={(event) => {
+          if (event.key === 'Escape') {
+            event.currentTarget.blur();
+          }
+        }}
+        style={{ zIndex: 2147482000 }}
+        className={cn('group', className)}
+      >
+        {content}
+        <span
+          aria-hidden="true"
+          className={cn(
+            'absolute bottom-full right-0 mb-2 hidden w-[min(236px,calc(100vw-20px))] rounded-lg border border-border-light bg-surface-primary p-2 text-left text-xs leading-snug text-text-primary shadow-lg',
+            'group-hover:block group-focus:block',
+            showReadoutHint && 'block',
+          )}
+        >
+          {title}
+        </span>
+      </div>
+    );
+  }
+
   return (
     <button
       type="button"
       onClick={onToggle}
       title={title}
       aria-label={title}
-      aria-pressed={canExtend ? effectiveArmed != null : undefined}
-      aria-disabled={canExtend ? undefined : true}
+      aria-pressed={effectiveArmed != null}
       style={{ zIndex: 2147482000 }}
-      className={cn(
-        'fixed bottom-[156px] right-[10px] flex items-center gap-1 rounded-full border px-2 py-1 text-xs',
-        'shadow-sm backdrop-blur transition-colors md:bottom-[50px] md:right-[14px]',
-        !canExtend && 'cursor-default',
-        effectiveArmed === '1h'
-          ? 'border-amber-400/60 bg-amber-400/20 text-amber-700 dark:text-amber-300'
-          : effectiveArmed === '5m'
-            ? 'border-sky-400/60 bg-sky-400/20 text-sky-700 dark:text-sky-300'
-            : expired || remaining == null
-              ? 'bg-surface-secondary/70 border-border-light text-text-secondary opacity-60 hover:opacity-100'
-              : cn(
-                  'bg-surface-secondary/70 border-border-light text-text-secondary',
-                  canExtend && 'hover:bg-surface-tertiary',
-                ),
-      )}
+      className={className}
     >
-      <span
-        aria-hidden="true"
-        className={cn(
-          'inline-block h-1.5 w-1.5 rounded-full',
-          effectiveArmed === '1h'
-            ? 'bg-amber-500'
-            : effectiveArmed === '5m'
-              ? 'bg-sky-500'
-              : expired || remaining == null
-                ? 'bg-text-secondary'
-                : 'bg-emerald-500',
-        )}
-      />
-      <span className="tabular-nums">{label}</span>
+      {content}
     </button>
   );
 }

@@ -48,6 +48,10 @@ jest.mock('~/server/services/Config', () => ({
   getAppConfig: jest.fn(),
 }));
 
+jest.mock('~/server/middleware/roles/capabilities', () => ({
+  requireCapability: jest.fn(() => (req, res, next) => next()),
+}));
+
 jest.mock('~/server/middleware', () => {
   const pass = (req, res, next) => next();
   return {
@@ -65,6 +69,8 @@ jest.mock('~/server/middleware', () => {
     resetPasswordSubmissionLimiter: (...args) => mockResetPasswordSubmissionLimiter(...args),
     validatePasswordReset: (...args) => mockValidatePasswordReset(...args),
     requireJwtAuth: pass,
+    requireBrowserSessionAuth: pass,
+    requireBrowserAuth: pass,
   };
 });
 

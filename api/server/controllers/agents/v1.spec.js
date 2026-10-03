@@ -564,6 +564,7 @@ describe('Agent Controllers - Mass Assignment Protection', () => {
         author: mockReq.user.id,
         model_parameters: {
           useResponsesApi: true,
+          promptCache: false,
           temperature: 0.7,
           apiKey: 'secret-value',
         },
@@ -575,7 +576,7 @@ describe('Agent Controllers - Mass Assignment Protection', () => {
 
       expect(mockRes.status).toHaveBeenCalledWith(200);
       const response = mockRes.json.mock.calls[0][0];
-      expect(response.model_parameters).toEqual({ useResponsesApi: true });
+      expect(response.model_parameters).toEqual({ promptCache: false, useResponsesApi: true });
       expect(response.model_parameters.temperature).toBeUndefined();
       expect(response.model_parameters.apiKey).toBeUndefined();
     });

@@ -11,6 +11,10 @@ of what the table shows.
 import sidecars
 
 
+def test_canceled_pre_dispatch_reservations_are_not_counted_as_listens():
+    assert sidecars.audio_pipeline()[0]["$match"]["status"] == {"$ne": "canceled"}
+
+
 def image_group(model, provider, calls, usd, settled_calls=0, settled_usd=0.0,
                 settled_list_usd=0.0, reported_calls=0, ambiguous=0):
     return {
@@ -25,12 +29,22 @@ def image_group(model, provider, calls, usd, settled_calls=0, settled_usd=0.0,
     }
 
 
-def audio_group(model, calls, usd, reported_calls, audio_tokens=0):
+def audio_group(
+    model,
+    calls,
+    usd,
+    reported_calls,
+    audio_tokens=0,
+    unknown_calls=0,
+    known_partial_usd=0.0,
+):
     return {
         "_id": {"model": model, "provider": "openrouter"},
         "calls": calls,
         "usd": usd,
         "reported_calls": reported_calls,
+        "unknown_calls": unknown_calls,
+        "known_partial_usd": known_partial_usd,
         "audio_tokens": audio_tokens,
     }
 
@@ -59,6 +73,24 @@ class TestFoldRows:
         assert r["extra"] == "6,206 audio tokens"
         assert r["has_reported"] and not r["has_list"]
 
+    def test_audio_reservation_is_unknown_not_reported_or_list_priced(self):
+        rows = sidecars.fold_rows(
+            [],
+            [audio_group("pending", 1, 0.004, 0, unknown_calls=1, known_partial_usd=0.004)],
+        )
+        (row,) = rows
+        assert row["usd"] == 0.004
+        assert row["known_partial_usd"] == 0.004
+        assert row["has_unknown"] and row["unknown_calls"] == 1
+        assert not row["has_reported"] and not row["has_list"]
+        assert row["list_calls"] == 0
+
+    def test_numeric_zero_audio_cost_remains_reported(self):
+        (row,) = sidecars.fold_rows([], [audio_group("free", 1, 0, 1)])
+        assert row["usd"] == 0
+        assert row["has_reported"] and not row["has_unknown"]
+        assert not row["has_list"]
+
     def test_rows_are_sorted_dearest_first_across_tools(self):
         rows = sidecars.fold_rows(
             [image_group("venice-sd35", "surplus", 1, 0.0035, settled_calls=1, settled_usd=0.0035, settled_list_usd=0.01),
@@ -78,6 +110,7 @@ class TestFoldRows:
         assert abs(t["usd"] - (0.0135 + 0.03 + 0.015792)) < 1e-9
         assert t["calls"] == 6
         assert t["list_calls"] == 1
+        assert t["unknown_calls"] == 0
         assert t["ambiguous"] == 1
 
     def test_empty_ledgers_render_nothing(self):
@@ -95,6 +128,18 @@ class TestPipelineShape:
         assert expr["$ifNull"][1]["$ifNull"][0] == "$cost"
         assert expr["$ifNull"][1]["$ifNull"][1]["$ifNull"] == ["$listCost", 0]
 
+    def test_missing_and_null_costs_are_unknown_but_numeric_zero_is_reported(self):
+        # Mongo `$isNumber` is false for both a missing field and explicit null,
+        # and true for numeric zero. A type!=missing check gets null wrong.
+        assert sidecars.HAS_REPORTED == {"$isNumber": "$cost"}
+        assert sidecars.AUDIO_EFFECTIVE_USD == {
+            "$cond": [
+                {"$isNumber": "$cost"},
+                "$cost",
+                {"$ifNull": ["$knownPartialCost", 0]},
+            ]
+        }
+
     def test_legacy_rows_get_a_provider_from_the_model_id(self):
         """Rows before 2026-09-08 have no `provider`; a slash means OpenRouter."""
         cond = sidecars.IMAGE_PROVIDER["$ifNull"][1]["$cond"]
@@ -105,5 +150,7 @@ class TestPipelineShape:
         from datetime import datetime, timezone
         since = datetime(2026, 9, 1, tzinfo=timezone.utc)
         assert sidecars.image_pipeline(since)[0] == {"$match": {"createdAt": {"$gte": since}}}
-        assert sidecars.audio_pipeline(since)[0] == {"$match": {"createdAt": {"$gte": since}}}
+        assert sidecars.audio_pipeline(since)[0] == {
+            "$match": {"createdAt": {"$gte": since}, "status": {"$ne": "canceled"}}
+        }
         assert sidecars.image_pipeline()[0] == {"$match": {}}

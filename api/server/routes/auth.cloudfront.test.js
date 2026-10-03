@@ -45,6 +45,10 @@ jest.mock('~/server/services/Config', () => ({
   getAppConfig: jest.fn(),
 }));
 
+jest.mock('~/server/middleware/roles/capabilities', () => ({
+  requireCapability: jest.fn(() => (req, res, next) => next()),
+}));
+
 jest.mock('~/server/middleware', () => {
   const pass = (req, res, next) => next();
   return {
@@ -61,6 +65,8 @@ jest.mock('~/server/middleware', () => {
     resetPasswordLimiter: pass,
     resetPasswordSubmissionLimiter: pass,
     validatePasswordReset: pass,
+    requireBrowserSessionAuth: pass,
+    requireBrowserAuth: pass,
     requireJwtAuth: jest.fn((req, res, next) => {
       if (req.headers.authorization !== 'Bearer ok') {
         return res.status(401).json({ message: 'Unauthorized' });

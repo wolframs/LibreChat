@@ -242,6 +242,9 @@ export type InitializedAgent = Agent & {
   baseContextTokens?: number;
   useLegacyContent: boolean;
   resendFiles: boolean;
+  /** Destination resolved while this specific agent initialized. Kept off the
+   *  shared request so connected-agent initialization cannot overwrite it. */
+  routedVia?: ServerRequest['routedVia'];
   tool_resources?: AgentToolResources;
   userMCPAuthMap?: Record<string, Record<string, string>>;
   /** Tool map for ToolNode to use when executing tools (required for PTC) */
@@ -1003,12 +1006,27 @@ export async function initializeAgent(
     model: agent.model,
   };
 
-  const options: InitializeResultBase = await getOptions({
-    req,
-    endpoint: provider,
-    model_parameters: finalModelOptions,
-    db,
-  });
+  /** Endpoint initializers historically stamp one shared `req.routedVia`.
+   *  Connected agents initialize sequentially on that same request, so the last
+   *  child used to overwrite the primary and every usage record inherited the
+   *  same destination. Isolate the slot around this initializer, capture its
+   *  result on the agent, then restore the primary request route for the rest of
+   *  the controller lifecycle. */
+  const previousRoute = req.routedVia;
+  req.routedVia = undefined;
+  let routedVia: ServerRequest['routedVia'] = undefined;
+  let options: InitializeResultBase;
+  try {
+    options = await getOptions({
+      req,
+      endpoint: provider,
+      model_parameters: finalModelOptions,
+      db,
+    });
+    routedVia = req.routedVia;
+  } finally {
+    req.routedVia = isInitialAgent ? req.routedVia : previousRoute;
+  }
 
   const llmConfig = options.llmConfig as Record<string, unknown>;
   const tokensModel =
@@ -1282,6 +1300,7 @@ export async function initializeAgent(
   const initializedAgent: InitializedAgent = {
     ...agent,
     resendFiles,
+    routedVia,
     toolRegistry,
     mcpAvailableTools,
     requestScopedConnections,

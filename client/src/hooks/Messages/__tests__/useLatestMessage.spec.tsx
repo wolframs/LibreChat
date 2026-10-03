@@ -4,7 +4,11 @@ import { RecoilRoot, type MutableSnapshot } from 'recoil';
 import { MemoryRouter, Route, Routes } from 'react-router-dom';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { QueryKeys, type TConversation, type TMessage } from 'librechat-data-provider';
-import { getBranchSiblingIndexesForTarget, getMessageBranchSiblingParentIds } from '~/utils';
+import {
+  getBranchSiblingIndexesForTarget,
+  getMessageBranchSiblingParentIds,
+  selectActiveBranchTail,
+} from '~/utils';
 import { useLatestMessage, useLatestMessageId } from '~/hooks/Messages/useLatestMessage';
 import store from '~/store';
 
@@ -252,6 +256,43 @@ describe('getMessageBranchSiblingParentIds', () => {
         conversation.conversationId,
       ),
     ).toEqual([userMessage.messageId]);
+  });
+});
+
+describe('selectActiveBranchTail predicate', () => {
+  it('preserves the newest matching ancestor when later branch messages do not match', () => {
+    const cachedAssistant = { ...assistantMessage, cacheTTL: '1h' as const };
+    const nextUser = {
+      ...userMessage,
+      messageId: 'next-user',
+      parentMessageId: cachedAssistant.messageId,
+    };
+    const errorAssistant = {
+      ...assistantMessage,
+      messageId: 'error-assistant',
+      parentMessageId: nextUser.messageId,
+      error: true,
+    };
+
+    expect(
+      selectActiveBranchTail(
+        [userMessage, cachedAssistant, nextUser, errorAssistant],
+        conversation.conversationId,
+        () => 0,
+        (message) => message.cacheTTL === '5m' || message.cacheTTL === '1h',
+      )?.messageId,
+    ).toBe(cachedAssistant.messageId);
+  });
+
+  it('returns null when no message on the selected branch matches', () => {
+    expect(
+      selectActiveBranchTail(
+        [userMessage, assistantMessage],
+        conversation.conversationId,
+        () => 0,
+        (message) => message.cacheTTL === '5m' || message.cacheTTL === '1h',
+      ),
+    ).toBeNull();
   });
 });
 

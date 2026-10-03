@@ -684,6 +684,34 @@ describe('initializeCustom – native Anthropic provider', () => {
     );
   });
 
+  it('forwards a validated one-shot cache TTL on the native path', async () => {
+    const params = createAnthropicParams({
+      provider: 'anthropic',
+      apiKey: 'sk-ant-custom',
+      baseURL: 'https://api.anthropic.com',
+      models: { default: ['claude-sonnet-4-5'] },
+    });
+    params.req.body.cacheTTL = '1h';
+
+    const options = await initializeCustom(params);
+
+    expect(options.llmConfig).toHaveProperty('promptCacheTtl', '1h');
+  });
+
+  it('ignores an invalid one-shot cache TTL on the native path', async () => {
+    const params = createAnthropicParams({
+      provider: 'anthropic',
+      apiKey: 'sk-ant-custom',
+      baseURL: 'https://api.anthropic.com',
+      models: { default: ['claude-sonnet-4-5'] },
+    });
+    Object.assign(params.req.body, { cacheTTL: 'forever' });
+
+    const options = await initializeCustom(params);
+
+    expect(options.llmConfig).toHaveProperty('promptCacheTtl', '5m');
+  });
+
   it('still uses the OpenAI-compatible client when no provider is set', async () => {
     const params = createAnthropicParams({
       apiKey: 'sk-test',

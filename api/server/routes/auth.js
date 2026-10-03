@@ -1,5 +1,6 @@
 const express = require('express');
 const { createSetBalanceConfig, forceRefreshCloudFrontAuthCookies } = require('@librechat/api');
+const { SystemCapabilities } = require('@librechat/data-schemas');
 const {
   resetPasswordRequestController,
   resetPasswordController,
@@ -19,6 +20,7 @@ const { logoutController } = require('~/server/controllers/auth/LogoutController
 const { loginController } = require('~/server/controllers/auth/LoginController');
 const { findBalanceByUser, upsertBalanceFields } = require('~/models');
 const { getAppConfig } = require('~/server/services/Config');
+const { requireCapability } = require('~/server/middleware/roles/capabilities');
 const middleware = require('~/server/middleware');
 
 const setBalanceConfig = createSetBalanceConfig({
@@ -28,6 +30,7 @@ const setBalanceConfig = createSetBalanceConfig({
 });
 
 const router = express.Router();
+const requireAdminAccess = requireCapability(SystemCapabilities.ACCESS_ADMIN);
 const getCloudFrontAuthCookieRefreshResult = (req, res) => {
   const warmedResult = req.cloudFrontAuthCookieRefreshResult;
   if (warmedResult && (warmedResult.attempted || !warmedResult.enabled)) {
@@ -50,6 +53,10 @@ router.post(
   loginController,
 );
 router.post('/refresh', refreshController);
+router.get('/browser-session', middleware.requireBrowserAuth, (_req, res) => res.sendStatus(204));
+router.get('/sidecar-admin', middleware.requireBrowserAuth, requireAdminAccess, (_req, res) =>
+  res.sendStatus(204),
+);
 router.post('/cloudfront/refresh', middleware.requireJwtAuth, (req, res) => {
   const result = getCloudFrontAuthCookieRefreshResult(req, res);
   if (!result.enabled) {

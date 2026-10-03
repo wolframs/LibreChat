@@ -33,8 +33,10 @@ import io
 import os
 import threading
 import time
+import uuid
 from datetime import datetime, timedelta, timezone
 import requests
+from pymongo.errors import DuplicateKeyError
 
 from routing import RECONCILABLE_HOSTS, host_of
 
@@ -57,6 +59,7 @@ MAX_LEAD = timedelta(seconds=120)
 INTERVAL = int(os.environ.get("SURPLUS_RECONCILE_INTERVAL", "3600"))
 
 MICRO_PER_USD = 1_000_000
+LOCK_ID = "surplus-reconciliation"
 
 
 def is_surplus_url(url):
@@ -109,7 +112,7 @@ def _as_int(value):
         return 0
 
 
-def load_pending_groups(transactions):
+def load_pending_groups(transactions, status=None):
     """Unreconciled Surplus-routed transactions, grouped per model request.
 
     A single API call produces one `prompt` and one `completion` transaction
@@ -178,7 +181,29 @@ def load_pending_groups(transactions):
             if group["at"] is None or created > group["at"]:
                 group["at"] = created
 
-    return [g for g in groups.values() if g["at"] is not None]
+    pending = []
+    excluded_partial_groups = 0
+    for (message_id, context, model), group in groups.items():
+        if group["at"] is None:
+            continue
+        # A crash in an older/non-locked pass may have written only one half of
+        # a prompt/completion pair. Never allocate the full request price across
+        # the remaining half. Leave it for explicit operator review instead.
+        if group["docs"][0].get("messageId") and transactions.count_documents(
+            {
+                "messageId": message_id,
+                "context": context,
+                "model": model,
+                "reconciled": {"$exists": True},
+            },
+            limit=1,
+        ):
+            excluded_partial_groups += 1
+            continue
+        pending.append(group)
+    if status is not None:
+        status["excluded_partial_groups"] = excluded_partial_groups
+    return pending
 
 
 def _index_rows(rows):
@@ -186,7 +211,7 @@ def _index_rows(rows):
     index = {}
     for row in rows:
         at = _parse_ts(row.get("created_at"))
-        if at is None:
+        if at is None or not row.get("request_id"):
             continue
         entry = {
             "request_id": row.get("request_id"),
@@ -203,7 +228,7 @@ def _index_rows(rows):
     return index
 
 
-def match_groups(groups, rows):
+def match_groups(groups, rows, used_request_ids=None):
     """Pair transaction groups with export rows. Returns (matches, unmatched).
 
     Assignment is greedy by time distance so the closest pairing is made first
@@ -211,7 +236,7 @@ def match_groups(groups, rows):
     generations would all latch onto whichever row happened to be scanned first.
     """
     index = _index_rows(rows)
-    used = set()
+    used = set(used_request_ids or ())
 
     candidates = []
     for group in groups:
@@ -257,11 +282,17 @@ def apply_match(transactions, group, entry, ambiguous, now=None):
         weights = [1] * len(docs)
     total_weight = sum(weights)
 
+    doc_ids = [doc["_id"] for doc in docs]
+    if transactions.count_documents(
+        {"_id": {"$in": doc_ids}, "reconciled": {"$exists": True}}, limit=1
+    ):
+        return 0
+
     updates = 0
     for doc, weight in zip(docs, weights):
         share = weight / total_weight
-        transactions.update_one(
-            {"_id": doc["_id"]},
+        result = transactions.update_one(
+            {"_id": doc["_id"], "reconciled": {"$exists": False}},
             {
                 "$set": {
                     "reconciled": {
@@ -279,7 +310,7 @@ def apply_match(transactions, group, entry, ambiguous, now=None):
                 }
             },
         )
-        updates += 1
+        updates += result.modified_count
     return updates
 
 
@@ -289,7 +320,7 @@ def apply_match(transactions, group, entry, ambiguous, now=None):
 IMAGE_MATCH_WINDOW = timedelta(seconds=int(os.environ.get("SURPLUS_IMAGE_MATCH_WINDOW", "180")))
 
 
-def reconcile_image_usage(usage, rows, now=None):
+def reconcile_image_usage(usage, rows, now=None, used_request_ids=None):
     """Settle `mcp_image_gen_usage` rows served by Surplus against the export.
 
     Image rows are simpler than transactions — one row per request on both
@@ -320,7 +351,7 @@ def reconcile_image_usage(usage, rows, now=None):
         if _as_int(row.get("input_tokens")) or _as_int(row.get("output_tokens")):
             continue
         at = _parse_ts(row.get("created_at"))
-        if at is None:
+        if at is None or not row.get("request_id"):
             continue
         by_model.setdefault(row.get("model"), []).append(
             {
@@ -351,7 +382,7 @@ def reconcile_image_usage(usage, rows, now=None):
         contested[doc["_id"]] = contested.get(doc["_id"], 0) + 1
 
     claimed = set()
-    used = set()
+    used = set(used_request_ids or ())
     matched = ambiguous = 0
     for _, doc, entry in candidates:
         if doc["_id"] in claimed or entry["request_id"] in used:
@@ -359,8 +390,8 @@ def reconcile_image_usage(usage, rows, now=None):
         claimed.add(doc["_id"])
         used.add(entry["request_id"])
         is_ambiguous = contested.get(doc["_id"], 1) > 1
-        usage.update_one(
-            {"_id": doc["_id"]},
+        result = usage.update_one(
+            {"_id": doc["_id"], "reconciled": {"$exists": False}},
             {
                 "$set": {
                     "reconciled": {
@@ -376,8 +407,8 @@ def reconcile_image_usage(usage, rows, now=None):
                 }
             },
         )
-        matched += 1
-        ambiguous += 1 if is_ambiguous else 0
+        matched += result.modified_count
+        ambiguous += 1 if is_ambiguous and result.modified_count else 0
 
     return matched, ambiguous, len(pending) - matched
 
@@ -392,40 +423,81 @@ def run_once(transactions, session=None):
     if not SURPLUS_API_KEY:
         return _record({"ok": False, "error": "SURPLUS_API_KEY is not set", "at": started})
 
+    locks = transactions.database["reconciliation_locks"]
+    owner = str(uuid.uuid4())
+    try:
+        locks.insert_one({"_id": LOCK_ID, "owner": owner, "acquiredAt": started})
+    except DuplicateKeyError:
+        # Deliberately no lease/timeout: after a crash, an operator must inspect
+        # the ledgers and remove this one lock document manually. Auto-expiry
+        # could admit a second writer while a slow first writer is still alive.
+        return _record(
+            {
+                "ok": False,
+                "error": (
+                    "reconciliation lock is already held; if no pass is running, "
+                    "inspect partial writes and delete reconciliation_locks/"
+                    f"{LOCK_ID} manually"
+                ),
+                "at": started,
+            }
+        )
+
     try:
         rows = fetch_usage_rows(session)
-    except Exception as exc:  # network, auth, malformed CSV
-        return _record({"ok": False, "error": f"{type(exc).__name__}: {exc}", "at": started})
+        image_usage = transactions.database["mcp_image_gen_usage"]
+        used_request_ids = {
+            request_id
+            for collection in (transactions, image_usage)
+            for request_id in collection.distinct(
+                "reconciled.requestId", {"reconciled.source": "surplus"}
+            )
+            if request_id
+        }
 
-    groups = load_pending_groups(transactions)
-    matches, unmatched = match_groups(groups, rows)
+        group_status = {}
+        groups = load_pending_groups(transactions, group_status)
+        matches, unmatched = match_groups(groups, rows, used_request_ids)
 
-    updated = 0
-    ambiguous = 0
-    for group, entry, is_ambiguous in matches:
-        updated += apply_match(transactions, group, entry, is_ambiguous, now=started)
-        ambiguous += 1 if is_ambiguous else 0
+        updated = 0
+        applied_matches = 0
+        ambiguous = 0
+        for group, entry, is_ambiguous in matches:
+            group_updates = apply_match(transactions, group, entry, is_ambiguous, now=started)
+            updated += group_updates
+            # Even a partial conditional write has consumed this request cost.
+            # Keep it away from image matching and every later candidate in
+            # this pass; the partial group will be excluded on the next pass.
+            if group_updates:
+                used_request_ids.add(entry["request_id"])
+            if group_updates != len(group["docs"]):
+                continue
+            applied_matches += 1
+            ambiguous += 1 if is_ambiguous else 0
 
-    # The image sidecar's own ledger lives beside `transactions`, never in it.
-    images_matched, images_ambiguous, images_unmatched = reconcile_image_usage(
-        transactions.database["mcp_image_gen_usage"], rows, now=started
-    )
+        # The image sidecar's own ledger lives beside `transactions`, never in it.
+        images_matched, images_ambiguous, images_unmatched = reconcile_image_usage(
+            image_usage, rows, now=started, used_request_ids=used_request_ids
+        )
 
-    return _record(
-        {
+        return _record({
             "ok": True,
             "at": started,
             "export_rows": len(rows),
             "pending_groups": len(groups),
-            "matched": len(matches),
+            "excluded_partial_groups": group_status["excluded_partial_groups"],
+            "matched": applied_matches,
             "ambiguous": ambiguous,
             "transactions_updated": updated,
             "unmatched": len(unmatched),
             "images_matched": images_matched,
             "images_ambiguous": images_ambiguous,
             "images_unmatched": images_unmatched,
-        }
-    )
+        })
+    except Exception as exc:  # network, auth, malformed CSV, or database failure
+        return _record({"ok": False, "error": f"{type(exc).__name__}: {exc}", "at": started})
+    finally:
+        locks.delete_one({"_id": LOCK_ID, "owner": owner})
 
 
 _last_run = {"ok": None, "at": None, "note": "not run yet"}

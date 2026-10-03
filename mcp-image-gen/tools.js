@@ -26,7 +26,10 @@ export const LIST_TOOL = `get_user_images${TOOL_SUFFIX}`;
  * it again. The window is short because liquidity really does come back within
  * minutes; this is loop protection, not a health model.
  */
-export const NOT_ROUTING_WINDOW_MS = parseInt(process.env.IMAGE_GEN_NOT_ROUTING_WINDOW_MS ?? String(3 * 60 * 1000), 10);
+export const NOT_ROUTING_WINDOW_MS = parseInt(
+  process.env.IMAGE_GEN_NOT_ROUTING_WINDOW_MS ?? String(3 * 60 * 1000),
+  10,
+);
 const notRouting = new Map();
 
 export function markNotRouting(modelId, now = Date.now()) {
@@ -57,7 +60,9 @@ export function notRoutingMessage(model, { needsEdit, now = Date.now() }) {
   const alternatives = MODELS.filter(
     (m) => m.id !== model.id && (!needsEdit || canEdit(m)) && notRoutingSince(m.id, now) == null,
   ).map((m) => `'${m.id}'${m.provider === 'openrouter' ? ' (OpenRouter, always routable)' : ''}`);
-  const retryIn = since ? Math.max(1, Math.ceil((NOT_ROUTING_WINDOW_MS - (now - since)) / 60000)) : null;
+  const retryIn = since
+    ? Math.max(1, Math.ceil((NOT_ROUTING_WINDOW_MS - (now - since)) / 60000))
+    : null;
   return (
     `Surplus Intelligence is not routing ${model.id} right now: the marketplace lists it but no ` +
     'seller is serving it at this moment. This is a liquidity gap, not a problem with your request — ' +
@@ -154,6 +159,12 @@ export async function handleGetUserImages({ limit }, context) {
   try {
     const store = context.getStore();
     const userId = store?.userId;
+    if (!userId) {
+      return {
+        isError: true,
+        content: [{ type: 'text', text: 'Authenticated user context is required.' }],
+      };
+    }
     console.log(`handleGetUserImages query details: userId=${userId}`);
 
     const db = await getDb();
@@ -172,7 +183,9 @@ export async function handleGetUserImages({ limit }, context) {
 
     if (!images || images.length === 0) {
       return {
-        content: [{ type: 'text', text: 'No uploaded images found. Please upload an image first.' }],
+        content: [
+          { type: 'text', text: 'No uploaded images found. Please upload an image first.' },
+        ],
       };
     }
 
@@ -225,7 +238,10 @@ async function resolveImageIds(inputs, userId) {
     if (!input) continue;
 
     // Short index alias, e.g. "1", "2", "INDEX_1" — as handed out by get_user_images.
-    const indexMatch = input.trim().toUpperCase().match(/^(INDEX_)?(\d+)$/);
+    const indexMatch = input
+      .trim()
+      .toUpperCase()
+      .match(/^(INDEX_)?(\d+)$/);
 
     if (indexMatch) {
       const idx = parseInt(indexMatch[2], 10) - 1;
@@ -251,8 +267,7 @@ async function resolveImageIds(inputs, userId) {
  */
 async function checkImageGenerationLimit(userId) {
   if (!userId) {
-    console.warn('No userId provided for usage limiting. Allowing generation.');
-    return { allowed: true };
+    return { allowed: false, reason: 'Authenticated user context is required.' };
   }
 
   const db = await getDb();
@@ -313,7 +328,9 @@ async function checkImageGenerationLimit(userId) {
  */
 export const SURPLUS_WEEKLY_CAP_USD = parseFloat(process.env.IMAGE_GEN_SURPLUS_WEEKLY_USD ?? '1.5');
 
-const SPEND_EXPR = { $ifNull: ['$reconciled.costUSD', { $ifNull: ['$cost', { $ifNull: ['$listCost', 0] }] }] };
+const SPEND_EXPR = {
+  $ifNull: ['$reconciled.costUSD', { $ifNull: ['$cost', { $ifNull: ['$listCost', 0] }] }],
+};
 
 export async function surplusSpendLast7Days() {
   const db = await getDb();
@@ -352,6 +369,8 @@ async function checkSurplusWeeklyCap(model) {
  */
 async function logImageGenerationUsage(userId, prompt, model, usage, meta = {}) {
   if (!userId) return;
+  let costSource = model.price != null ? 'list' : null;
+  if (usage?.cost != null) costSource = 'openrouter';
   try {
     const db = await getDb();
     await db.collection('mcp_image_gen_usage').insertOne({
@@ -367,7 +386,7 @@ async function logImageGenerationUsage(userId, prompt, model, usage, meta = {}) 
       // `reconciled.costUSD` on Surplus rows later — match on `model` and
       // `requestedAt`, since the export's request_id is not the response header's.
       cost: usage?.cost ?? null,
-      costSource: usage?.cost != null ? 'openrouter' : model.price != null ? 'list' : null,
+      costSource,
       listCost: listPriceFor(model, meta.dims),
       requestId: meta.requestId ?? null,
       requestedAt: meta.requestedAt ?? null,
@@ -452,7 +471,9 @@ function buildResultSummary({
         `(If it does not resolve, call ${LIST_TOOL}: this image is the newest entry, INDEX_1.)`,
     );
   }
-  lines.push(`- model: ${MODEL} (via ${model.provider === 'surplus' ? 'Surplus Intelligence' : 'OpenRouter'})`);
+  lines.push(
+    `- model: ${MODEL} (via ${model.provider === 'surplus' ? 'Surplus Intelligence' : 'OpenRouter'})`,
+  );
   lines.push(`- format: ${mimeType}`);
   lines.push(
     dims
@@ -470,9 +491,11 @@ function buildResultSummary({
     // (venice-wan-2.7 is always 1024², venice-qwen-image and venice-flux-2-pro
     // always 1024×768). Say
     // which, so the model neither promises a crop nor tries another value.
-    const requestedOrientation =
-      requested == null ? null : requested === 1 ? 'square' : requested > 1 ? 'landscape' : 'portrait';
-    const orientationKept = dims && requestedOrientation && orientationOf(dims) === requestedOrientation;
+    let requestedOrientation = null;
+    if (requested === 1) requestedOrientation = 'square';
+    else if (requested != null) requestedOrientation = requested > 1 ? 'landscape' : 'portrait';
+    const orientationKept =
+      dims && requestedOrientation && orientationOf(dims) === requestedOrientation;
     lines.push(
       aspect_ratio === 'auto' || !dims || honoured
         ? `- aspect_ratio: requested ${aspect_ratio}`
@@ -498,9 +521,7 @@ function buildResultSummary({
   }
 
   if (usage?.cost != null) {
-    lines.push(
-      `- cost: $${Number(usage.cost).toFixed(5)} (server OpenRouter key)`,
-    );
+    lines.push(`- cost: $${Number(usage.cost).toFixed(5)} (server OpenRouter key)`);
   } else if (model.provider === 'surplus') {
     lines.push(
       model.price != null
@@ -533,14 +554,24 @@ export async function handleGenerateImage(
     if (!model) {
       return {
         isError: true,
-        content: [{ type: 'text', text: `Unknown model "${requestedModel}". This server is not configured for it.` }],
+        content: [
+          {
+            type: 'text',
+            text: `Unknown model "${requestedModel}". This server is not configured for it.`,
+          },
+        ],
       };
     }
     const keyName = model.provider === 'surplus' ? 'SURPLUS_IMAGE_KEY' : 'OPENROUTER_KEY';
     if (!(model.provider === 'surplus' ? surplusKey() : openRouterKey())) {
       return {
         isError: true,
-        content: [{ type: 'text', text: `${keyName} is not set on the server, so ${model.id} cannot be used.` }],
+        content: [
+          {
+            type: 'text',
+            text: `${keyName} is not set on the server, so ${model.id} cannot be used.`,
+          },
+        ],
       };
     }
 
@@ -562,7 +593,9 @@ export async function handleGenerateImage(
       };
     }
 
-    const wantsEdit = Boolean(reference_image_url || (reference_image_urls && reference_image_urls.length > 0));
+    const wantsEdit = Boolean(
+      reference_image_url || (reference_image_urls && reference_image_urls.length > 0),
+    );
     if (model.provider === 'surplus' && notRoutingSince(model.id) != null) {
       return {
         isError: true,
@@ -599,7 +632,12 @@ export async function handleGenerateImage(
       `Generating image. Model: ${model.id} (${model.provider}), Aspect Ratio: ${aspect_ratio || 'default'}, References: ${urlsToFetch.length}`,
     );
 
-    const dataUrls = await referencesToDataUrls({ urlsToFetch, fetchImageById, extractFileId });
+    const dataUrls = await referencesToDataUrls({
+      urlsToFetch,
+      fetchImageById,
+      extractFileId,
+      userId,
+    });
     const { base64Image, mimeType, usage, referencesUsed, requestId, requestedAt, adaptedParams } =
       await generateWith(model, { prompt, selectedModel: model.id, dataUrls, aspect_ratio });
 
@@ -668,10 +706,14 @@ export async function handleGenerateImage(
       const model = findModel(err.model);
       markNotRouting(err.model);
       console.warn(`Surplus not routing ${err.model}: ${err.detail}`);
-      const needsEdit = Boolean(reference_image_url || (reference_image_urls && reference_image_urls.length > 0));
+      const needsEdit = Boolean(
+        reference_image_url || (reference_image_urls && reference_image_urls.length > 0),
+      );
       return {
         isError: true,
-        content: [{ type: 'text', text: notRoutingMessage(model ?? { id: err.model }, { needsEdit }) }],
+        content: [
+          { type: 'text', text: notRoutingMessage(model ?? { id: err.model }, { needsEdit }) },
+        ],
       };
     }
     // Both gateways put the actionable part in the response body — an unsupported
@@ -690,11 +732,12 @@ export async function handleGenerateImage(
       // OpenRouter's moderation refusal names no alternative, and a model that
       // just waited a minute for it tends to soften the prompt and pay again.
       if (/content management policy|content policy|moderation|safety/i.test(body)) {
-        const lenient = MODELS.filter((m) => m.provider === 'surplus' && !m.features.includes('image_edit'))
-          .map((m) => `'${m.id}'`);
+        const lenient = MODELS.filter(
+          (m) => m.provider === 'surplus' && !m.features.includes('image_edit'),
+        ).map((m) => `'${m.id}'`);
         detail +=
           `\n\nThis is the provider's content filter on ${requestedModel || DEFAULT_MODEL}, not a fault. ` +
-          'Nothing was billed. Rewording rarely helps with this model; ' +
+          'No image was returned. Rewording rarely helps with this model; ' +
           (lenient.length > 0
             ? `the Surplus models (${lenient.join(', ')}) accept prompts this one refuses — tell the user and switch.`
             : 'no lenient model is configured — tell the user.');

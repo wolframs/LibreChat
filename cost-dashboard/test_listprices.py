@@ -53,7 +53,7 @@ export const premiumTokenValues: Record<
 
 @pytest.fixture(autouse=True)
 def fresh_cache():
-    listprices._cache.update({"mtime": None, "rates": {}})
+    listprices._cache.update({"mtime": None, "rates": {}, "cache_rates": {}})
     yield
 
 
@@ -88,6 +88,13 @@ class TestParse:
         is ever loosened, this is the test that notices."""
         rates = listprices.list_prices(tx)
         assert all(v != (12.5, 1.0) for v in rates.values())
+
+    def test_reads_cache_rates_separately(self, tx):
+        assert listprices.cache_price("claude-fable-5", tx) == (12.5, 1.0)
+        assert "claude-fable-5" in listprices.cache_prices(tx)
+
+    def test_cache_lookup_is_exact(self, tx):
+        assert listprices.cache_price("claude-fable-5-20260301", tx) is None
 
 
 class TestLookup:

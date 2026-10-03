@@ -1049,6 +1049,18 @@ class AgentClient extends BaseClient {
     });
   }
 
+  /** Resolve destination provenance with the same known-agent semantics as
+   *  token pricing: a known direct-provider agent intentionally resolves to
+   *  `undefined`; only untagged usage falls back to the primary route. */
+  resolveAgentRoutedVia(usage) {
+    const agentId = usage?.agentId;
+    const byAgentId = this.options.routedViaByAgentId;
+    if (agentId != null && byAgentId?.has(agentId)) {
+      return byAgentId.get(agentId);
+    }
+    return this.options.routedVia ?? this.options.req?.routedVia;
+  }
+
   /**
    * @param {Object} params
    * @param {string} [params.model]
@@ -1084,7 +1096,8 @@ class AgentClient extends BaseClient {
         resolveEndpointTokenConfig: (usage) => this.resolveAgentEndpointTokenConfig(usage),
         /** Set only when this request went somewhere other than the provider's
          *  own API; identifies where the recorded rate should be judged against. */
-        routedVia: this.options.req?.routedVia,
+        routedVia: this.options.routedVia ?? this.options.req?.routedVia,
+        resolveRoutedVia: (usage) => this.resolveAgentRoutedVia(usage),
         /** Token counts read off the raw streamed body, for destinations that
          *  report input and cache counts in a frame the stream parser does not
          *  read. Only fills records that arrived with nothing to fill. */
@@ -1092,7 +1105,7 @@ class AgentClient extends BaseClient {
       },
     );
 
-    if (result) {
+    if (result && context === 'message') {
       this.usage = result;
     }
   }
@@ -1711,6 +1724,11 @@ class AgentClient extends BaseClient {
           '[api/server/controllers/agents/client.js #sendCompletion] Unhandled error type',
           err,
         );
+        // BaseClient otherwise estimates tokens from the human-readable error
+        // block and bills them as if the provider generated an answer. Actual
+        // provider usage collected before a late failure has already gone
+        // through recordCollectedUsage; only the estimate must be suppressed.
+        this.hasModelRequestError = true;
         this.contentParts.push({
           type: ContentTypes.ERROR,
           [ContentTypes.ERROR]: `An error occurred while processing the request${err?.message ? `: ${err.message}` : ''}`,

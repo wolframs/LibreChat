@@ -1,6 +1,8 @@
 import React from 'react';
-import { render, screen, fireEvent } from '@testing-library/react';
+import { render, screen, fireEvent, waitFor } from '@testing-library/react';
 import Image, { _resetImageCaches } from '../Image';
+
+const mockShowToast = jest.fn();
 
 jest.mock('~/utils', () => ({
   cn: (...classes: (string | boolean | undefined | null)[]) =>
@@ -15,15 +17,30 @@ jest.mock('librechat-data-provider', () => ({
 }));
 
 jest.mock('@librechat/client', () => ({
+  useToastContext: () => ({ showToast: mockShowToast }),
   Skeleton: ({ className, ...props }: React.HTMLAttributes<HTMLDivElement>) => (
     <div data-testid="skeleton" className={className} {...props} />
   ),
 }));
 
+jest.mock('~/hooks', () => ({ useLocalize: () => (key: string) => key }));
+
 jest.mock('../DialogImage', () => ({
   __esModule: true,
-  default: ({ isOpen, src }: { isOpen: boolean; src: string }) =>
-    isOpen ? <div data-testid="dialog-image" data-src={src} /> : null,
+  default: ({
+    isOpen,
+    src,
+    downloadImage,
+  }: {
+    isOpen: boolean;
+    src: string;
+    downloadImage: () => void;
+  }) =>
+    isOpen ? (
+      <div data-testid="dialog-image" data-src={src}>
+        <button data-testid="download-image" onClick={downloadImage} />
+      </div>
+    ) : null,
 }));
 
 describe('Image', () => {
@@ -35,6 +52,11 @@ describe('Image', () => {
   beforeEach(() => {
     _resetImageCaches();
     jest.clearAllMocks();
+    global.fetch = Object.assign(jest.fn(), { preconnect: jest.fn() });
+  });
+
+  afterEach(() => {
+    jest.restoreAllMocks();
   });
 
   describe('rendering without dimensions', () => {
@@ -174,6 +196,97 @@ describe('Image', () => {
       render(<Image {...defaultProps} imagePath="/other/path.png" />);
       const img = screen.getByRole('img');
       expect(img).toHaveAttribute('src', '/other/path.png');
+    });
+  });
+
+  describe('download feedback', () => {
+    const download = () => {
+      fireEvent.click(screen.getByRole('button', { name: 'View Test image in dialog' }));
+      fireEvent.click(screen.getByTestId('download-image'));
+    };
+
+    it('downloads a fetched blob without an error toast', async () => {
+      const createObjectURL = jest.fn().mockReturnValue('blob:test');
+      const revokeObjectURL = jest.fn();
+      window.URL.createObjectURL = createObjectURL;
+      window.URL.revokeObjectURL = revokeObjectURL;
+      jest
+        .mocked(global.fetch)
+        .mockResolvedValue({ ok: true, blob: async () => new Blob(['image']) } as Response);
+      render(<Image {...defaultProps} />);
+      download();
+      await waitFor(() => expect(revokeObjectURL).toHaveBeenCalledWith('blob:test'));
+      expect(mockShowToast).not.toHaveBeenCalled();
+    });
+
+    it('reports an HTTP failure without opening a misleading URL fallback', async () => {
+      jest.mocked(global.fetch).mockResolvedValue({ ok: false, status: 404 } as Response);
+      render(<Image {...defaultProps} />);
+      download();
+      await waitFor(() =>
+        expect(mockShowToast).toHaveBeenCalledWith({
+          status: 'error',
+          message: 'com_ui_download_error',
+        }),
+      );
+      expect(document.querySelector('a[href="/images/test.png"]')).toBeNull();
+    });
+
+    it('opens a cross-origin URL after fetch rejection and tells the user to save there', async () => {
+      const openedLinks: Array<{ href: string; target: string; rel: string }> = [];
+      jest.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(function (
+        this: HTMLAnchorElement,
+      ) {
+        openedLinks.push({ href: this.href, target: this.target, rel: this.rel });
+      });
+      jest.mocked(global.fetch).mockRejectedValue(new TypeError('CORS blocked'));
+      render(<Image {...defaultProps} imagePath="https://example.com/image.png" />);
+      download();
+      await waitFor(() =>
+        expect(mockShowToast).toHaveBeenCalledWith({
+          status: 'error',
+          message: 'com_ui_image_download_opened',
+        }),
+      );
+      expect(openedLinks).toEqual([
+        {
+          href: 'https://example.com/image.png',
+          target: '_blank',
+          rel: 'noopener noreferrer',
+        },
+      ]);
+    });
+
+    it('reports a same-origin fetch rejection without pretending to download', async () => {
+      jest.mocked(global.fetch).mockRejectedValue(new TypeError('Network failed'));
+      render(<Image {...defaultProps} />);
+      download();
+      await waitFor(() =>
+        expect(mockShowToast).toHaveBeenCalledWith({
+          status: 'error',
+          message: 'com_ui_download_error',
+        }),
+      );
+    });
+
+    it.each([
+      ['invalid URL', 'https://['],
+      ['blob URL', 'blob:https://example.com/image'],
+      ['custom scheme', 'custom://example.com/image'],
+    ])('rejects an %s fallback instead of navigating', async (_label, imagePath) => {
+      const open = jest
+        .spyOn(HTMLAnchorElement.prototype, 'click')
+        .mockImplementation(() => undefined);
+      jest.mocked(global.fetch).mockRejectedValue(new TypeError('Fetch failed'));
+      render(<Image {...defaultProps} imagePath={imagePath} />);
+      download();
+      await waitFor(() =>
+        expect(mockShowToast).toHaveBeenCalledWith({
+          status: 'error',
+          message: 'com_ui_download_error',
+        }),
+      );
+      expect(open).not.toHaveBeenCalled();
     });
   });
 });

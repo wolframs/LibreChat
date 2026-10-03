@@ -15,3 +15,12 @@ docs
 
 # Ignore all hidden files
 .*
+
+# Runtime user data is mounted separately and must never be baked into images.
+uploads
+images
+logs
+api/logs
+**/*.log
+**/coverage
+**/junit.xml

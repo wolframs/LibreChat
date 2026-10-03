@@ -156,6 +156,9 @@ class BaseClient {
     this.skipSaveConvo = false;
     /** @type {boolean} */
     this.skipSaveUserMessage = false;
+    /** Set when the provider/model request failed. Error text is rendered as an
+     * assistant message, but must not be estimated and billed as model output. */
+    this.hasModelRequestError = false;
     /** @type {string} */
     this.user;
     /** @type {string} */
@@ -535,6 +538,7 @@ class BaseClient {
   }
 
   async sendMessage(message, opts = {}) {
+    this.hasModelRequestError = false;
     const appConfig = this.options.req?.config;
     /** @type {Promise<TMessage>} */
     let userMessagePromise;
@@ -755,22 +759,30 @@ class BaseClient {
        * use the legacy token estimations.
        * @type {StreamUsage | null} */
       const usage = this.getStreamUsage != null ? this.getStreamUsage() : null;
+      const reportedOutputTokens = usage?.[this.outputTokensKey];
+      const parsedOutputTokens = Number(reportedOutputTokens);
+      const hasReportedOutputTokens =
+        reportedOutputTokens != null &&
+        Number.isFinite(parsedOutputTokens) &&
+        parsedOutputTokens >= 0;
 
-      if (usage != null && Number(usage[this.outputTokensKey]) > 0) {
-        responseMessage.tokenCount = usage[this.outputTokensKey];
+      if (hasReportedOutputTokens) {
+        responseMessage.tokenCount = parsedOutputTokens;
         completionTokens = responseMessage.tokenCount;
       } else {
         responseMessage.tokenCount = this.getTokenCountForResponse(responseMessage);
         completionTokens = responseMessage.tokenCount;
-        await this.recordTokenUsage({
-          usage,
-          promptTokens,
-          completionTokens,
-          balance: balanceConfig,
-          /** Note: When using agents, responseMessage.model is the agent ID, not the model */
-          model: this.model,
-          messageId: this.responseMessageId,
-        });
+        if (!this.hasModelRequestError) {
+          await this.recordTokenUsage({
+            usage,
+            promptTokens,
+            completionTokens,
+            balance: balanceConfig,
+            /** Note: When using agents, responseMessage.model is the agent ID, not the model */
+            model: this.model,
+            messageId: this.responseMessageId,
+          });
+        }
       }
 
       logger.debug('[BaseClient] Response token usage', {
@@ -846,12 +858,10 @@ class BaseClient {
     ) {
       const oneShotTTL = this.options.req?.body?.cacheTTL;
       const convoTTL = this.options.agent?.model_parameters?.promptCacheTtl;
-      const requestedTTL =
-        oneShotTTL === '1h' || oneShotTTL === '5m'
-          ? oneShotTTL
-          : convoTTL === '1h' || convoTTL === '5m'
-            ? convoTTL
-            : '5m';
+      let requestedTTL = convoTTL === '1h' || convoTTL === '5m' ? convoTTL : '5m';
+      if (oneShotTTL === '1h' || oneShotTTL === '5m') {
+        requestedTTL = oneShotTTL;
+      }
       responseMessage.cacheTTL = resolvePromptCacheTtlForURL(
         requestedTTL,
         this.options.req?.routedVia?.baseURL,

@@ -30,6 +30,8 @@ COPY packages/data-schemas/package*.json ./packages/data-schemas/
 COPY packages/client/package*.json ./packages/client/
 COPY client/package*.json ./client/
 COPY api/package*.json ./api/
+# Required by the root package.json postinstall during both dependency installs.
+COPY scripts/patch-langchain-responses.mjs ./scripts/patch-langchain-responses.mjs
 
 # Install all dependencies for every build
 FROM base-min AS base

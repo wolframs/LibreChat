@@ -6,6 +6,7 @@ import {
   ReasoningParameterFormat,
 } from 'librechat-data-provider';
 import type * as t from '~/types';
+import { loadToolDefinitions } from '~/tools/definitions';
 import { getOpenAILLMConfig, extractDefaultParams, applyDefaultParams } from './llm';
 
 describe('getOpenAILLMConfig', () => {
@@ -365,6 +366,77 @@ describe('getOpenAILLMConfig', () => {
 
       expect(result.llmConfig).toHaveProperty('useResponsesApi', true);
       expect(result.tools).toContainEqual({ type: 'web_search' });
+    });
+
+    it('should honor an explicit Responses API opt-out when web search is enabled', () => {
+      const result = getOpenAILLMConfig({
+        apiKey: 'test-api-key',
+        streaming: true,
+        modelOptions: {
+          model: 'gpt-4',
+          web_search: true,
+          useResponsesApi: false,
+        },
+      });
+
+      expect(result.llmConfig).toHaveProperty('useResponsesApi', false);
+      expect(result.tools).not.toContainEqual({ type: 'web_search' });
+    });
+
+    it('keeps a separately selected LibreChat web_search definition under forced Chat Completions', async () => {
+      const result = getOpenAILLMConfig({
+        apiKey: 'offline-test-key',
+        streaming: true,
+        modelOptions: { model: 'gpt-4', web_search: true, useResponsesApi: false },
+      });
+      const definitions = await loadToolDefinitions(
+        { userId: 'offline-user', agentId: 'offline-agent', tools: ['web_search'] },
+        {
+          isBuiltInTool: (name) => name === 'web_search',
+          getOrFetchMCPServerTools: async () => null,
+        },
+      );
+
+      expect(result.llmConfig.useResponsesApi).toBe(false);
+      expect(result.tools).not.toContainEqual({ type: 'web_search' });
+      expect(definitions.toolDefinitions).toEqual(
+        expect.arrayContaining([expect.objectContaining({ name: 'web_search' })]),
+      );
+      expect(definitions.toolRegistry.has('web_search')).toBe(true);
+    });
+
+    it('should prefer top_p over a stale topP value', () => {
+      const result = getOpenAILLMConfig({
+        apiKey: 'test-api-key',
+        streaming: true,
+        modelOptions: {
+          model: 'gpt-4',
+          top_p: 0.7,
+          topP: 1,
+        },
+      });
+
+      expect(result.llmConfig).toHaveProperty('topP', 0.7);
+      expect(result.llmConfig).not.toHaveProperty('top_p');
+    });
+
+    it('should normalize top_p from addParams and honor dropParams aliases', () => {
+      const normalized = getOpenAILLMConfig({
+        apiKey: 'test-api-key',
+        streaming: true,
+        modelOptions: { model: 'gpt-4' },
+        addParams: { topP: 1, top_p: 0.6 },
+      });
+      const dropped = getOpenAILLMConfig({
+        apiKey: 'test-api-key',
+        streaming: true,
+        modelOptions: { model: 'gpt-4', topP: 1 },
+        dropParams: ['top_p'],
+      });
+
+      expect(normalized.llmConfig).toHaveProperty('topP', 0.6);
+      expect(normalized.llmConfig.modelKwargs).toBeUndefined();
+      expect(dropped.llmConfig).not.toHaveProperty('topP');
     });
 
     it('should handle web search with OpenRouter', () => {

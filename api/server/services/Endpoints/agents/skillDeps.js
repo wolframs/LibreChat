@@ -277,6 +277,9 @@ function buildAgentToolContext({ agent, config }) {
      *  pure subagents pruned from `agentConfigs` — so usage can be priced with
      *  the producing agent's config in multi-endpoint graphs. */
     endpointTokenConfig: config.endpointTokenConfig,
+    /** Per-agent route provenance captured before the shared request slot is
+     *  restored to the primary route. */
+    routedVia: config.routedVia,
     toolRegistry: config.toolRegistry,
     mcpAvailableTools: config.mcpAvailableTools,
     requestScopedConnections: config.requestScopedConnections,

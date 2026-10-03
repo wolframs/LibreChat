@@ -3,7 +3,7 @@ import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { SSEServerTransport } from '@modelcontextprotocol/sdk/server/sse.js';
 import { z } from 'zod';
 import { AsyncLocalStorage } from 'async_hooks';
-import { handleListenToAudio, handleGetUserAudio, MODEL } from './tools.js';
+import { handleListenToAudio, handleGetUserAudio, MODEL, WEEKLY_BUDGET_USD } from './tools.js';
 
 const app = express();
 const mcpContext = new AsyncLocalStorage();
@@ -26,7 +26,10 @@ function createMcpServer() {
   server.tool(
     'get_user_audio',
     {
-      limit: z.number().optional().describe('Max number of recent audio files to return. Defaults to 10.'),
+      limit: z
+        .number()
+        .optional()
+        .describe('Max number of recent audio files to return. Defaults to 10.'),
     },
     (args) => handleGetUserAudio(args, mcpContext),
   );
@@ -82,14 +85,18 @@ function createMcpServer() {
 
 const transports = new Map();
 
+function requestUserId(req) {
+  const value = req.headers['x-user-id'];
+  return typeof value === 'string' && value.trim() ? value.trim() : null;
+}
+
 // Probed by scripts/deploy.sh, alongside the /cost, /export and image-gen checks.
 app.get('/healthz', (_req, res) => {
   res.json({
     ok: true,
     model: MODEL,
     hasKey: Boolean(process.env.OPENROUTER_KEY || process.env.OPENROUTER_API_KEY),
-    dailyLimit: parseInt(process.env.AUDIO_EARS_DAILY_LIMIT ?? '20', 10),
-    cooldownSec: parseInt(process.env.AUDIO_EARS_COOLDOWN_SEC ?? '5', 10),
+    weeklyBudgetUSD: WEEKLY_BUDGET_USD,
     sessions: transports.size,
   });
 });
@@ -101,10 +108,14 @@ app.get('/healthz', (_req, res) => {
 const SSE_KEEPALIVE_MS = parseInt(process.env.SSE_KEEPALIVE_MS ?? '30000', 10);
 
 app.get('/sse', async (req, res) => {
-  console.log('New SSE connection. Query:', req.query, 'Headers:', req.headers);
+  const userId = requestUserId(req);
+  if (!userId) {
+    return res.status(401).send('Authenticated user context is required');
+  }
+  console.log('New authenticated SSE connection. Query:', req.query);
   const transport = new SSEServerTransport('/messages', res);
   const server = createMcpServer();
-  transports.set(transport.sessionId, transport);
+  transports.set(transport.sessionId, { transport, userId });
   const keepalive = setInterval(() => {
     if (!res.writableEnded) res.write(': keepalive\n\n');
   }, SSE_KEEPALIVE_MS);
@@ -117,12 +128,17 @@ app.get('/sse', async (req, res) => {
 });
 
 app.post('/messages', async (req, res) => {
-  const userId = req.headers['x-user-id'];
+  const userId = requestUserId(req);
+  if (!userId) {
+    return res.status(401).send('Authenticated user context is required');
+  }
+  const session = transports.get(req.query.sessionId);
+  if (!session || session.userId !== userId) {
+    return res.status(403).send('Session does not belong to this user');
+  }
   const conversationId = req.headers['x-conversation-id'];
   mcpContext.run({ userId, conversationId }, async () => {
-    const transport = transports.get(req.query.sessionId);
-    if (transport) await transport.handlePostMessage(req, res);
-    else res.status(400).send('Session not found');
+    await session.transport.handlePostMessage(req, res);
   });
 });
 

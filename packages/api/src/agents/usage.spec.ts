@@ -120,6 +120,40 @@ describe('recordCollectedUsage', () => {
       }
     });
 
+    it('resolves route provenance per producing agent in mixed graphs', async () => {
+      const primaryRoute = { endpoint: 'Gateway A', baseURL: 'https://a.example.com' };
+      const childRoute = { endpoint: 'Gateway B', baseURL: 'https://b.example.com' };
+      const routes = new Map([
+        ['primary', primaryRoute],
+        ['child', childRoute],
+        ['direct', undefined],
+      ]);
+
+      await recordCollectedUsage(deps, {
+        ...baseParams,
+        routedVia: primaryRoute,
+        resolveRoutedVia: (usage) =>
+          usage.agentId != null && routes.has(usage.agentId)
+            ? routes.get(usage.agentId)
+            : primaryRoute,
+        collectedUsage: [
+          { agentId: 'primary', input_tokens: 10, output_tokens: 1 },
+          { agentId: 'child', usage_type: 'subagent', input_tokens: 20, output_tokens: 2 },
+          { agentId: 'direct', usage_type: 'sequential', input_tokens: 30, output_tokens: 3 },
+        ],
+      });
+
+      expect(mockSpendTokens.mock.calls[0][0]).toEqual(
+        expect.objectContaining({ routedVia: primaryRoute }),
+      );
+      expect(mockSpendTokens.mock.calls[1][0]).toEqual(
+        expect.objectContaining({ routedVia: childRoute }),
+      );
+      expect(mockSpendTokens.mock.calls[2][0]).toEqual(
+        expect.not.objectContaining({ routedVia: expect.anything() }),
+      );
+    });
+
     it('should skip null entries in collectedUsage', async () => {
       const collectedUsage = [
         { input_tokens: 100, output_tokens: 50, model: 'gpt-4' },

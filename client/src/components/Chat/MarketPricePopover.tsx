@@ -4,6 +4,8 @@ import { useQuery } from '@tanstack/react-query';
 import { useRecoilValue } from 'recoil';
 import { ShieldCheck, Store, TrendingDown, TrendingUp } from 'lucide-react';
 import { Spinner, TooltipAnchor } from '@librechat/client';
+import { isAgentsEndpoint } from 'librechat-data-provider';
+import { useGetAgentByIdQuery } from '~/data-provider';
 import { useLocalize } from '~/hooks';
 import { useMarketplaceEndpoints } from '~/hooks/Chat';
 import { cn } from '~/utils';
@@ -57,6 +59,13 @@ function formatPer1M(value: number | null | undefined): string {
   return `$${value < 1 ? value.toFixed(3) : value.toFixed(2)}`;
 }
 
+export function formatMarketDiscount(percent: number): string {
+  if (percent > 0 && percent < 100) {
+    return String(Math.floor(percent * 10) / 10);
+  }
+  return String(Math.round(percent * 10) / 10);
+}
+
 function PriceRow({
   label,
   best,
@@ -92,13 +101,15 @@ function TrendSparkline({ trend }: { trend: MarketTrend }) {
           key={i}
           className={cn(
             'w-1 rounded-sm',
-            pct == null
-              ? 'h-px bg-border-medium'
-              : pct < 0
-                ? 'h-0.5 bg-amber-500'
-                : 'bg-emerald-500/70',
+            pct == null && 'h-px bg-border-medium',
+            pct != null && pct < 0 && 'h-0.5 bg-amber-500',
+            pct != null && pct >= 0 && 'bg-emerald-500/70',
           )}
-          style={pct != null && pct >= 0 ? { height: `${2 + (Math.min(pct, 100) / 100) * 18}px` } : undefined}
+          style={
+            pct != null && pct >= 0
+              ? { height: `${2 + (Math.min(pct, 100) / 100) * 18}px` }
+              : undefined
+          }
         />
       ))}
     </div>
@@ -128,17 +139,22 @@ function PopoverBody({ model }: { model: string }) {
 
   if (isLoading) {
     return (
-      <div className="flex w-72 justify-center py-6">
+      <div className="flex w-72 max-w-full justify-center py-6" role="status">
         <Spinner className="text-text-secondary" />
+        <span className="sr-only">{localize('com_ui_market_prices')}</span>
       </div>
     );
   }
   if (isError) {
-    return <div className="w-72 text-sm text-text-secondary">{localize('com_ui_market_error')}</div>;
+    return (
+      <div className="w-72 max-w-full text-sm text-text-secondary" role="alert">
+        {localize('com_ui_market_error')}
+      </div>
+    );
   }
   if (data == null) {
     return (
-      <div className="w-72 text-sm text-text-secondary">
+      <div className="w-72 max-w-full text-sm text-text-secondary" role="status">
         {localize('com_ui_market_not_listed')}
       </div>
     );
@@ -155,12 +171,24 @@ function PopoverBody({ model }: { model: string }) {
       data.direct.marketplaceOutput !== data.direct.output);
 
   return (
-    <div className="w-72 space-y-3">
-      <div className="flex items-center justify-between gap-2">
-        <span className="truncate font-mono text-xs text-text-secondary">{data.model}</span>
+    <div className="w-72 max-w-full space-y-3">
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <span className="min-w-0 truncate font-mono text-xs text-text-secondary" title={data.model}>
+          {data.model}
+        </span>
         {data.discountPct != null ? (
-          <span className="whitespace-nowrap rounded-full bg-emerald-500/15 px-2 py-0.5 text-xs font-medium text-emerald-600 dark:text-emerald-400">
-            {localize('com_ui_market_below_list', { percent: String(Math.round(data.discountPct)) })}
+          <span
+            className={cn(
+              'whitespace-nowrap rounded-full px-2 py-0.5 text-xs font-medium',
+              data.discountPct < 0
+                ? 'bg-amber-500/15 text-amber-600 dark:text-amber-400'
+                : 'bg-emerald-500/15 text-emerald-600 dark:text-emerald-400',
+            )}
+          >
+            {localize(
+              data.discountPct < 0 ? 'com_ui_market_above_list' : 'com_ui_market_below_list',
+              { percent: formatMarketDiscount(Math.abs(data.discountPct)) },
+            )}
           </span>
         ) : (
           <span className="whitespace-nowrap text-xs text-text-secondary">
@@ -174,7 +202,11 @@ function PopoverBody({ model }: { model: string }) {
           <span>{localize('com_ui_market_per_million')}</span>
           {hasListPrice && <span>{localize('com_ui_market_best_vs_list')}</span>}
         </div>
-        <PriceRow label={localize('com_ui_input')} best={data.best.input} list={data.direct.input} />
+        <PriceRow
+          label={localize('com_ui_input')}
+          best={data.best.input}
+          list={data.direct.input}
+        />
         <PriceRow
           label={localize('com_ui_output')}
           best={data.best.output}
@@ -204,10 +236,16 @@ function PopoverBody({ model }: { model: string }) {
               <span
                 className={cn(
                   'flex items-center gap-1',
-                  deepening ? 'text-emerald-600 dark:text-emerald-400' : 'text-amber-600 dark:text-amber-400',
+                  deepening
+                    ? 'text-emerald-600 dark:text-emerald-400'
+                    : 'text-amber-600 dark:text-amber-400',
                 )}
               >
-                {deepening ? <TrendingUp className="h-3 w-3" /> : <TrendingDown className="h-3 w-3" />}
+                {deepening ? (
+                  <TrendingUp className="h-3 w-3" />
+                ) : (
+                  <TrendingDown className="h-3 w-3" />
+                )}
                 {data.trend.currentPct != null && `${Math.round(data.trend.currentPct)}%`}
               </span>
             )}
@@ -267,8 +305,10 @@ function MarketPricePopover() {
 
   const marketEndpoints = useMarketplaceEndpoints();
 
-  const endpoint = conversation?.endpoint;
-  const model = conversation?.model ?? '';
+  const agentId = isAgentsEndpoint(conversation?.endpoint) ? conversation?.agent_id : null;
+  const { data: agent } = useGetAgentByIdQuery(agentId);
+  const endpoint = agent?.provider ?? conversation?.endpoint;
+  const model = agent?.model ?? conversation?.model ?? '';
   if (endpoint == null || model === '' || !marketEndpoints.includes(endpoint)) {
     return null;
   }
@@ -298,7 +338,7 @@ function MarketPricePopover() {
         unmountOnHide
         finalFocus={disclosureRef}
         aria-label={localize('com_ui_market_prices')}
-        className="z-[200] rounded-xl border border-border-medium bg-surface-secondary p-3 shadow-lg focus:outline-none"
+        className="z-[200] max-w-[calc(100vw-1rem)] rounded-xl border border-border-medium bg-surface-secondary p-3 shadow-lg focus:outline-none"
       >
         {open && <PopoverBody model={model} />}
       </Ariakit.Popover>

@@ -266,30 +266,37 @@ def describe_chunk(chunk_path: Path, prompt: str, api_key: str, model: str,
         method="POST",
     )
 
+    call_record = {
+        "model": model,
+        "chunk": chunk_label,
+        "cost": None,
+        "error": "unknown",
+    }
+    if usage_sink is not None:
+        usage_sink.append(call_record)
+
     try:
         with urllib.request.urlopen(req, timeout=timeout) as resp:
             data = json.loads(resp.read().decode("utf-8"))
     except urllib.error.HTTPError as e:
         err_body = e.read().decode("utf-8", errors="replace")
         if usage_sink is not None:
-            usage_sink.append({"model": model, "error": f"HTTP {e.code}",
-                               "detail": err_body[:300]})
+            call_record.update({"error": f"HTTP {e.code}", "detail": err_body[:300]})
         return f"_[chunk failed: HTTP {e.code}: {err_body[:300]}]_"
-    except urllib.error.URLError as e:
+    except (urllib.error.URLError, TimeoutError, OSError) as e:
         if usage_sink is not None:
-            usage_sink.append({"model": model, "error": "network", "detail": str(e)})
+            call_record.update({"error": "network", "detail": str(e)})
         return f"_[chunk failed: network error: {e}]_"
 
     usage = data.get("usage") or {}
     audio_tokens = (usage.get("prompt_tokens_details") or {}).get("audio_tokens")
     if usage_sink is not None:
-        usage_sink.append({
-            "model": model,
-            "chunk": chunk_label,
+        call_record.update({
             "cost": usage.get("cost"),
             "audio_tokens": audio_tokens,
             "prompt_tokens": usage.get("prompt_tokens"),
             "completion_tokens": usage.get("completion_tokens"),
+            "error": None,
         })
     if audio_tokens == 0:
         print(
@@ -314,6 +321,19 @@ def describe_chunk(chunk_path: Path, prompt: str, api_key: str, model: str,
         return content
     except (KeyError, IndexError, TypeError):
         return f"_[chunk failed: unexpected response shape: {json.dumps(data)[:300]}]_"
+
+
+def budget_admission(records: list, budget_usd: float | None) -> tuple[bool, str | None]:
+    """Admit another call only while every prior cost is known and budget remains."""
+    if budget_usd is None:
+        return True, None
+    costs = [record.get("cost") for record in records]
+    if any(not isinstance(cost, (int, float)) or not math.isfinite(cost) or cost < 0
+           for cost in costs):
+        return False, "_[budget admission stopped: prior call cost is unknown]_"
+    if sum(costs) >= budget_usd:
+        return False, "_[weekly audio budget exhausted; remaining calls skipped]_"
+    return True, None
 
 
 # ─── Format helpers ────────────────────────────────────────────────────────
@@ -396,6 +416,7 @@ def describe_audio(
     max_tokens: int = 1500,
     out_path: Path | None = None,
     usage_sink: list | None = None,
+    budget_usd: float | None = None,
 ) -> str:
     """Describe an audio file and return markdown.
 
@@ -475,6 +496,10 @@ def describe_audio(
                      if n > 1 else None)
             emit([f"## {label or 'description'}", ""])
             for mdl in models:
+                allowed, budget_message = budget_admission(usage_sink or [], budget_usd)
+                if not allowed:
+                    emit([budget_message, ""])
+                    return "\n".join(lines).rstrip() + "\n"
                 if len(models) > 1:
                     emit([f"### {mdl}", ""])
                 print(f"_calling {mdl}..._", file=sys.stderr, flush=True)
@@ -494,12 +519,16 @@ def describe_audio(
 
 def _write_usage(path: Path, records: list) -> None:
     """Persist per-call usage plus the totals a caller actually wants."""
-    costs = [r.get("cost") for r in records if isinstance(r.get("cost"), (int, float))]
+    raw_costs = [r.get("cost") for r in records]
+    costs_known = bool(raw_costs) and all(
+        isinstance(cost, (int, float)) and math.isfinite(cost) and cost >= 0
+        for cost in raw_costs
+    )
     audio = [r.get("audio_tokens") for r in records
              if isinstance(r.get("audio_tokens"), int)]
     path.write_text(json.dumps({
         "calls": records,
-        "cost_total": sum(costs) if costs else None,
+        "cost_total": sum(raw_costs) if costs_known else None,
         "audio_tokens_total": sum(audio) if audio else 0,
         "errors": [r for r in records if r.get("error")],
     }, indent=2))
@@ -530,6 +559,9 @@ def main() -> None:
                     help="write per-call cost and token counts here as JSON. Used "
                          "by the MCP wrapper to record spend that never reaches "
                          "LibreChat's transactions collection")
+    ap.add_argument("--budget-usd", type=float, default=None,
+                    help="stop before another provider call once known call costs "
+                         "reach this request's reserved weekly allowance")
     ap.add_argument("--max-tokens", type=int, default=1500,
                     help="cap on description length per chunk (default: 1500)")
     ap.add_argument("--list-models", action="store_true",
@@ -579,6 +611,7 @@ def main() -> None:
             max_tokens=args.max_tokens,
             out_path=args.out,
             usage_sink=usage_sink,
+            budget_usd=args.budget_usd,
         ), end="")
     except (FileNotFoundError, RuntimeError, ValueError) as e:
         # Still flush whatever usage was incurred before the failure — a run that
