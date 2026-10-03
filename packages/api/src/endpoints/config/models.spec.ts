@@ -379,12 +379,27 @@ describe('createLoadConfigModels – models.chatOnly', () => {
   /** Mirrors the shape a marketplace catalogue returns: an `architecture`
    *  block per entry describing what the model consumes and produces. */
   const catalogue = [
-    { id: 'claude-opus-4.8', architecture: { input_modalities: ['text'], output_modalities: ['text'] } },
-    { id: 'gpt-5-vision', architecture: { input_modalities: ['text', 'image'], output_modalities: ['text'] } },
-    { id: 'kling-text-to-video', architecture: { input_modalities: ['text'], output_modalities: ['video'] } },
+    {
+      id: 'claude-opus-4.8',
+      architecture: { input_modalities: ['text'], output_modalities: ['text'] },
+    },
+    {
+      id: 'gpt-5-vision',
+      architecture: { input_modalities: ['text', 'image'], output_modalities: ['text'] },
+    },
+    {
+      id: 'kling-text-to-video',
+      architecture: { input_modalities: ['text'], output_modalities: ['video'] },
+    },
     { id: 'wan-2.7', architecture: { input_modalities: ['text'], output_modalities: ['image'] } },
-    { id: 'whisper-large', architecture: { input_modalities: ['audio'], output_modalities: ['text'] } },
-    { id: 'text-embedding-3', architecture: { input_modalities: ['text'], output_modalities: ['embedding'] } },
+    {
+      id: 'whisper-large',
+      architecture: { input_modalities: ['audio'], output_modalities: ['text'] },
+    },
+    {
+      id: 'text-embedding-3',
+      architecture: { input_modalities: ['text'], output_modalities: ['embedding'] },
+    },
     { id: 'legacy-no-metadata' },
   ];
 

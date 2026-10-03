@@ -1,5 +1,4 @@
 import { Providers } from '@librechat/agents';
-import { Types } from 'mongoose';
 import type { IMongoFile } from '@librechat/data-schemas';
 import type { ServerRequest } from '~/types';
 import { encodeAndFormatAudios } from './audio';
@@ -9,101 +8,203 @@ jest.mock('~/files/validation', () => ({
 }));
 
 jest.mock('./utils', () => ({
+  ...jest.requireActual('./utils'),
   getFileStream: jest.fn(),
   getConfiguredFileSizeLimit: jest.fn(),
+  isConfiguredProviderMediaType: jest.fn(),
+}));
+
+jest.mock('./memoryGuard', () => ({
+  runGuardedEncode: jest.fn((_bytes: number, fn: () => unknown) => fn()),
 }));
 
 import { validateAudio } from '~/files/validation';
-import { getFileStream, getConfiguredFileSizeLimit } from './utils';
+import { getFileStream, isConfiguredProviderMediaType } from './utils';
+import { Types } from 'mongoose';
 
 const mockedValidateAudio = validateAudio as jest.MockedFunction<typeof validateAudio>;
 const mockedGetFileStream = getFileStream as jest.MockedFunction<typeof getFileStream>;
-const mockedGetConfiguredFileSizeLimit = getConfiguredFileSizeLimit as jest.MockedFunction<
-  typeof getConfiguredFileSizeLimit
+const mockedIsConfigured = isConfiguredProviderMediaType as jest.MockedFunction<
+  typeof isConfiguredProviderMediaType
 >;
 
-const CONTENT = 'SUQzBAAAAAA=';
-
-const createMockFile = (filename: string, type: string): IMongoFile =>
+const createMockFile = (type = 'audio/wav', filename = 'tone.wav'): IMongoFile =>
   ({
     _id: new Types.ObjectId(),
-    user: new Types.ObjectId(),
     file_id: 'audio-1',
     filename,
     filepath: `/uploads/${filename}`,
     type,
     bytes: 1024,
+    source: 'local',
+    user: 'user-1',
     object: 'file',
-    embedded: false,
     usage: 0,
     createdAt: new Date(),
     updatedAt: new Date(),
   }) as unknown as IMongoFile;
 
-const run = (file: IMongoFile, provider: Providers) =>
-  encodeAndFormatAudios(
-    {} as ServerRequest,
-    [file],
-    { provider },
-    jest.fn() as unknown as Parameters<typeof encodeAndFormatAudios>[3],
-  );
+const req = { config: {} } as unknown as ServerRequest;
+const getStrategyFunctions = jest.fn();
 
-describe('encodeAndFormatAudios', () => {
+describe('encodeAndFormatAudios - provider formatting', () => {
   beforeEach(() => {
     jest.clearAllMocks();
-    mockedGetConfiguredFileSizeLimit.mockReturnValue(undefined);
     mockedValidateAudio.mockResolvedValue({ isValid: true });
-    mockedGetFileStream.mockImplementation(async (_req, file) => ({
+    mockedIsConfigured.mockReturnValue(false);
+    const file = createMockFile();
+    mockedGetFileStream.mockResolvedValue({
       file,
-      content: CONTENT,
+      content: 'AAAA',
       metadata: {
         file_id: file.file_id,
         filepath: file.filepath,
+        source: file.source,
         filename: file.filename,
         type: file.type,
       },
-    }));
-  });
-
-  it.each([
-    [Providers.OPENAI, 'a custom endpoint or OpenAI itself'],
-    [Providers.OPENROUTER, 'OpenRouter'],
-    [Providers.XAI, 'xAI'],
-  ])('emits an input_audio part for %s (%s)', async (provider) => {
-    const result = await run(createMockFile('track.mp3', 'audio/mpeg'), provider as Providers);
-    expect(result.audios).toEqual([
-      { type: 'input_audio', input_audio: { data: CONTENT, format: 'mp3' } },
-    ]);
-  });
-
-  it('emits a media part for Google', async () => {
-    const result = await run(createMockFile('track.mp3', 'audio/mpeg'), Providers.GOOGLE);
-    expect(result.audios).toEqual([{ type: 'media', mimeType: 'audio/mpeg', data: CONTENT }]);
-  });
-
-  it('falls back to the MIME type when the filename carries no usable extension', async () => {
-    const result = await run(createMockFile('voice-memo', 'audio/mpeg'), Providers.OPENAI);
-    expect(result.audios).toEqual([
-      { type: 'input_audio', input_audio: { data: CONTENT, format: 'mp3' } },
-    ]);
-  });
-
-  it('maps audio/x-m4a to the m4a format value', async () => {
-    const result = await run(createMockFile('clip.M4A', 'audio/x-m4a'), Providers.OPENAI);
-    expect(result.audios[0]).toEqual({
-      type: 'input_audio',
-      input_audio: { data: CONTENT, format: 'm4a' },
     });
   });
 
-  it('sends a naming note instead of the file where no audio block exists', async () => {
-    const result = await run(createMockFile('track.mp3', 'audio/mpeg'), Providers.ANTHROPIC);
-    expect(result.audios).toHaveLength(1);
-    const note = result.audios[0] as { type: string; text: string };
-    expect(note.type).toBe('text');
-    expect(note.text).toContain('track.mp3');
-    expect(note.text).toContain('audio-1');
-    expect(note.text).not.toContain(CONTENT);
+  it('emits a Google media block for google', async () => {
+    const result = await encodeAndFormatAudios(
+      req,
+      [createMockFile()],
+      { provider: Providers.GOOGLE },
+      getStrategyFunctions,
+    );
+    expect(result.audios).toEqual([{ type: 'media', mimeType: 'audio/wav', data: 'AAAA' }]);
+  });
+
+  it('emits an OpenAI-compatible input_audio block for openrouter without configuration', async () => {
+    const result = await encodeAndFormatAudios(
+      req,
+      [createMockFile()],
+      { provider: Providers.OPENROUTER },
+      getStrategyFunctions,
+    );
+    expect(mockedIsConfigured).not.toHaveBeenCalled();
+    expect(result.audios).toEqual([
+      { type: 'input_audio', input_audio: { data: 'AAAA', format: 'wav' } },
+    ]);
+  });
+
+  it('forwards audio to custom OpenAI-compatible endpoints', async () => {
+    const result = await encodeAndFormatAudios(
+      req,
+      [createMockFile()],
+      { provider: Providers.OPENAI, endpoint: 'MyGateway' },
+      getStrategyFunctions,
+    );
+    expect(result.audios).toEqual([
+      { type: 'input_audio', input_audio: { data: 'AAAA', format: 'wav' } },
+    ]);
     expect(result.files).toHaveLength(1);
+  });
+
+  it('emits an input_audio block for a custom endpoint whose config allows audio', async () => {
+    mockedIsConfigured.mockReturnValue(true);
+    const result = await encodeAndFormatAudios(
+      req,
+      [createMockFile()],
+      { provider: Providers.OPENAI, endpoint: 'MyGateway' },
+      getStrategyFunctions,
+    );
+    expect(result.audios).toEqual([
+      { type: 'input_audio', input_audio: { data: 'AAAA', format: 'wav' } },
+    ]);
+  });
+
+  it('describes audio to providers without a native audio part', async () => {
+    mockedIsConfigured.mockReturnValue(true);
+    const result = await encodeAndFormatAudios(
+      req,
+      [createMockFile()],
+      { provider: Providers.ANTHROPIC },
+      getStrategyFunctions,
+    );
+    expect(result.audios).toEqual([
+      { type: 'text', text: expect.stringContaining('file_id: audio-1') },
+    ]);
+  });
+
+  describe('input_audio format canonicalization', () => {
+    /** Re-points the `getFileStream` mock at a specific file for one test. */
+    const stageFile = (file: IMongoFile) => {
+      mockedGetFileStream.mockResolvedValue({
+        file,
+        content: 'AAAA',
+        metadata: {
+          file_id: file.file_id,
+          filepath: file.filepath,
+          source: file.source,
+          filename: file.filename,
+          type: file.type,
+        },
+      });
+    };
+
+    const formatFor = async (file: IMongoFile) => {
+      stageFile(file);
+      mockedIsConfigured.mockReturnValue(true);
+      const result = await encodeAndFormatAudios(
+        req,
+        [file],
+        { provider: Providers.OPENAI, endpoint: 'MyGateway' },
+        getStrategyFunctions,
+      );
+      return (result.audios[0] as { input_audio?: { format?: string } })?.input_audio?.format;
+    };
+
+    it.each([
+      ['audio/wave', 'clip.wave', 'wav'],
+      ['audio/x-wav', 'clip.x-wav', 'wav'],
+      ['audio/mpeg', 'clip.mpeg', 'mp3'],
+      ['audio/mpeg3', 'clip.mpeg3', 'mp3'],
+      ['audio/x-m4a', 'clip.x-m4a', 'm4a'],
+      ['audio/vorbis', 'clip.vorbis', 'ogg'],
+      ['audio/x-flac', 'clip.x-flac', 'flac'],
+    ])('canonicalizes %s to a provider-accepted format', async (type, filename, expected) => {
+      expect(await formatFor(createMockFile(type, filename))).toBe(expected);
+    });
+
+    it('derives the format from the MIME type when the filename has no extension', async () => {
+      expect(await formatFor(createMockFile('audio/mpeg', 'recording'))).toBe('mp3');
+    });
+
+    it('preserves the supported filename format when MIME metadata disagrees', async () => {
+      expect(await formatFor(createMockFile('audio/mpeg', 'clip.wav'))).toBe('wav');
+    });
+
+    it('falls back to a supported filename extension for MIME types with no mapping', async () => {
+      expect(await formatFor(createMockFile('audio/aac', 'clip.aac'))).toBe('aac');
+    });
+
+    it('throws rather than emitting an unsupported format', async () => {
+      /** `audio/wma` passes MIME validation but has no provider-accepted format. */
+      stageFile(createMockFile('audio/wma', 'recording'));
+      mockedIsConfigured.mockReturnValue(true);
+      await expect(
+        encodeAndFormatAudios(
+          req,
+          [createMockFile('audio/wma', 'recording')],
+          { provider: Providers.OPENAI, endpoint: 'MyGateway' },
+          getStrategyFunctions,
+        ),
+      ).rejects.toThrow(/Could not determine audio format/i);
+    });
+
+    it('canonicalizes for openrouter as well', async () => {
+      stageFile(createMockFile('audio/wave', 'clip.wave'));
+      const result = await encodeAndFormatAudios(
+        req,
+        [createMockFile('audio/wave', 'clip.wave')],
+        { provider: Providers.OPENROUTER },
+        getStrategyFunctions,
+      );
+      expect(result.audios).toEqual([
+        { type: 'input_audio', input_audio: { data: 'AAAA', format: 'wav' } },
+      ]);
+    });
   });
 });

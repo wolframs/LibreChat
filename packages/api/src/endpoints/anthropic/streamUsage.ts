@@ -146,7 +146,9 @@ export function observeAnthropicStreamUsage(
     const response = await doFetch(input, init);
 
     const body = response.body;
-    const isEventStream = (response.headers?.get('content-type') ?? '').includes('text/event-stream');
+    const isEventStream = (response.headers?.get('content-type') ?? '').includes(
+      'text/event-stream',
+    );
     if (body == null || !isEventStream || typeof body.tee !== 'function') {
       return response;
     }

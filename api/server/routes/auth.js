@@ -1,5 +1,10 @@
 const express = require('express');
-const { createSetBalanceConfig, forceRefreshCloudFrontAuthCookies } = require('@librechat/api');
+const {
+  limiterCache,
+  createSetBalanceConfig,
+  createTwoFactorManagementLimiter,
+  forceRefreshCloudFrontAuthCookies,
+} = require('@librechat/api');
 const { SystemCapabilities } = require('@librechat/data-schemas');
 const {
   resetPasswordRequestController,
@@ -31,6 +36,10 @@ const setBalanceConfig = createSetBalanceConfig({
 
 const router = express.Router();
 const requireAdminAccess = requireCapability(SystemCapabilities.ACCESS_ADMIN);
+const twoFactorManagementLimiter = createTwoFactorManagementLimiter({
+  getAppConfig: () => getAppConfig({ baseOnly: true }),
+  store: limiterCache('two_factor_management_user_limiter'),
+});
 const getCloudFrontAuthCookieRefreshResult = (req, res) => {
   const warmedResult = req.cloudFrontAuthCookieRefreshResult;
   if (warmedResult && (warmedResult.attempted || !warmedResult.enabled)) {
@@ -46,8 +55,10 @@ router.post('/logout', middleware.requireJwtAuth, logoutController);
 router.post(
   '/login',
   middleware.logHeaders,
+  middleware.requireSameOrigin,
   middleware.loginLimiter,
   middleware.checkBan,
+  middleware.validateEmailLogin,
   ldapAuth ? middleware.requireLdapAuth : middleware.requireLocalAuth,
   setBalanceConfig,
   loginController,
@@ -93,18 +104,24 @@ router.post(
   resetPasswordController,
 );
 
-router.post('/2fa/enable', middleware.requireJwtAuth, enable2FA);
-router.post('/2fa/verify', middleware.requireJwtAuth, verify2FA);
+router.post('/2fa/enable', middleware.requireJwtAuth, twoFactorManagementLimiter, enable2FA);
+router.post('/2fa/verify', middleware.requireJwtAuth, twoFactorManagementLimiter, verify2FA);
 router.post(
   '/2fa/verify-temp',
+  middleware.requireSameOrigin,
   middleware.setTwoFactorTempUser,
   middleware.twoFactorTempLimiter,
   middleware.checkBan,
   verify2FAWithTempToken,
 );
-router.post('/2fa/confirm', middleware.requireJwtAuth, confirm2FA);
-router.post('/2fa/disable', middleware.requireJwtAuth, disable2FA);
-router.post('/2fa/backup/regenerate', middleware.requireJwtAuth, regenerateBackupCodes);
+router.post('/2fa/confirm', middleware.requireJwtAuth, twoFactorManagementLimiter, confirm2FA);
+router.post('/2fa/disable', middleware.requireJwtAuth, twoFactorManagementLimiter, disable2FA);
+router.post(
+  '/2fa/backup/regenerate',
+  middleware.requireJwtAuth,
+  twoFactorManagementLimiter,
+  regenerateBackupCodes,
+);
 
 router.get('/graph-token', middleware.requireJwtAuth, graphTokenController);
 

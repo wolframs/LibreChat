@@ -1,13 +1,13 @@
 import { memo, useRef } from 'react';
+import { useRecoilValue } from 'recoil';
 import * as Ariakit from '@ariakit/react';
 import { useQuery } from '@tanstack/react-query';
-import { useRecoilValue } from 'recoil';
-import { ShieldCheck, Store, TrendingDown, TrendingUp } from 'lucide-react';
 import { Spinner, TooltipAnchor } from '@librechat/client';
 import { isAgentsEndpoint } from 'librechat-data-provider';
+import { ShieldCheck, Store, TrendingDown, TrendingUp } from 'lucide-react';
 import { useGetAgentByIdQuery } from '~/data-provider';
-import { useLocalize } from '~/hooks';
 import { useMarketplaceEndpoints } from '~/hooks/Chat';
+import { useLocalize } from '~/hooks';
 import { cn } from '~/utils';
 import store from '~/store';
 

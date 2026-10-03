@@ -2,6 +2,7 @@ import { EModelEndpoint, extractEnvVariable, normalizeEndpointName } from 'libre
 import type { TCustomEndpoints, TEndpoint } from 'librechat-data-provider';
 import type { TCustomEndpointsConfig } from '~/types/endpoints';
 import { isNativeAnthropicURL } from '~/endpoints/anthropic/helpers';
+import { resolveEndpointProviderId } from './providers';
 import { isUserProvided } from '~/utils';
 
 /**
@@ -84,6 +85,12 @@ export function loadCustomEndpointsConfig(
          */
         extendedCacheTTL:
           provider === EModelEndpoint.anthropic && isNativeAnthropicURL(resolvedBaseURL),
+        providerId: resolveEndpointProviderId({
+          name,
+          baseURL: resolvedBaseURL,
+          iconURL,
+          provider,
+        }),
       };
     }
   }

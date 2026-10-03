@@ -3,7 +3,11 @@ import { logger } from '@librechat/data-schemas';
 import { isDocumentSupportedProvider, isOpenAILikeProvider } from 'librechat-data-provider';
 import type { IMongoFile } from '@librechat/data-schemas';
 import type { ServerRequest, StrategyFunctions, AudioResult } from '~/types';
-import { getFileStream, getConfiguredFileSizeLimit } from './utils';
+import {
+  getFileStream,
+  getConfiguredFileSizeLimit,
+  isAttachmentObjectNotFoundError,
+} from './utils';
 import { validateAudio } from '~/files/validation';
 import { runGuardedEncode } from './memoryGuard';
 
@@ -78,7 +82,7 @@ function resolveAudioFormat(file: { filename?: string; type: string }): string {
  * @param req - The request object
  * @param files - Array of audio files
  * @param params - Object containing provider and optional endpoint
- * @param params.provider - The provider to format for (currently only google is supported)
+ * @param params.provider - The provider to format for
  * @param params.endpoint - Optional endpoint name for file config lookup
  * @param getStrategyFunctions - Function to get strategy functions
  * @returns Promise that resolves to audio and file metadata
@@ -107,6 +111,9 @@ export async function encodeAndFormatAudios(
 
   for (const settledResult of results) {
     if (settledResult.status === 'rejected') {
+      if (isAttachmentObjectNotFoundError(settledResult.reason)) {
+        throw settledResult.reason;
+      }
       console.error('Audio processing failed:', settledResult.reason);
       continue;
     }

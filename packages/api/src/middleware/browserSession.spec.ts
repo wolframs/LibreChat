@@ -1,6 +1,6 @@
 import jwt from 'jsonwebtoken';
-import type { IUser } from '@librechat/data-schemas';
 import type { NextFunction, Response } from 'express';
+import type { IUser } from '@librechat/data-schemas';
 import type { ServerRequest } from '~/types/http';
 import { createBrowserSessionAuth } from './browserSession';
 

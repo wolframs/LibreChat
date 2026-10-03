@@ -1,8 +1,13 @@
 import { EModelEndpoint, AuthKeys } from 'librechat-data-provider';
-import type { BaseInitializeParams, InitializeResultBase, AnthropicConfigOptions } from '~/types';
+import type {
+  InitializeResultBase,
+  AnthropicConfigOptions,
+  ProviderInitializeParams,
+} from '~/types';
 import { loadAnthropicVertexCredentials, getVertexCredentialOptions } from './vertex';
 import { markRequestRouting, attachStreamUsageSink } from '~/endpoints/routing';
 import { checkUserKeyExpiry, isEnabled, mergeHeaders } from '~/utils';
+import { resolveEndpointRuntime } from '~/types';
 import { getLLMConfig } from './llm';
 
 /**
@@ -13,16 +18,14 @@ import { getLLMConfig } from './llm';
  * @returns Promise resolving to Anthropic configuration options
  * @throws Error if API key is not provided (when not using Vertex AI)
  */
-export async function initializeAnthropic({
-  req,
-  endpoint,
-  model_parameters,
-  db,
-}: BaseInitializeParams): Promise<InitializeResultBase> {
+export async function initializeAnthropic(
+  params: ProviderInitializeParams,
+): Promise<InitializeResultBase> {
+  const { endpoint, model_parameters, db } = params;
+  const { appConfig, user, requestBody, routing } = resolveEndpointRuntime(params);
   void endpoint;
-  const appConfig = req.config;
   const { ANTHROPIC_API_KEY, ANTHROPIC_REVERSE_PROXY, PROXY } = process.env;
-  const { key: expiresAt } = req.body;
+  const { key: expiresAt } = requestBody;
 
   /**
    * One-shot per-message prompt-cache TTL armed from the client. Rides the
@@ -30,9 +33,8 @@ export async function initializeAnthropic({
    * `model_parameters`, so it applies to exactly one message. Validated to the
    * two values Anthropic supports; anything else falls back to the 5m default.
    */
-  const rawCacheTTL = (req.body as { cacheTTL?: unknown }).cacheTTL;
-  const cacheTTL: '5m' | '1h' | undefined =
-    rawCacheTTL === '1h' ? '1h' : rawCacheTTL === '5m' ? '5m' : undefined;
+  const rawCacheTTL = requestBody.cacheTTL;
+  const cacheTTL = rawCacheTTL === '1h' || rawCacheTTL === '5m' ? rawCacheTTL : undefined;
 
   let credentials: Record<string, unknown> = {};
   let vertexOptions: { region?: string; projectId?: string } | undefined;
@@ -61,7 +63,7 @@ export async function initializeAnthropic({
     const isUserProvided = ANTHROPIC_API_KEY === 'user_provided';
 
     const anthropicApiKey = isUserProvided
-      ? await db.getUserKey({ userId: req.user?.id ?? '', name: EModelEndpoint.anthropic })
+      ? await db.getUserKey({ userId: user?.id ?? '', name: EModelEndpoint.anthropic })
       : ANTHROPIC_API_KEY;
 
     if (!anthropicApiKey) {
@@ -83,7 +85,7 @@ export async function initializeAnthropic({
   /** Only when redirected: an unstamped transaction means api.anthropic.com.
    *  The Vertex path carries its own endpoint and auth and is not a base URL. */
   if (!useVertexAI) {
-    markRequestRouting(req, {
+    markRequestRouting(routing, {
       endpoint: EModelEndpoint.anthropic,
       baseURL: ANTHROPIC_REVERSE_PROXY,
     });
@@ -94,7 +96,7 @@ export async function initializeAnthropic({
     reverseProxyUrl: ANTHROPIC_REVERSE_PROXY ?? undefined,
     modelOptions: {
       ...(model_parameters ?? {}),
-      user: req.user?.id,
+      user: user?.id,
     },
     ...(headers && { headers }),
     ...(cacheTTL && { cacheTTL }),
@@ -103,7 +105,7 @@ export async function initializeAnthropic({
      *  where the parser reads it, so there is nothing to observe and no reason
      *  to tee the stream. A reverse proxy may not be Anthropic underneath. */
     ...(ANTHROPIC_REVERSE_PROXY && !useVertexAI
-      ? { streamUsageSink: attachStreamUsageSink(req) }
+      ? { streamUsageSink: attachStreamUsageSink(routing) }
       : {}),
     // Pass Vertex AI options if configured
     ...(vertexOptions && { vertexOptions }),
@@ -113,12 +115,12 @@ export async function initializeAnthropic({
 
   const result = getLLMConfig(credentials, clientOptions);
 
-  if (anthropicConfig?.streamRate) {
-    (result.llmConfig as Record<string, unknown>)._lc_stream_delay = anthropicConfig.streamRate;
+  if (anthropicConfig?.streamRate != null) {
+    result.llmConfig._lc_stream_delay = anthropicConfig.streamRate;
   }
 
-  if (allConfig?.streamRate) {
-    (result.llmConfig as Record<string, unknown>)._lc_stream_delay = allConfig.streamRate;
+  if (allConfig?.streamRate != null) {
+    result.llmConfig._lc_stream_delay = allConfig.streamRate;
   }
 
   return result;

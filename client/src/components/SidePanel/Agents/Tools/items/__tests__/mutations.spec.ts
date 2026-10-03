@@ -1,7 +1,7 @@
 import { AgentCapabilities, ArtifactModes } from 'librechat-data-provider';
 import type { AgentItem } from '../types';
 import { makePlugin, makeSkill, makeMcpServer, makeAction } from 'test/itemFactories';
-import { computeToggleAction, skillsEnabledTransition } from '../mutations';
+import { computeToggleAction } from '../mutations';
 
 const builtinCode: AgentItem = {
   kind: 'builtin',
@@ -131,29 +131,23 @@ describe('computeToggleAction', () => {
   });
 });
 
-describe('skillsEnabledTransition', () => {
-  test('adding the first skill turns the master flag on', () => {
-    expect(skillsEnabledTransition([], ['s1'], undefined)).toBe(true);
-    expect(skillsEnabledTransition([], ['s1'], false)).toBe(true);
-  });
+describe('computeToggleAction — ask_user_question builtin', () => {
+  const item = {
+    kind: 'builtin',
+    id: 'ask_user_question',
+    iconKey: 'ask_user_question',
+    name: 'com_ui_ask_user',
+    description: 'com_agents_ask_user_info',
+  } as const;
 
-  test('adding the first skill leaves an already-on flag alone', () => {
-    expect(skillsEnabledTransition([], ['s1'], true)).toBeUndefined();
-  });
-
-  test('removing the last skill turns the master flag off', () => {
-    expect(skillsEnabledTransition(['s1'], [], true)).toBe(false);
-  });
-
-  test('removing the last skill leaves an off flag alone', () => {
-    expect(skillsEnabledTransition(['s1'], [], false)).toBeUndefined();
-    expect(skillsEnabledTransition(['s1'], [], undefined)).toBeUndefined();
-  });
-
-  test('edits within a non-empty selection never touch the flag', () => {
-    expect(skillsEnabledTransition(['s1'], ['s1', 's2'], true)).toBeUndefined();
-    expect(skillsEnabledTransition(['s1'], ['s1', 's2'], false)).toBeUndefined();
-    expect(skillsEnabledTransition(['s1', 's2'], ['s1'], true)).toBeUndefined();
-    expect(skillsEnabledTransition(['s1', 's2'], ['s1'], false)).toBeUndefined();
+  test('toggles agent.tools, never a capability field', () => {
+    expect(computeToggleAction(item as never, { selected: false })).toEqual({
+      type: 'tool-add',
+      id: 'ask_user_question',
+    });
+    expect(computeToggleAction(item as never, { selected: true })).toEqual({
+      type: 'tool-remove',
+      id: 'ask_user_question',
+    });
   });
 });

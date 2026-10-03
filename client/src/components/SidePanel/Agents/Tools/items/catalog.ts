@@ -23,7 +23,18 @@ export interface BuildCatalogInputs {
   mcpServersMap: Map<string, MCPServerInfo>;
   skills: TSkillSummary[];
   actions: Action[];
-  permissions: { mcp: boolean; skills: boolean };
+  /**
+   * Role grants gating catalog inclusion. `mcp` and `skills` gate their own item
+   * kinds; the rest gate the matching builtin (see `BUILTIN_ROLE_PERMISSIONS`) on
+   * top of its admin-enabled capability, so a builtin has to clear both.
+   */
+  permissions: {
+    mcp: boolean;
+    skills: boolean;
+    webSearch: boolean;
+    runCode: boolean;
+    fileSearch: boolean;
+  };
   /**
    * Id of the signed-in user. When provided, skills authored by this user are
    * flagged `ownedByUser` so the "Made by you" view can surface them. Optional
@@ -87,6 +98,15 @@ const BUILTIN_DEFINITIONS: BuiltinDef[] = [
   },
 ];
 
+/** Role grant each builtin needs on top of its capability. A builtin absent here
+ *  (`artifacts`) carries no role permission and passes on the capability alone. */
+const BUILTIN_ROLE_PERMISSIONS: Partial<Record<BuiltinId, 'webSearch' | 'runCode' | 'fileSearch'>> =
+  {
+    [AgentCapabilities.execute_code]: 'runCode',
+    [AgentCapabilities.web_search]: 'webSearch',
+    [AgentCapabilities.file_search]: 'fileSearch',
+  };
+
 function countEndpoints(settings: Action['settings']): number {
   if (settings == null) {
     return 0;
@@ -106,6 +126,10 @@ export function buildCatalog(inputs: BuildCatalogInputs): AgentItem[] {
     if (!enabled.has(def.id)) {
       continue;
     }
+    const roleGrant = BUILTIN_ROLE_PERMISSIONS[def.id];
+    if (roleGrant != null && !inputs.permissions[roleGrant]) {
+      continue;
+    }
     items.push({
       kind: 'builtin',
       id: def.id,
@@ -115,6 +139,27 @@ export function buildCatalog(inputs: BuildCatalogInputs): AgentItem[] {
       status: inputs.builtinAuthMap?.get(def.id) === true ? 'needs_setup' : undefined,
       userProvidedAuth:
         def.id === AgentCapabilities.web_search ? inputs.webSearchUserProvided === true : undefined,
+    });
+  }
+
+  /**
+   * Native tool presented with the builtins (it ships with the app and pauses
+   * the run like a first-class feature), while remaining an `agent.tools`
+   * entry mechanically. Availability is its OWN capability (like execute_code /
+   * web_search), NOT the generic `tools` one — the admin gates questions
+   * independently via `endpoints.agents.capabilities` — AND the server must
+   * still list the plugin (admin didn't filter it out).
+   */
+  if (
+    enabled.has(AgentCapabilities.ask_user_question) &&
+    inputs.regularTools.some((plugin) => plugin.pluginKey === 'ask_user_question')
+  ) {
+    items.push({
+      kind: 'builtin',
+      id: 'ask_user_question',
+      iconKey: 'ask_user_question',
+      name: 'com_ui_ask_user',
+      description: 'com_agents_ask_user_info',
     });
   }
 
@@ -150,6 +195,9 @@ export function buildCatalog(inputs: BuildCatalogInputs): AgentItem[] {
 
   if (enabled.has(AgentCapabilities.tools)) {
     for (const plugin of inputs.regularTools) {
+      if (plugin.pluginKey === 'ask_user_question') {
+        continue; // surfaced as a builtin above — don't double-list as a plugin
+      }
       items.push({
         kind: 'tool',
         id: plugin.pluginKey,

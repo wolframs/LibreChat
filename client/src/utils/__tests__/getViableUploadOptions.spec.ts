@@ -3,6 +3,7 @@ import type { FileConfig } from 'librechat-data-provider';
 import { getViableUploadOptions, type UploadOptionContext } from '../files';
 
 const XLSX = 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet';
+const POTX = 'application/vnd.openxmlformats-officedocument.presentationml.template';
 
 /** context accepts plain text + csv (text), pdf + xlsx (ocr); nothing else */
 const fileConfig = {
@@ -46,6 +47,13 @@ describe('getViableUploadOptions', () => {
       expect(getViableUploadOptions([file(XLSX, 'report.xlsx')], baseCtx())).toEqual([
         EToolResources.execute_code,
         EToolResources.context,
+      ]);
+    });
+
+    it('routes a PowerPoint template to file search and code, not the provider', () => {
+      expect(getViableUploadOptions([file(POTX, 'brand-template.potx')], baseCtx())).toEqual([
+        EToolResources.file_search,
+        EToolResources.execute_code,
       ]);
     });
 
@@ -122,6 +130,33 @@ describe('getViableUploadOptions', () => {
         endpointSupportedMimeTypes: [/.*/],
       });
       expect(getViableUploadOptions([file(XLSX, 'report.xlsx')], ctx)).toEqual([undefined]);
+    });
+
+    it('offers direct attach for a video when the custom config explicitly allows video', () => {
+      const ctx = baseCtx({
+        provider: 'MyGateway',
+        endpoint: 'MyGateway',
+        endpointType: 'custom',
+        fileSearchEnabled: false,
+        codeEnabled: false,
+        contextEnabled: false,
+        endpointSupportedMimeTypes: [/^image\/.*$/, /^application\/pdf$/, /^video\/.*$/],
+      });
+      expect(getViableUploadOptions([file('video/mp4', 'clip.mp4')], ctx)).toEqual([undefined]);
+      expect(getViableUploadOptions([file('audio/wav', 'tone.wav')], ctx)).toEqual([]);
+    });
+
+    it('does not offer video for a custom endpoint that inherits the default config', () => {
+      const ctx = baseCtx({
+        provider: 'MyGateway',
+        endpoint: 'MyGateway',
+        endpointType: 'custom',
+        fileSearchEnabled: false,
+        codeEnabled: false,
+        contextEnabled: false,
+        endpointSupportedMimeTypes: undefined,
+      });
+      expect(getViableUploadOptions([file('video/mp4', 'clip.mp4')], ctx)).toEqual([]);
     });
 
     it('does not treat a non-permissive custom config as broad provider support', () => {

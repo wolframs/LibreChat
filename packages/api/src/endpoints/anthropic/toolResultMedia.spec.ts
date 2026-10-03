@@ -77,8 +77,14 @@ describe('liftToolResultMedia', () => {
    */
   it('lifts every non-text block, not just images', () => {
     const doc = { type: 'document', source: { type: 'text', data: 'x' } };
-    const audio = { type: 'audio', source: { type: 'base64', media_type: 'audio/wav', data: 'QQ' } };
-    const video = { type: 'video', source: { type: 'base64', media_type: 'video/mp4', data: 'QQ' } };
+    const audio = {
+      type: 'audio',
+      source: { type: 'base64', media_type: 'audio/wav', data: 'QQ' },
+    };
+    const video = {
+      type: 'video',
+      source: { type: 'base64', media_type: 'video/mp4', data: 'QQ' },
+    };
     const request = body([
       toolResult('toolu_01', [{ type: 'text', text: 'done' }, doc, IMAGE, audio, video]),
     ]);
@@ -321,7 +327,9 @@ describe('getLLMConfig wiring', () => {
     const direct = getLLMConfig('test-api-key', {
       modelOptions: { model: 'claude-sonnet-4.5' },
     } as Parameters<typeof getLLMConfig>[1]);
-    expect((direct.llmConfig.clientOptions as { fetch?: unknown } | undefined)?.fetch).toBeUndefined();
+    expect(
+      (direct.llmConfig.clientOptions as { fetch?: unknown } | undefined)?.fetch,
+    ).toBeUndefined();
 
     const explicit = getLLMConfig('test-api-key', {
       modelOptions: { model: 'claude-sonnet-4.5' },

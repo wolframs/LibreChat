@@ -1,4 +1,5 @@
 import { memo, useState } from 'react';
+import { Button } from '@librechat/client';
 import { Info, Settings, X } from 'lucide-react';
 import type { TranslationKeys } from '~/hooks/useLocalize';
 import type { AgentItem } from './items/types';
@@ -74,36 +75,36 @@ function ToolRowImpl({ item, onInfo, onRemove }: Props) {
       )}
       <div
         className={cn(
-          'flex shrink-0 items-center gap-0.5 opacity-0',
-          'group-focus-within:opacity-100 group-hover:opacity-100',
+          'flex shrink-0 items-center gap-0.5',
+          'group-focus-within:opacity-100 group-hover:opacity-100 no-touch:opacity-0',
         )}
       >
-        <button
-          type="button"
+        <Button
+          variant="ghost"
+          size="icon-xs"
           onClick={() => onInfo(item)}
           aria-label={
             configurable ? localize('com_ui_tools_configure') : localize('com_ui_tools_info')
           }
           className={cn(
-            'flex size-6 items-center justify-center rounded-md text-text-secondary',
-            'hover:bg-surface-hover hover:text-text-primary',
-            'focus:outline-none focus-visible:opacity-100 focus-visible:ring-2 focus-visible:ring-ring-primary',
+            'rounded-md text-text-secondary',
+            'hover:text-text-secondary focus-visible:opacity-100',
           )}
         >
           <DetailIcon className="size-3.5" aria-hidden="true" />
-        </button>
-        <button
-          type="button"
+        </Button>
+        <Button
+          variant="ghost"
+          size="icon-xs"
           onClick={() => onRemove(item)}
           aria-label={localize('com_ui_tools_remove')}
           className={cn(
-            'flex size-6 items-center justify-center rounded-md text-text-secondary',
-            'hover:bg-surface-hover hover:text-text-primary',
-            'focus:outline-none focus-visible:opacity-100 focus-visible:ring-2 focus-visible:ring-ring-primary',
+            'rounded-md text-text-secondary',
+            'hover:text-text-secondary focus-visible:opacity-100',
           )}
         >
           <X className="size-3.5" aria-hidden="true" />
-        </button>
+        </Button>
       </div>
     </div>
   );

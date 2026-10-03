@@ -1,5 +1,6 @@
-import { createSSEUsageReader, observeAnthropicStreamUsage } from './streamUsage';
 import type { ObservedStreamUsage } from './streamUsage';
+import { createSSEUsageReader, observeAnthropicStreamUsage } from './streamUsage';
+import { getLLMConfig } from './llm';
 
 /** One SSE frame, terminated the way a real stream terminates it. */
 function frame(type: string, payload: Record<string, unknown>): string {
@@ -220,7 +221,11 @@ describe('observeAnthropicStreamUsage', () => {
               c.close();
             },
           }),
-          { status: 200, statusText: 'OK', headers: { 'content-type': 'text/event-stream', 'x-si-provider-family': 'anthropic' } },
+          {
+            status: 200,
+            statusText: 'OK',
+            headers: { 'content-type': 'text/event-stream', 'x-si-provider-family': 'anthropic' },
+          },
         ),
     );
     const response = await wrapped('https://example.invalid/v1/messages');
@@ -236,8 +241,6 @@ describe('getLLMConfig stream-usage gating', () => {
    * it, so there is nothing to recover and no reason to tee its stream — and
    * this is the endpoint carrying almost all of the spend.
    */
-  // eslint-disable-next-line @typescript-eslint/no-var-requires
-  const { getLLMConfig } = require('./llm') as typeof import('./llm');
 
   it('sets no custom fetch when no sink is supplied', () => {
     const { llmConfig } = getLLMConfig('sk-test', {
@@ -253,4 +256,4 @@ describe('getLLMConfig stream-usage gating', () => {
     });
     expect(typeof (llmConfig.clientOptions as { fetch?: unknown }).fetch).toBe('function');
   });
-})
+});

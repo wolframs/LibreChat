@@ -1,7 +1,7 @@
 import jwt from 'jsonwebtoken';
 import { SystemRoles } from 'librechat-data-provider';
-import type { IUser } from '@librechat/data-schemas';
 import type { NextFunction, Response } from 'express';
+import type { IUser } from '@librechat/data-schemas';
 import type { ServerRequest } from '~/types/http';
 
 interface BrowserSession {

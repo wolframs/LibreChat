@@ -13,8 +13,13 @@ export type TogglePatch =
   | { type: 'action-remove'; actionId: string };
 
 function builtinTogglePatch(id: string, selected: boolean): TogglePatch {
-  // Every BuiltinId string equals its AgentCapabilities enum value, so the id
-  // is already the form field name.
+  if (id === 'ask_user_question') {
+    // Native tool presented as a builtin — it has no capability field; the
+    // toggle edits agent.tools exactly like a plugin.
+    return selected ? { type: 'tool-remove', id } : { type: 'tool-add', id };
+  }
+  // Every other BuiltinId string equals its AgentCapabilities enum value, so
+  // the id is already the form field name.
   const field = id as AgentCapabilities;
   if (id === 'artifacts') {
     return { type: 'builtin', field, value: selected ? '' : ArtifactModes.DEFAULT };
@@ -44,28 +49,4 @@ export function computeToggleAction(item: AgentItem, state: { selected: boolean 
   return state.selected
     ? { type: 'action-remove', actionId: item.id }
     : { type: 'action-add', actionId: item.id };
-}
-
-/**
- * `skills_enabled` is the master opt-in for the skill allowlist, and an empty
- * allowlist with the flag on means the FULL accessible catalog. Selection
- * edits therefore sync the flag on empty/non-empty transitions: picking the
- * first skill turns it on so the choice takes effect, and removing the last
- * one turns it off so the agent doesn't silently escalate to every skill.
- * Edits within a non-empty selection return `undefined` (leave the flag
- * alone), preserving the Advanced kill switch's disable-without-clearing
- * behavior.
- */
-export function skillsEnabledTransition(
-  current: string[],
-  next: string[],
-  enabled: boolean | undefined,
-): boolean | undefined {
-  if (current.length === 0 && next.length > 0 && enabled !== true) {
-    return true;
-  }
-  if (current.length > 0 && next.length === 0 && enabled === true) {
-    return false;
-  }
-  return undefined;
 }

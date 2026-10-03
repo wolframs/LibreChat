@@ -9,12 +9,17 @@ const emptyInputs: BuildCatalogInputs = {
   mcpServersMap: new Map(),
   skills: [],
   actions: [],
-  permissions: { mcp: true, skills: true },
+  permissions: { mcp: true, skills: true, webSearch: true, runCode: true, fileSearch: true },
 };
 
 const toolInputs: BuildCatalogInputs = {
   ...emptyInputs,
   agentsConfig: { capabilities: [AgentCapabilities.tools] },
+};
+
+const askInputs: BuildCatalogInputs = {
+  ...emptyInputs,
+  agentsConfig: { capabilities: [AgentCapabilities.ask_user_question] },
 };
 
 describe('buildCatalog', () => {
@@ -57,13 +62,37 @@ describe('buildCatalog', () => {
     expect(systemDefined?.kind === 'builtin' && systemDefined.userProvidedAuth).toBe(false);
   });
 
+  test('surfaces ask_user_question as a BUILTIN (not a plugin) when the server lists it', () => {
+    const askPlugin = makePlugin({ pluginKey: 'ask_user_question', name: 'Ask User' });
+    const items = buildCatalog({ ...askInputs, regularTools: [askPlugin] });
+    const builtin = items.find((i) => i.kind === 'builtin' && i.id === 'ask_user_question');
+    expect(builtin).toBeDefined();
+    expect(builtin?.iconKey).toBe('ask_user_question');
+    // never double-listed in the plugin section
+    expect(items.find((i) => i.kind === 'tool' && i.id === 'ask_user_question')).toBeUndefined();
+  });
+
+  test('gates the ask_user_question builtin on its OWN capability, not the generic tools one', () => {
+    const askPlugin = makePlugin({ pluginKey: 'ask_user_question', name: 'Ask User' });
+    // admin filtered (not in regularTools) despite the capability being on
+    expect(
+      buildCatalog(askInputs).find((i) => i.kind === 'builtin' && i.id === 'ask_user_question'),
+    ).toBeUndefined();
+    // ask_user_question capability off — the generic `tools` capability does NOT stand in for it
+    expect(
+      buildCatalog({ ...toolInputs, regularTools: [askPlugin] }).find(
+        (i) => i.kind === 'builtin' && i.id === 'ask_user_question',
+      ),
+    ).toBeUndefined();
+  });
+
   test('hides MCP items when the user lacks MCP permission', () => {
     const map = new Map();
     map.set('srv', { serverName: 'srv', isConfigured: true, tools: [] });
     const items = buildCatalog({
       ...emptyInputs,
       mcpServersMap: map,
-      permissions: { mcp: false, skills: true },
+      permissions: { ...emptyInputs.permissions, mcp: false },
     });
     expect(items.find((i) => i.kind === 'mcp')).toBeUndefined();
   });
@@ -217,6 +246,42 @@ describe('buildCatalog', () => {
     if (action?.kind === 'action') {
       expect(action.endpointCount).toBe(2);
     }
+  });
+
+  describe.each([
+    { cap: AgentCapabilities.web_search, field: 'webSearch' as const },
+    { cap: AgentCapabilities.execute_code, field: 'runCode' as const },
+    { cap: AgentCapabilities.file_search, field: 'fileSearch' as const },
+  ])('gates the $cap builtin on its role permission', ({ cap, field }) => {
+    const findBuiltin = (items: ReturnType<typeof buildCatalog>) =>
+      items.find((i) => i.kind === 'builtin' && i.id === cap);
+
+    test('absent when the role permission is false and the capability is enabled', () => {
+      const items = buildCatalog({
+        ...emptyInputs,
+        agentsConfig: { capabilities: [cap] },
+        permissions: { ...emptyInputs.permissions, [field]: false },
+      });
+      expect(findBuiltin(items)).toBeUndefined();
+    });
+
+    test('present when both the role permission and the capability are true', () => {
+      const items = buildCatalog({
+        ...emptyInputs,
+        agentsConfig: { capabilities: [cap] },
+        permissions: { ...emptyInputs.permissions, [field]: true },
+      });
+      expect(findBuiltin(items)).toBeDefined();
+    });
+
+    test('absent when the capability is off regardless of the role grant', () => {
+      const items = buildCatalog({
+        ...emptyInputs,
+        agentsConfig: { capabilities: [] },
+        permissions: { ...emptyInputs.permissions, [field]: true },
+      });
+      expect(findBuiltin(items)).toBeUndefined();
+    });
   });
 
   test('returns items in stable order: builtin -> mcp -> tool -> skill -> action', () => {

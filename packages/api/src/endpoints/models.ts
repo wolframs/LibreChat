@@ -113,6 +113,7 @@ async function fetchOllamaModels(
   const resolvedHeaders = resolveHeaders({
     headers: options.headers ?? undefined,
     user: options.user,
+    stripUnresolved: true,
   });
 
   const requestOptions: AxiosRequestConfig & {
@@ -258,6 +259,7 @@ export async function fetchModels({
     const resolvedHeaders = resolveHeaders({
       headers: headers ?? undefined,
       user: userObject,
+      stripUnresolved: true,
     });
 
     const options: AxiosRequestConfig & {
@@ -310,7 +312,12 @@ export async function fetchModels({
      * Without this, the fetch 404s and the picker silently falls back to
      * `models.default`.
      */
-    const modelsPath = azure ? '' : isAnthropicProvider ? '/v1/models' : '/models';
+    let modelsPath = '/models';
+    if (azure) {
+      modelsPath = '';
+    } else if (isAnthropicProvider) {
+      modelsPath = '/v1/models';
+    }
     const url = new URL(`${(baseURL ?? '').replace(/\/+$/, '')}${modelsPath}`);
     if (user && userIdQuery) {
       url.searchParams.append('user', user);

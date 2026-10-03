@@ -1,25 +1,36 @@
 import { useState, useMemo, useCallback } from 'react';
 import { Plus } from 'lucide-react';
-import { useFormContext } from 'react-hook-form';
+import { useFormContext, useWatch } from 'react-hook-form';
 import { Label, OGDialog, OGDialogTemplate, useToastContext } from '@librechat/client';
-import { PermissionTypes, Permissions, AgentCapabilities } from 'librechat-data-provider';
+import {
+  PermissionTypes,
+  Permissions,
+  SkillsScope,
+  AgentCapabilities,
+  resolveAgentSkillsScope,
+  removeCodeExecutionCaller,
+} from 'librechat-data-provider';
 import type { TPlugin } from 'librechat-data-provider';
+import type { CapabilityFileCounts } from './items/capabilities';
 import type { AgentItem } from './items/types';
 import type { AgentForm } from '~/common';
 import {
+  useAgentFileEntries,
   useAgentItems,
   useResolvedSkills,
-  useAgentFileEntries,
   useUninstallToolCredentials,
 } from './hooks';
-import { computeToggleAction, skillsEnabledTransition } from './items/mutations';
-import { useListSkillsQuery, useDeleteAgentAction } from '~/data-provider';
+import { useSkillsInfiniteQuery, useDeleteAgentAction } from '~/data-provider';
+import { requiresFileManagerRemoval } from './items/capabilities';
 import { useRemoveMCPTool, useVisibleTools } from '~/hooks/MCP';
 import ToolsMarketplaceDialog from './ToolsMarketplaceDialog';
+import { computeToggleAction } from './items/mutations';
 import { useLocalize, useHasAccess } from '~/hooks';
 import { useAgentPanelContext } from '~/Providers';
 import ItemDialog from './ItemDialog/ItemDialog';
+import { mcpAllToken } from './items/selectors';
 import { isEphemeralAgent } from '~/common';
+import SkillsSection from './SkillsSection';
 import SkillsDialog from './SkillsDialog';
 import ToolRow from './ToolRow';
 
@@ -36,9 +47,10 @@ export default function ToolsSection({ agentId }: Props) {
   const [pendingActionRemoval, setPendingActionRemoval] = useState<string | null>(null);
   const [pendingMcpRemoval, setPendingMcpRemoval] = useState<string | null>(null);
 
-  const { getValues, setValue } = useFormContext<AgentForm>();
+  const { control, getValues, setValue } = useFormContext<AgentForm>();
   const { agentsConfig, regularTools, mcpServersMap } = useAgentPanelContext();
-  const { removeTool: removeMCPTool } = useRemoveMCPTool();
+  const mcpServerNames = useMemo(() => Array.from(mcpServersMap?.keys() ?? []), [mcpServersMap]);
+  const { removeTool: removeMCPTool } = useRemoveMCPTool({ serverNames: mcpServerNames });
   const deleteAgentAction = useDeleteAgentAction({
     onSuccess: () => {
       showToast({
@@ -63,11 +75,28 @@ export default function ToolsSection({ agentId }: Props) {
     [agentsConfig],
   );
   const showSkills = hasSkillsAccess && skillsEnabled;
-  const { data: skillsData } = useListSkillsQuery({ limit: 100 }, { enabled: showSkills });
-  const resolvedSkills = useResolvedSkills(skillsData?.skills);
+  /** The same infinite query the section and the picker use, so all three
+   *  consumers share one cache entry and one request. A plain list query hits
+   *  the same endpoint under a different key, which React Query cannot
+   *  deduplicate: the first page would be fetched twice. Only the first page
+   *  is needed here, and pagination stays driven by whoever opens a list. */
+  const { data: skillsData } = useSkillsInfiniteQuery({ limit: 100 }, { enabled: showSkills });
+  /** `undefined` until the first page lands: `useResolvedSkills` treats it as
+   *  "not loaded yet" and skips its per-id fallback lookups. */
+  const skillSummaries = useMemo(
+    () => (skillsData ? skillsData.pages.flatMap((page) => page.skills) : undefined),
+    [skillsData],
+  );
+  const skillsValue = useWatch({ control, name: 'skills' });
+  const skillsEnabledValue = useWatch({ control, name: 'skills_enabled' });
+  const skillsScopeValue = useWatch({ control, name: 'skills_scope' });
+  /** Only Selected renders allowlist rows, so the per-id fallback lookups are
+   *  worth issuing only there. An All-scoped agent keeps its previous picks,
+   *  which would otherwise cost one request per retained id on every view. */
+  const skillsMode = resolveAgentSkillsScope(skillsValue, skillsEnabledValue, skillsScopeValue);
+  const resolvedSkills = useResolvedSkills(skillSummaries, skillsMode === SkillsScope.selected);
 
   const uninstallToolCredentials = useUninstallToolCredentials();
-  const { knowledgeFiles, codeFiles } = useAgentFileEntries();
 
   const { selected, tools } = useAgentItems({
     agentId,
@@ -75,27 +104,16 @@ export default function ToolsSection({ agentId }: Props) {
     skillsPermission: showSkills,
   });
 
-  /** File-backed built-ins stay selected while they hold files, so flipping
-   * the capability flag off would leave the row visible. Route their removal
-   * to the config dialog (where files are managed) instead, mirroring the
-   * file-only `context` built-in. */
+  const { knowledgeFiles, codeFiles } = useAgentFileEntries();
+  const fileCounts: CapabilityFileCounts = useMemo(
+    () => ({ knowledge_files: knowledgeFiles.length, code_files: codeFiles.length }),
+    [knowledgeFiles, codeFiles],
+  );
+
   const opensFileManagerOnRemove = useCallback(
-    (item: AgentItem): boolean => {
-      if (item.kind !== 'builtin') {
-        return false;
-      }
-      if (item.id === 'context') {
-        return true;
-      }
-      if (item.id === 'execute_code') {
-        return codeFiles.length > 0;
-      }
-      if (item.id === 'file_search') {
-        return knowledgeFiles.length > 0;
-      }
-      return false;
-    },
-    [codeFiles, knowledgeFiles],
+    (item: AgentItem): boolean =>
+      item.kind === 'builtin' && requiresFileManagerRemoval(item.id, fileCounts),
+    [fileCounts],
   );
 
   const handleQuickRemove = useCallback(
@@ -108,6 +126,11 @@ export default function ToolsSection({ agentId }: Props) {
       switch (patch.type) {
         case 'builtin':
           setValue(patch.field as keyof AgentForm, patch.value as never, { shouldDirty: true });
+          if (patch.field === AgentCapabilities.execute_code && patch.value === false) {
+            setValue('tool_options', removeCodeExecutionCaller(getValues('tool_options')), {
+              shouldDirty: true,
+            });
+          }
           break;
         case 'tool-remove': {
           const current = (getValues('tools') ?? []) as string[];
@@ -120,13 +143,14 @@ export default function ToolsSection({ agentId }: Props) {
           break;
         }
         case 'skill-remove': {
+          /** The mode is explicit, so emptying the allowlist stays in
+           *  `selected` rather than silently disabling skills. */
           const current = (getValues('skills') ?? []) as string[];
-          const next = current.filter((s) => s !== patch.id);
-          setValue('skills', next, { shouldDirty: true });
-          const flag = skillsEnabledTransition(current, next, getValues('skills_enabled'));
-          if (flag !== undefined) {
-            setValue('skills_enabled', flag, { shouldDirty: true });
-          }
+          setValue(
+            'skills',
+            current.filter((s) => s !== patch.id),
+            { shouldDirty: true },
+          );
           break;
         }
         case 'mcp-remove':
@@ -210,7 +234,9 @@ export default function ToolsSection({ agentId }: Props) {
         item.kind === 'mcp'
           ? {
               ...item,
-              toolCount: (item.server.tools ?? []).filter((t) => enabled.has(t.tool_id)).length,
+              toolCount: enabled.has(mcpAllToken(item.id))
+                ? (item.server.tools ?? []).length
+                : (item.server.tools ?? []).filter((t) => enabled.has(t.tool_id)).length,
             }
           : item,
       );
@@ -231,11 +257,7 @@ export default function ToolsSection({ agentId }: Props) {
         onRemove={handleQuickRemove}
       />
       {showSkills && (
-        <SelectedSection
-          title={localize('com_ui_skills')}
-          addLabel={localize('com_ui_add_skills')}
-          emptyLabel={localize('com_ui_skills_empty')}
-          emptyHint={localize('com_ui_skills_empty_hint')}
+        <SkillsSection
           items={skillItems}
           onAdd={() => setSkillsOpen(true)}
           onInfo={setDialogItem}
@@ -267,7 +289,7 @@ export default function ToolsSection({ agentId }: Props) {
           selection={{
             selectHandler: confirmActionRemoval,
             selectClasses:
-              'bg-red-700 dark:bg-red-600 hover:bg-red-800 dark:hover:bg-red-800 transition-color duration-200 text-white',
+              'bg-surface-destructive hover:bg-surface-destructive-hover transition-colors duration-200 text-text-on-status',
             selectText: localize('com_ui_delete'),
           }}
         />
@@ -292,7 +314,7 @@ export default function ToolsSection({ agentId }: Props) {
           selection={{
             selectHandler: confirmMcpRemoval,
             selectClasses:
-              'bg-red-700 dark:bg-red-600 hover:bg-red-800 dark:hover:bg-red-800 transition-color duration-200 text-white',
+              'bg-surface-destructive hover:bg-surface-destructive-hover transition-colors duration-200 text-text-on-status',
             selectText: localize('com_ui_delete'),
           }}
         />
@@ -323,14 +345,15 @@ function SelectedSection({
   onRemove,
 }: SelectedSectionProps) {
   const localize = useLocalize();
+  const badge = items.length > 0 ? String(items.length) : undefined;
   return (
     <div className="mb-3 flex flex-col">
       <div className="mb-1 flex items-center justify-between">
         <label className="block text-[11px] font-medium uppercase tracking-wide text-text-secondary">
           {title}
-          {items.length > 0 && (
+          {badge != null && (
             <span className="ml-1.5 inline-flex h-4 min-w-[16px] items-center justify-center rounded-full bg-surface-tertiary px-1.5 text-[10px] font-medium normal-case tracking-normal text-text-secondary">
-              {items.length}
+              {badge}
             </span>
           )}
         </label>
@@ -338,7 +361,7 @@ function SelectedSection({
           type="button"
           onClick={onAdd}
           aria-label={addLabel}
-          className="inline-flex h-7 items-center gap-1.5 rounded-lg px-2 text-xs font-medium text-text-secondary transition-colors hover:bg-surface-secondary hover:text-text-primary focus:outline-none focus-visible:ring-2 focus-visible:ring-ring-primary"
+          className="inline-flex h-7 items-center gap-1.5 rounded-lg px-2 text-xs font-medium text-text-secondary transition hover:bg-surface-secondary hover:text-text-primary focus:outline-none focus-visible:ring-2 focus-visible:ring-ring-primary"
         >
           <Plus className="h-3.5 w-3.5" strokeWidth={1.75} aria-hidden="true" />
           {localize('com_ui_add')}

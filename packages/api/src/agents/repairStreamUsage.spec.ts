@@ -1,6 +1,6 @@
-import { repairStreamUsage } from './usage';
 import type { UsageMetadata } from '@librechat/agents';
 import type { ObservedStreamUsage } from '~/endpoints/anthropic/streamUsage';
+import { repairStreamUsage } from './usage';
 
 /** What the parser produces for a gateway that reports usage on message_delta. */
 function broken(outputTokens: number): UsageMetadata {
@@ -121,9 +121,7 @@ describe('repairStreamUsage', () => {
 
   it('skips null entries without throwing', () => {
     const collected = [null as unknown as UsageMetadata, broken(5)];
-    expect(
-      repairStreamUsage(collected, [observed({ inputTokens: 3, outputTokens: 5 })]),
-    ).toBe(1);
+    expect(repairStreamUsage(collected, [observed({ inputTokens: 3, outputTokens: 5 })])).toBe(1);
     expect(collected[1].input_tokens).toBe(3);
   });
 

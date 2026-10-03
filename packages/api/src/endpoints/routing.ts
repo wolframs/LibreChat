@@ -1,5 +1,5 @@
-import type { ServerRequest } from '~/types';
 import type { StreamUsageSink } from '~/endpoints/anthropic/streamUsage';
+import type { ServerRequest } from '~/types';
 
 /**
  * Records where a request is actually being sent, once its endpoint initializer
@@ -22,7 +22,7 @@ import type { StreamUsageSink } from '~/endpoints/anthropic/streamUsage';
  * downstream from `baseURL`, so adding a gateway never means changing this.
  */
 export function markRequestRouting(
-  req: ServerRequest | undefined,
+  req: Pick<ServerRequest, 'routedVia' | 'observedStreamUsage'> | undefined,
   { endpoint, baseURL }: { endpoint?: string; baseURL?: string | null },
 ): void {
   if (!req || !baseURL) {
@@ -45,7 +45,9 @@ export function markRequestRouting(
  * the cost of not attaching it, against such a gateway, is every request billing
  * as zero input tokens.
  */
-export function attachStreamUsageSink(req: ServerRequest | undefined): StreamUsageSink | undefined {
+export function attachStreamUsageSink(
+  req: Pick<ServerRequest, 'routedVia' | 'observedStreamUsage'> | undefined,
+): StreamUsageSink | undefined {
   if (!req) {
     return undefined;
   }

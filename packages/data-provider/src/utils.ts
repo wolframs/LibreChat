@@ -83,4 +83,3 @@ export function extractEnvVariable(value: string) {
 export function normalizeEndpointName(name = ''): string {
   return name.toLowerCase() === 'ollama' ? 'ollama' : name;
 }
-
